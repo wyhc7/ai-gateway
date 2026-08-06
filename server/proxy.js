@@ -23,6 +23,11 @@ const COOLDOWN_MS = {
   network: 30 * 1000
 }
 
+const STREAM_CONNECT_TIMEOUT_MS = 1800000
+const JSON_CONNECT_TIMEOUT_MS = 600000
+const SSE_HEARTBEAT_INTERVAL_MS = 30000
+const STREAM_IDLE_TIMEOUT_MS = 300000
+
 export const DEFAULT_PROTOCOL = 'openai-chat'
 
 const PROTOCOLS = {
@@ -299,12 +304,13 @@ async function forwardWithFailover(provider, kind, body, res) {
   const startIdx = nextRoundRobin(provider.id, keys)
   const attempts = []
   let started = false
+  const connectTimeoutMs = body?.stream ? STREAM_CONNECT_TIMEOUT_MS : JSON_CONNECT_TIMEOUT_MS
   for (let i = 0; i < keys.length; i += 1) {
     const key = keys[(startIdx + i) % keys.length]
     const upstream = joinUrl(provider.base_url, path, queryAuth(plan, key.api_key))
     try {
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 600000)
+      const timer = setTimeout(() => controller.abort(), connectTimeoutMs)
       const resp = await fetch(upstream, {
         method: kind === 'chat' ? 'POST' : plan.modelsMethod,
         headers: buildHeaders(provider, plan, key.api_key),
@@ -331,13 +337,35 @@ async function forwardWithFailover(provider, kind, body, res) {
         let lastUsageData = null
         let sseBuffer = ''
         let sawTerminator = false
-        const onClientClose = () => controller.abort()
+        let clientClosed = false
+        const lastActivity = { t: Date.now() }
+
+        const onClientClose = () => {
+          clientClosed = true
+          controller.abort()
+        }
         res.on('close', onClientClose)
+
+        const watcher = setInterval(() => {
+          const idle = Date.now() - lastActivity.t
+          if (idle >= STREAM_IDLE_TIMEOUT_MS) {
+            controller.abort()
+            return
+          }
+          if (idle >= SSE_HEARTBEAT_INTERVAL_MS && !res.writableEnded) {
+            try { res.write(': keep-alive\n\n') } catch { /* socket 已关闭 */ }
+          }
+        }, 5000)
+        if (watcher.unref) watcher.unref()
+
         try {
           while (true) {
             const { done, value } = await reader.read()
             if (done) break
-            res.write(value)
+            if (value && value.byteLength > 0) {
+              res.write(value)
+              lastActivity.t = Date.now()
+            }
             sseBuffer += textDecoder.decode(value, { stream: true })
             const parsed = parseSseUsage(sseBuffer)
             sseBuffer = parsed.rest
@@ -345,11 +373,21 @@ async function forwardWithFailover(provider, kind, body, res) {
             if (parsed.sawTerminator) sawTerminator = true
           }
         } catch (err) {
-          applyCooldown(key, 'network')
+          const isClientAbort =
+            clientClosed ||
+            err.code === 'ERR_STREAM_PREMATURE_CLOSE' ||
+            err.code === 'ERR_STREAM_DESTROYED'
+          if (!isClientAbort) {
+            applyCooldown(key, 'network')
+            markResult(provider.id, false)
+          }
           if (!res.writableEnded) res.end()
-          markResult(provider.id, false)
-          return { ok: false, error: err.name === 'AbortError' ? '上游请求超时' : `流式转发中断: ${err.message}` }
+          return {
+            ok: false,
+            error: err.name === 'AbortError' ? '上游请求超时或长时间无响应' : `流式转发中断: ${err.message}`
+          }
         } finally {
+          clearInterval(watcher)
           res.removeListener('close', onClientClose)
           reader.cancel().catch(() => {})
         }
@@ -365,7 +403,16 @@ async function forwardWithFailover(provider, kind, body, res) {
         return { ok: true }
       }
       if (resp.body) {
-        const text = await resp.text()
+        let text
+        try {
+          text = await readJsonBody(resp, JSON_CONNECT_TIMEOUT_MS, controller)
+        } catch (err) {
+          const msg = err.name === 'AbortError' ? '上游响应超时' : `上游读取失败: ${err.message}`
+          attempts.push(`${key.name || key.id.slice(0, 8)}: ${msg}`)
+          applyCooldown(key, 'network')
+          bumpFailover()
+          continue
+        }
         if (!res.writableEnded) res.end(text)
         try {
           const data = JSON.parse(text)
@@ -404,6 +451,12 @@ function respondJson(res, status, payload) {
     res.status(status).setHeader('Content-Type', 'application/json')
   }
   res.end(JSON.stringify(payload))
+}
+
+function readJsonBody(resp, ms, controller) {
+  const timer = setTimeout(() => controller.abort(), ms)
+  if (timer.unref) timer.unref()
+  return resp.text().finally(() => clearTimeout(timer))
 }
 
 export async function handleChat(req, res) {
