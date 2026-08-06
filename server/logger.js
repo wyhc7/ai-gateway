@@ -6,6 +6,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const DATA_DIR = process.env.DATA_DIR || join(__dirname, 'data')
 const LOG_PATH = join(DATA_DIR, 'logs.jsonl')
 const MAX_MEMORY = 500
+// 使用可配置时区显示日志时间（默认北京时间），避免 UTC 导致的 8 小时偏差
+const TIME_ZONE = process.env.TIME_ZONE || 'Asia/Shanghai'
 // 批量落盘：每 10 秒把攒下的日志一次性写入磁盘，避免每条日志同步写盘阻塞事件循环
 const FLUSH_INTERVAL_MS = 10000
 // 日志文件超过该大小（2MB）时自动截断，防止长期运行无限增长
@@ -15,6 +17,23 @@ let _seq = 0
 
 const logs = []
 let _pending = []
+
+// 按配置时区（默认 Asia/Shanghai）格式化当前时间，与 store.js 的今日统计保持一致
+function nowStr() {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).formatToParts(new Date())
+  const get = (type) => parts.find((p) => p.type === type)?.value || ''
+  const hour = get('hour') === '24' ? '00' : get('hour')
+  return `${get('year')}-${get('month')}-${get('day')} ${hour}:${get('minute')}:${get('second')}`
+}
 
 function loadFromFile() {
   if (!existsSync(LOG_PATH)) return
@@ -86,7 +105,7 @@ export function addLog(entry) {
   const rec = {
     id: `${Date.now().toString(36)}-${_seq.toString(36)}`,
     ts: Date.now(),
-    time: new Date().toISOString().slice(0, 19).replace('T', ' '),
+    time: nowStr(),
     ...entry
   }
   logs.push(rec)
