@@ -43,7 +43,7 @@
       </div>
       <div class="toolbar-stats muted">
         <span>共 {{ logs.length }} 条记录（最近 {{ limit }} 条）</span>
-        <span v-if="autoRefresh" class="live-dot"><i class="dot"></i>每 3 秒自动刷新</span>
+        <span v-if="autoRefresh" class="live-dot"><i class="dot"></i>每 10 秒自动刷新</span>
       </div>
     </div>
 
@@ -186,7 +186,8 @@ function onAutoRefreshChange(val) {
 
 function startTimer() {
   stopTimer()
-  timer = setInterval(loadLogs, 3000)
+  // 与后端 10 秒批量落盘保持一致
+  timer = setInterval(loadLogs, 10000)
 }
 
 function stopTimer() {
