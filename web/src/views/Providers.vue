@@ -440,7 +440,8 @@ async function saveProvider() {
     model_names
   }
   for (const field of ['auth_type', 'auth_header', 'auth_prefix', 'auth_query_param', 'chat_path', 'models_path', 'models_method']) {
-    if (providerForm.value[field]) payload[field] = providerForm.value[field]
+    // 始终提交（含空字符串）：空值 = 清空自定义配置、回退到协议默认
+    payload[field] = providerForm.value[field] || ''
   }
   if (!editingProvider.value && providerForm.value.api_key) {
     payload.api_key = providerForm.value.api_key

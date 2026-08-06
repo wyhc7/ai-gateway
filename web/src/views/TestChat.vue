@@ -75,6 +75,14 @@ async function loadModels() {
     const resp = await fetch('/api/v1/models', {
       headers: gatewayKey.value ? { Authorization: `Bearer ${gatewayKey.value}` } : {}
     })
+    if (!resp.ok) {
+      let msg = `HTTP ${resp.status}`
+      try {
+        const data = await resp.json()
+        msg = data?.error?.message || msg
+      } catch { /* ignore */ }
+      throw new Error(msg)
+    }
     const data = await resp.json()
     allModels.value = data.data || []
   } catch (e) {

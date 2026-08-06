@@ -34,7 +34,18 @@ export const api = {
   updateKey: (id, keyId, data) => request(`/api/providers/${id}/keys/${keyId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteKey: (id, keyId) => request(`/api/providers/${id}/keys/${keyId}`, { method: 'DELETE' }),
   resetKey: (id, keyId) => request(`/api/providers/${id}/keys/${keyId}/reset`, { method: 'POST' }),
-  exportProviders: () => fetch('/api/providers/export').then((r) => r.blob()),
+  exportProviders: async () => {
+    const resp = await fetch('/api/providers/export')
+    if (!resp.ok) {
+      let msg = `HTTP ${resp.status}`
+      try {
+        const data = await resp.json()
+        msg = data?.error?.message || msg
+      } catch { /* ignore */ }
+      throw new Error(msg)
+    }
+    return resp.blob()
+  },
   importProviders: (data) => request('/api/providers/import', { method: 'POST', body: JSON.stringify(data) })
 }
 

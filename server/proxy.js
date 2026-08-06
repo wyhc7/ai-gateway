@@ -15,7 +15,8 @@ function extractTokenCount(usage) {
   return tokenCount != null ? Number(tokenCount) : null
 }
 
-const RETRYABLE_STATUS = new Set([401, 403, 429])
+// 鉴权失败/限流/上游 5xx 均触发 Key 自动切换（5xx 冷却回退到 network 30s）
+const RETRYABLE_STATUS = new Set([401, 403, 429, 500, 502, 503, 504])
 const COOLDOWN_MS = {
   401: 10 * 60 * 1000,
   403: 10 * 60 * 1000,
@@ -46,7 +47,7 @@ export function callPlan(provider) {
   return {
     auth: provider.auth_type || proto.auth,
     authHeader: provider.auth_header || proto.authHeader,
-    authPrefix: provider.auth_prefix !== undefined ? provider.auth_prefix : proto.authPrefix,
+    authPrefix: provider.auth_prefix || proto.authPrefix,
     authQueryParam: provider.auth_query_param || 'api_key',
     chatPath: provider.chat_path || proto.chatPath,
     modelsPath: provider.models_path || proto.modelsPath,
@@ -314,7 +315,7 @@ async function forwardWithFailover(provider, kind, body, res) {
       const resp = await fetch(upstream, {
         method: kind === 'chat' ? 'POST' : plan.modelsMethod,
         headers: buildHeaders(provider, plan, key.api_key),
-        body: JSON.stringify(body),
+        body: kind === 'chat' ? JSON.stringify(body) : undefined,
         signal: controller.signal
       })
       clearTimeout(timer)
@@ -392,13 +393,10 @@ async function forwardWithFailover(provider, kind, body, res) {
           reader.cancel().catch(() => {})
         }
         if (!res.writableEnded) res.end()
-        if (sawTerminator) {
-          markResult(provider.id, true)
-          if (lastUsageData) {
-            bumpTokens(provider.id, extractTokenCount(lastUsageData))
-          }
-        } else {
-          markResult(provider.id, false)
+        // 流式数据完整读完即视为成功（部分上游不发送 [DONE]/message_stop 终止符）
+        markResult(provider.id, true)
+        if (lastUsageData) {
+          bumpTokens(provider.id, extractTokenCount(lastUsageData))
         }
         return { ok: true }
       }

@@ -31,8 +31,18 @@ const DEFAULT_STATE = () => ({
   created_at: Date.now()
 })
 
+// 使用可配置时区计算"今日"（默认北京时间），避免 UTC 导致的跨日统计错位
+const TIME_ZONE = process.env.TIME_ZONE || 'Asia/Shanghai'
+
 export function todayKey() {
-  return new Date().toISOString().slice(0, 10)
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).formatToParts(new Date())
+  const get = (type) => parts.find((p) => p.type === type)?.value || ''
+  return `${get('year')}-${get('month')}-${get('day')}`
 }
 
 export function genId() {
@@ -96,6 +106,19 @@ function load() {
   if (existsSync(BACKUP_PATH)) {
     const backup = tryParseJSON(readFileSync(BACKUP_PATH, 'utf-8'))
     if (backup && backup.providers) {
+      let changed = false
+      if (!backup.gateway_api_key) {
+        backup.gateway_api_key = `gk-${crypto.randomUUID()}`
+        changed = true
+      }
+      if (!backup.stats) {
+        backup.stats = defaultStats()
+        changed = true
+      } else {
+        const before = JSON.stringify(backup.stats)
+        backup.stats = ensureStats(backup.stats)
+        if (JSON.stringify(backup.stats) !== before) changed = true
+      }
       console.error(`[store] 已从备份恢复 ${backup.providers.length} 个平台`)
       writeFileSync(CONFIG_PATH, JSON.stringify(backup, null, 2), 'utf-8')
       return backup

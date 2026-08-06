@@ -39,7 +39,7 @@ function maskKey(value) {
 function serializeProvider(p) {
   return {
     ...p,
-    keys: p.keys.map((k) => ({
+    keys: (p.keys || []).map((k) => ({
       ...k,
       api_key: maskKey(k.api_key),
       api_key_present: Boolean(k.api_key)
@@ -323,6 +323,13 @@ if (existsSync(join(WEB_DIST, 'index.html'))) {
   app.use((req, res, next) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next()
     if (req.path.startsWith('/api/')) return next()
+    // 不存在的静态资源直接 404，避免返回 index.html 造成 MIME 错误难以排查
+    if (req.path !== '/') {
+      const filePath = join(WEB_DIST, req.path.replace(/^\//, ''))
+      if (!existsSync(filePath)) {
+        return res.status(404).send('Not Found')
+      }
+    }
     res.sendFile(join(WEB_DIST, 'index.html'))
   })
   console.log(`[gateway] 生产模式已加载管理界面: ${WEB_DIST}`)
