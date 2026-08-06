@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { state, persist, persistImmediate, getProvider, genId, todayKey } from './store.js'
 import { handleChat, handleModels, refreshModels, previewModels, DEFAULT_PROTOCOL } from './proxy.js'
 import { TEMPLATES } from './templates.js'
+import { addLog, getLogs, initLogger } from './logger.js'
 
 const app = express()
 const PORT = process.env.PORT || 3001
@@ -25,7 +26,12 @@ app.use((err, req, res, next) => {
 app.use((req, res, next) => {
   const start = Date.now()
   res.on('finish', () => {
-    console.log(`${new Date().toISOString().slice(0, 19).replace('T', ' ')} ${res.statusCode} ${req.method} ${req.path} ${Date.now() - start}ms`)
+    const ms = Date.now() - start
+    console.log(`${new Date().toISOString().slice(0, 19).replace('T', ' ')} ${res.statusCode} ${req.method} ${req.path} ${ms}ms`)
+    // 记录到运行日志（chat 请求由 handleChat 单独记录更详细的信息，避免重复）
+    if (!req.path.startsWith('/api/v1/chat/completions')) {
+      addLog({ type: 'api', method: req.method, path: req.path, status: res.statusCode, duration_ms: ms })
+    }
   })
   next()
 })
@@ -318,6 +324,16 @@ app.post('/api/providers/import', (req, res) => {
 
 app.get('/api/health', (req, res) => res.json({ ok: true, uptime: process.uptime() }))
 
+app.get('/api/logs', (req, res) => {
+  const logs = getLogs({
+    limit: req.query.limit,
+    type: req.query.type,
+    status: req.query.status,
+    q: req.query.q
+  })
+  res.json({ logs })
+})
+
 if (existsSync(join(WEB_DIST, 'index.html'))) {
   app.use(express.static(WEB_DIST))
   app.use((req, res, next) => {
@@ -336,7 +352,9 @@ if (existsSync(join(WEB_DIST, 'index.html'))) {
 }
 
 app.listen(PORT, '0.0.0.0', () => {
+  initLogger()
   console.log(`[gateway] AI 中转站后端已启动: http://0.0.0.0:${PORT}`)
+  addLog({ type: 'system', method: '-', path: '-', status: 0, detail: `AI 中转站后端启动（端口 ${PORT}，${state.providers.length} 个平台）` })
 })
 
 setInterval(() => {

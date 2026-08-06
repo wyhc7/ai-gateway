@@ -1,4 +1,5 @@
 import { state, getProvider, bumpStats, bumpFailover, markResult, bumpTokens, persist, persistImmediate } from './store.js'
+import { addLog } from './logger.js'
 
 function extractTokenCount(usage) {
   if (!usage) return null
@@ -462,15 +463,34 @@ export async function handleChat(req, res) {
   const provider = matchProvider(model, providerIdHint)
   bumpStats(provider?.id)
   const startTime = Date.now()
+  const baseLog = {
+    type: 'chat',
+    method: 'POST',
+    path: '/api/v1/chat/completions',
+    model,
+    provider_id: provider?.id || null,
+    provider_name: provider?.name || null,
+    stream: Boolean(body?.stream)
+  }
   if (!provider) {
     markResult(null, false)
+    addLog({ ...baseLog, status: 404, error: `未找到提供模型 "${model}" 的平台` })
     return respondJson(res, 404, { error: { message: `未找到提供模型 "${model}" 的平台，请先在平台管理中刷新模型列表`, type: 'model_not_found' } })
   }
   if (!provider.base_url) {
     markResult(provider.id, false)
+    addLog({ ...baseLog, status: 400, error: '平台缺少 Base URL' })
     return respondJson(res, 400, { error: { message: '平台缺少 Base URL', type: 'bad_config' } })
   }
   const result = await forwardWithFailover(provider, 'chat', body, res)
+  addLog({
+    ...baseLog,
+    status: res.statusCode || (result.ok ? 200 : 502),
+    ok: result.ok,
+    key: res.getHeader('X-Upstream-Key') || undefined,
+    duration_ms: Date.now() - startTime,
+    error: result.ok ? undefined : (result.error || '')
+  })
 }
 
 export function handleModels(req, res) {
