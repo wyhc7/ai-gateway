@@ -330,8 +330,11 @@ async function forwardWithFailover(provider, kind, body, res) {
       started = true
       res.status(resp.status)
       const contentType = resp.headers.get('content-type') || ''
-      if (contentType) res.setHeader('Content-Type', contentType)
-      res.setHeader('X-Upstream-Key', key.name || key.id)
+      const safeContentType = safeHeaderValue(contentType)
+      if (safeContentType) res.setHeader('Content-Type', safeContentType)
+      // Key 名称可能是中文（如"永久1"），必须过滤为 ASCII 后再放入响应头
+      const upstreamKeyName = safeHeaderValue(key.name) || key.id
+      res.setHeader('X-Upstream-Key', upstreamKeyName)
       const isStream = resp.body && contentType.toLowerCase().includes('text/event-stream')
       if (isStream) {
         const reader = resp.body.getReader()
@@ -445,6 +448,12 @@ async function forwardWithFailover(provider, kind, body, res) {
   respondJson(res, 502, { error: { message: `所有 Key 均请求失败（已自动切换 ${attempts.length} 次）：${attempts.join('；')}`, type: 'all_keys_failed' } })
   return { ok: false, error: `所有 Key 均请求失败（已自动切换 ${attempts.length} 次）：${attempts.join('；')}` }
 }
+// HTTP 响应头值只允许 ASCII 可见字符，过滤中文等非法字符避免 ERR_INVALID_CHAR
+function safeHeaderValue(value) {
+  if (value == null) return ''
+  return String(value).replace(/[^\x09\x0A\x0D\x20-\x7E]/g, '')
+}
+
 function respondJson(res, status, payload) {
   if (!res.headersSent) {
     res.status(status).setHeader('Content-Type', 'application/json')
