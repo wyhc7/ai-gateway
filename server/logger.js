@@ -59,10 +59,16 @@ function startFlushTimer() {
   }, FLUSH_INTERVAL_MS)
   if (timer.unref) timer.unref()
   // 进程退出前兜底落盘，避免丢失最后 10 秒的日志
-  const onExit = () => flushPending()
-  process.once('SIGINT', onExit)
-  process.once('SIGTERM', onExit)
-  process.once('beforeExit', onExit)
+  // 注意：注册 SIGINT/SIGTERM 会覆盖 Node 默认终止行为，flush 后必须主动 exit
+  const onSignal = () => {
+    try {
+      flushPending()
+    } catch { /* ignore */ }
+    process.exit(0)
+  }
+  process.once('SIGINT', onSignal)
+  process.once('SIGTERM', onSignal)
+  process.once('beforeExit', () => flushPending())
 }
 
 export function initLogger() {
