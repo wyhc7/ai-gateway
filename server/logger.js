@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, appendFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, readFileSync, appendFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -6,9 +6,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const DATA_DIR = process.env.DATA_DIR || join(__dirname, 'data')
 const LOG_PATH = join(DATA_DIR, 'logs.jsonl')
 const MAX_MEMORY = 500
+// 批量落盘：每 10 秒把攒下的日志一次性写入磁盘，避免每条日志同步写盘阻塞事件循环
+const FLUSH_INTERVAL_MS = 10000
+// 日志文件超过该大小（2MB）时自动截断，防止长期运行无限增长
+const MAX_FILE_SIZE = 2 * 1024 * 1024
+
 let _seq = 0
 
 const logs = []
+let _pending = []
 
 function loadFromFile() {
   if (!existsSync(LOG_PATH)) return
@@ -23,6 +29,42 @@ function loadFromFile() {
   } catch { /* ignore */ }
 }
 
+function flushPending() {
+  if (_pending.length === 0) return
+  const batch = _pending
+  _pending = []
+  try {
+    appendFileSync(LOG_PATH, batch.map((l) => JSON.stringify(l)).join('\n') + '\n', 'utf-8')
+  } catch (err) {
+    // 写盘失败：回退重试（限制队列长度防止无限堆积）
+    console.error('[logger] 写日志失败:', err.message)
+    _pending = batch.concat(_pending)
+    if (_pending.length > MAX_MEMORY) _pending = _pending.slice(-MAX_MEMORY)
+  }
+}
+
+function trimFileIfNeeded() {
+  try {
+    if (statSync(LOG_PATH).size > MAX_FILE_SIZE) {
+      const recent = [...logs].slice(-MAX_MEMORY)
+      writeFileSync(LOG_PATH, recent.map((l) => JSON.stringify(l)).join('\n') + (recent.length ? '\n' : ''), 'utf-8')
+    }
+  } catch { /* ignore */ }
+}
+
+function startFlushTimer() {
+  const timer = setInterval(() => {
+    trimFileIfNeeded()
+    flushPending()
+  }, FLUSH_INTERVAL_MS)
+  if (timer.unref) timer.unref()
+  // 进程退出前兜底落盘，避免丢失最后 10 秒的日志
+  const onExit = () => flushPending()
+  process.once('SIGINT', onExit)
+  process.once('SIGTERM', onExit)
+  process.once('beforeExit', onExit)
+}
+
 export function initLogger() {
   mkdirSync(DATA_DIR, { recursive: true })
   loadFromFile()
@@ -30,6 +72,7 @@ export function initLogger() {
     // 启动时重写文件，控制体积（仅保留内存中的最近记录）
     writeFileSync(LOG_PATH, logs.map((l) => JSON.stringify(l)).join('\n') + (logs.length ? '\n' : ''), 'utf-8')
   } catch { /* ignore */ }
+  startFlushTimer()
 }
 
 export function addLog(entry) {
@@ -42,9 +85,7 @@ export function addLog(entry) {
   }
   logs.push(rec)
   if (logs.length > MAX_MEMORY) logs.shift()
-  try {
-    appendFileSync(LOG_PATH, JSON.stringify(rec) + '\n', 'utf-8')
-  } catch { /* ignore */ }
+  _pending.push(rec)
   return rec
 }
 
