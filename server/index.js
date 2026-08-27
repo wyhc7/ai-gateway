@@ -2,6 +2,7 @@ import express from 'express'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import crypto from 'node:crypto'
 import { state, persist, persistImmediate, getProvider, genId, todayKey, getAdminKey } from './store.js'
 import { handleChat, handleModels, refreshModels, previewModels, DEFAULT_PROTOCOL } from './proxy.js'
 import { TEMPLATES } from './templates.js'
@@ -13,6 +14,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const WEB_DIST = process.env.WEB_DIST || join(__dirname, '..', 'web', 'dist')
 
 const CALL_PLAN_FIELDS = ['auth_type', 'auth_header', 'auth_prefix', 'auth_query_param', 'chat_path', 'models_path', 'models_method']
+
+// 常数时间比较密钥，防止时序侧信道攻击（直接比较长度差异也会泄露信息，先哈希成等长再比较）
+function safeEqual(a, b) {
+  const ha = crypto.createHash('sha256').update(String(a ?? '')).digest()
+  const hb = crypto.createHash('sha256').update(String(b ?? '')).digest()
+  return crypto.timingSafeEqual(ha, hb)
+}
 
 app.use(express.json({ limit: '50mb' }))
 
@@ -65,8 +73,8 @@ function api(fn) {
 
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api/v1/')) return next()
-  const auth = req.headers.authorization || ''
-  if (auth === `Bearer ${state.gateway_api_key}`) return next()
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+  if (token && safeEqual(token, state.gateway_api_key)) return next()
   return res.status(401).json({ error: { message: '无效的 API Key，请在「仪表盘 → 对接方式」获取网关 API Key' } })
 })
 
@@ -77,7 +85,7 @@ app.use((req, res, next) => {
   if (req.path.startsWith('/api/v1/') || req.path === '/api/health') return next()
   const adminKey = getAdminKey()
   const provided = req.headers['x-admin-key'] || (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
-  if (adminKey && provided === adminKey) return next()
+  if (adminKey && provided && safeEqual(provided, adminKey)) return next()
   return res.status(401).json({ error: { message: '管理密钥无效或缺失，请在登录框输入管理密钥（见服务端启动日志或 config.json 的 admin_api_key 字段）' } })
 })
 
