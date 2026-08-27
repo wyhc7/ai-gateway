@@ -1,7 +1,7 @@
 #!/bin/bash
 # AI 中转站完整自动化部署脚本（Ubuntu/Debian）
-# 全新部署: curl -fsSL https://raw.githubusercontent.com/wyhc7/api/master/deploy/linux/complete-deploy.sh | sudo bash
-# 更新代码: curl -fsSL https://raw.githubusercontent.com/wyhc7/api/master/deploy/linux/complete-deploy.sh | sudo bash -s -- --update
+# 全新部署: curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/linux/complete-deploy.sh | sudo bash
+# 更新代码: curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/linux/complete-deploy.sh | sudo bash -s -- --update
 
 set -euo pipefail
 
@@ -44,7 +44,7 @@ if [[ "$MODE" == "--update" ]]; then
    log_step "从 GitHub 拉取最新代码..."
    TMP_REPO="/tmp/ai-gateway-update"
    rm -rf "$TMP_REPO"
-   git clone --depth 1 https://github.com/wyhc7/api.git "$TMP_REPO"
+   git clone --depth 1 https://github.com/wyhc7/ai.git "$TMP_REPO"
 
    log_step "更新后端代码..."
    cp -r "$TMP_REPO/server"/* "$WORK_DIR/server/"
@@ -130,7 +130,7 @@ elif [[ -f "server/package.json" ]]; then
 else
    log_info "准备项目目录 $WORK_DIR..."
    rm -rf "$WORK_DIR"
-   git clone --depth 1 https://github.com/wyhc7/api.git "$WORK_DIR"
+   git clone --depth 1 https://github.com/wyhc7/ai.git "$WORK_DIR"
    cd "$WORK_DIR"
 fi
 
@@ -225,7 +225,7 @@ log_info "后续管理命令："
     echo "  重启服务: sudo systemctl restart ai-gateway"
     echo "  查看日志: sudo journalctl -u ai-gateway -f"
     echo "  停止服务: sudo systemctl stop ai-gateway"
-    echo "  更新代码: curl -fsSL https://raw.githubusercontent.com/wyhc7/api/master/deploy/linux/complete-deploy.sh | sudo bash -s -- --update"
+    echo "  更新代码: curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/linux/complete-deploy.sh | sudo bash -s -- --update"
     echo ""
     log_info "请在浏览器中打开 http://localhost:3001，进入「仪表盘」复制网关 API Key"
    echo ""

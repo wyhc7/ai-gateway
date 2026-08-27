@@ -13,9 +13,9 @@ if exist "%ROOT%\server\package.json" goto :project_ready
 echo [start] 未检测到项目文件，正在从 GitHub 克隆...
 if not exist "%ROOT%" mkdir "%ROOT%"
 if not exist "%ROOT%\.git" (
-  git clone --depth 1 https://github.com/wyhc7/api.git "%ROOT%"
+  git clone --depth 1 https://github.com/wyhc7/ai.git "%ROOT%"
   if errorlevel 1 (
-    echo [ERROR] 克隆失败，请检查网络或手动下载: https://github.com/wyhc7/api
+    echo [ERROR] 克隆失败，请检查网络或手动下载: https://github.com/wyhc7/ai
     exit /b 1
   )
   echo [start] 项目已克隆到 %ROOT%

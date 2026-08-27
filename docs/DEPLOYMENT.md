@@ -28,7 +28,7 @@
 
 ```bash
 # 1. 克隆代码
-git clone https://github.com/wyhc7/api.git && cd api
+git clone https://github.com/wyhc7/ai.git && cd ai
 
 # 2. 构建并启动
 docker compose up -d --build
@@ -214,7 +214,7 @@ nssm stop ai-gateway
 ```bash
 # 1. 克隆仓库（或在手机浏览器下载 ZIP 后解压，再执行脚本）
 pkg install -y git
-git clone https://github.com/wyhc7/api.git && cd api
+git clone https://github.com/wyhc7/ai.git && cd ai
 
 # 2. 一键安装（自动装 nodejs-lts → 装依赖 → 构建前端 → 启动）
 bash deploy/termux/install.sh
