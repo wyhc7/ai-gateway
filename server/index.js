@@ -9,6 +9,8 @@ import { TEMPLATES } from './templates.js'
 import { addLog, getLogs, initLogger } from './logger.js'
 
 const app = express()
+// 不暴露框架指纹，降低被针对性扫描的概率
+app.disable('x-powered-by')
 const PORT = process.env.PORT || 3001
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const WEB_DIST = process.env.WEB_DIST || join(__dirname, '..', 'web', 'dist')
@@ -28,6 +30,9 @@ app.use(express.json({ limit: '50mb' }))
 app.use((err, req, res, next) => {
   if (err.type === 'entity.parse.failed' || err instanceof SyntaxError) {
     return res.status(400).json({ error: { message: '请求体不是合法的 JSON' } })
+  }
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({ error: { message: '请求体过大（超过 50MB 限制）' } })
   }
   return next(err)
 })

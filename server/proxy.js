@@ -170,9 +170,10 @@ export async function refreshModels(providerId) {
   let lastError = null
   for (const key of keys) {
     const url = joinUrl(provider.base_url, plan.modelsPath, queryAuth(plan, key.api_key))
+    const controller = new AbortController()
+    let timer = null
     try {
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), 60000)
+      timer = setTimeout(() => controller.abort(), 60000)
       const resp = await fetch(url, {
         method: plan.modelsMethod,
         headers: buildHeaders(provider, plan, key.api_key),
@@ -193,6 +194,7 @@ export async function refreshModels(providerId) {
         applyCooldown(key, resp.status)
       }
     } catch (err) {
+      if (timer) clearTimeout(timer)
       lastError = err.name === 'AbortError' ? '请求超时' : `网络错误: ${err.message}`
       applyCooldown(key, 'network')
     }
@@ -237,9 +239,10 @@ export async function previewModels({ base_url, protocol, api_key, extra_headers
   const plan = callPlan(target)
   const url = joinUrl(target.base_url, plan.modelsPath, queryAuth(plan, target.api_key))
   const headers = mergeAuthAndCustomHeaders(target.extra_headers, plan, target.api_key)
+  const controller = new AbortController()
+  let timer = null
   try {
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 30000)
+    timer = setTimeout(() => controller.abort(), 30000)
     const resp = await fetch(url, { method: plan.modelsMethod, headers, signal: controller.signal })
     clearTimeout(timer)
     if (!resp.ok) {
@@ -251,6 +254,7 @@ export async function previewModels({ base_url, protocol, api_key, extra_headers
     const models = (data.data || []).map((m) => ({ id: m.id, owned_by: m.owned_by || m.display_name || '' }))
     return { ok: true, models }
   } catch (err) {
+    if (timer) clearTimeout(timer)
     const msg = err.name === 'AbortError' ? '拉取超时' : `网络错误: ${err.message}`
     return { ok: false, error: `拉取失败：${msg}（请检查网络或按服务商文档手动填写模型名称）` }
   }
@@ -313,9 +317,10 @@ async function forwardWithFailover(provider, kind, body, res) {
   for (let i = 0; i < keys.length; i += 1) {
     const key = keys[(startIdx + i) % keys.length]
     const upstream = joinUrl(provider.base_url, path, queryAuth(plan, key.api_key))
+    const controller = new AbortController()
+    let timer = null
     try {
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), connectTimeoutMs)
+      timer = setTimeout(() => controller.abort(), connectTimeoutMs)
       const resp = await fetch(upstream, {
         method: kind === 'chat' ? 'POST' : plan.modelsMethod,
         headers: buildHeaders(provider, plan, key.api_key),
@@ -453,6 +458,7 @@ async function forwardWithFailover(provider, kind, body, res) {
       markResult(provider.id, true)
       return { ok: true, keyName: usedKeyName }
     } catch (err) {
+      if (timer) clearTimeout(timer)
       const msg = err.name === 'AbortError' ? '上游请求超时' : `网络错误: ${err.message}`
       if (started) {
         applyCooldown(key, 'network')

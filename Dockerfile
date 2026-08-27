@@ -35,6 +35,11 @@ RUN npm install --prefix server --omit=dev
 COPY server server
 COPY --from=builder /app/web/dist web/dist
 
+# 以非 root 用户运行（node 镜像内置 node 用户），降低容器逃逸风险
+# 注意：挂载宿主目录到 /data 时需保证该目录对 uid 1000（node 用户）可写，如 chown -R 1000:1000 data
+RUN mkdir -p /data && chown -R node:node /data
+USER node
+
 VOLUME /data
 
 EXPOSE 3001
