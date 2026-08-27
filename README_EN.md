@@ -1,6 +1,6 @@
 # AI Gateway
 
-简体中文 | [English](README_EN.md)
+[简体中文](README.md) | [English](README_EN.md)
 
 A **zero-config, out-of-the-box** self-hosted AI relay gateway. Visual platform management, multi-key automatic failover, automatic model discovery, real dashboard statistics, and token usage tracking.
 
