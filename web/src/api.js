@@ -1,9 +1,32 @@
 import { ElMessage } from 'element-plus'
 
+const ADMIN_KEY_STORAGE = 'admin-key'
+
+export function getAdminKey() {
+  return localStorage.getItem(ADMIN_KEY_STORAGE) || ''
+}
+
+export function setAdminKey(key) {
+  localStorage.setItem(ADMIN_KEY_STORAGE, key)
+}
+
+export function clearAdminKey() {
+  localStorage.removeItem(ADMIN_KEY_STORAGE)
+}
+
+function adminHeaders() {
+  const key = getAdminKey()
+  return key ? { 'X-Admin-Key': key } : {}
+}
+
+function notifyUnauthorized() {
+  window.dispatchEvent(new CustomEvent('gateway-unauthorized'))
+}
+
 async function request(url, options = {}) {
   const resp = await fetch(url, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options
+    ...options,
+    headers: { 'Content-Type': 'application/json', ...adminHeaders(), ...(options.headers || {}) }
   })
   if (!resp.ok) {
     let detail = `HTTP ${resp.status}`
@@ -13,6 +36,7 @@ async function request(url, options = {}) {
     } catch {
       /* ignore */
     }
+    if (resp.status === 401) notifyUnauthorized()
     const err = new Error(detail)
     err.status = resp.status
     throw err
@@ -35,18 +59,20 @@ export const api = {
   deleteKey: (id, keyId) => request(`/api/providers/${id}/keys/${keyId}`, { method: 'DELETE' }),
   resetKey: (id, keyId) => request(`/api/providers/${id}/keys/${keyId}/reset`, { method: 'POST' }),
   exportProviders: async () => {
-    const resp = await fetch('/api/providers/export')
+    const resp = await fetch('/api/providers/export', { headers: adminHeaders() })
     if (!resp.ok) {
       let msg = `HTTP ${resp.status}`
       try {
         const data = await resp.json()
         msg = data?.error?.message || msg
       } catch { /* ignore */ }
+      if (resp.status === 401) notifyUnauthorized()
       throw new Error(msg)
     }
     return resp.blob()
   },
-  importProviders: (data) => request('/api/providers/import', { method: 'POST', body: JSON.stringify(data) })
+  importProviders: (data) => request('/api/providers/import', { method: 'POST', body: JSON.stringify(data) }),
+  getLogs: (query = '') => request(`/api/logs${query ? `?${query}` : ''}`)
 }
 
 export function notifyError(err, fallback = '操作失败') {

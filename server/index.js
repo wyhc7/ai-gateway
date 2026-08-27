@@ -2,7 +2,7 @@ import express from 'express'
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { state, persist, persistImmediate, getProvider, genId, todayKey } from './store.js'
+import { state, persist, persistImmediate, getProvider, genId, todayKey, getAdminKey } from './store.js'
 import { handleChat, handleModels, refreshModels, previewModels, DEFAULT_PROTOCOL } from './proxy.js'
 import { TEMPLATES } from './templates.js'
 import { addLog, getLogs, initLogger } from './logger.js'
@@ -68,6 +68,17 @@ app.use((req, res, next) => {
   const auth = req.headers.authorization || ''
   if (auth === `Bearer ${state.gateway_api_key}`) return next()
   return res.status(401).json({ error: { message: '无效的 API Key，请在「仪表盘 → 对接方式」获取网关 API Key' } })
+})
+
+// 管理端鉴权：除 /api/v1/*（网关调用，走网关 Key）与 /api/health（健康检查）外，
+// 所有管理接口都必须携带管理密钥（X-Admin-Key 头或 Authorization: Bearer）
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api/')) return next()
+  if (req.path.startsWith('/api/v1/') || req.path === '/api/health') return next()
+  const adminKey = getAdminKey()
+  const provided = req.headers['x-admin-key'] || (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+  if (adminKey && provided === adminKey) return next()
+  return res.status(401).json({ error: { message: '管理密钥无效或缺失，请在登录框输入管理密钥（见服务端启动日志或 config.json 的 admin_api_key 字段）' } })
 })
 
 app.get('/api/gateway', (req, res) => {
@@ -354,6 +365,8 @@ if (existsSync(join(WEB_DIST, 'index.html'))) {
 app.listen(PORT, '0.0.0.0', () => {
   initLogger()
   console.log(`[gateway] AI 中转站后端已启动: http://0.0.0.0:${PORT}`)
+  console.log(`[gateway] 管理密钥（登录管理界面用）: ${getAdminKey()}`)
+  console.log('[gateway] 如需更换，可设置环境变量 ADMIN_KEY 或修改 config.json 的 admin_api_key 字段')
   addLog({ type: 'system', method: '-', path: '-', status: 0, detail: `AI 中转站后端启动（端口 ${PORT}，${state.providers.length} 个平台）` })
 })
 

@@ -9,6 +9,8 @@ services:
     environment:
       - PORT=3001
       - DATA_DIR=/data
+      # 管理界面登录密钥（不设置则自动生成，见容器日志或 /data/config.json）
+      # - ADMIN_KEY=change-me
     volumes:
       - ./data:/data
     healthcheck:

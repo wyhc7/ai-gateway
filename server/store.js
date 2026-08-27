@@ -27,9 +27,16 @@ function defaultStats() {
 const DEFAULT_STATE = () => ({
   providers: [],
   gateway_api_key: `gk-${crypto.randomUUID()}`,
+  // 管理端密钥：保护 /api/* 管理接口（可用环境变量 ADMIN_KEY 覆盖）
+  admin_api_key: process.env.ADMIN_KEY || `ak-${crypto.randomUUID()}`,
   stats: defaultStats(),
   created_at: Date.now()
 })
+
+// 管理密钥统一入口：环境变量 ADMIN_KEY 优先，其次持久化配置
+export function getAdminKey() {
+  return process.env.ADMIN_KEY || state.admin_api_key || ''
+}
 
 // 使用可配置时区计算"今日"（默认北京时间），避免 UTC 导致的跨日统计错位
 const TIME_ZONE = process.env.TIME_ZONE || 'Asia/Shanghai'
@@ -90,6 +97,10 @@ function load() {
       primary.gateway_api_key = `gk-${crypto.randomUUID()}`
       changed = true
     }
+    if (!primary.admin_api_key) {
+      primary.admin_api_key = process.env.ADMIN_KEY || `ak-${crypto.randomUUID()}`
+      changed = true
+    }
     if (!primary.stats) {
       primary.stats = defaultStats()
       changed = true
@@ -109,6 +120,10 @@ function load() {
       let changed = false
       if (!backup.gateway_api_key) {
         backup.gateway_api_key = `gk-${crypto.randomUUID()}`
+        changed = true
+      }
+      if (!backup.admin_api_key) {
+        backup.admin_api_key = process.env.ADMIN_KEY || `ak-${crypto.randomUUID()}`
         changed = true
       }
       if (!backup.stats) {

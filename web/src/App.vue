@@ -72,19 +72,67 @@
     </main>
     </div>
   </el-config-provider>
+  <el-dialog
+    v-model="showLogin"
+    title="管理密钥"
+    width="400px"
+    :close-on-click-modal="false"
+    :show-close="false"
+    append-to-body
+  >
+    <p style="margin: 0 0 12px; font-size: 13px; line-height: 1.6; color: var(--el-text-color-secondary);">
+      管理接口已启用鉴权。请输入管理密钥（见服务端启动日志，或配置文件 config.json 的 admin_api_key 字段）。
+    </p>
+    <el-input
+      v-model="loginKey"
+      type="password"
+      placeholder="请输入管理密钥"
+      show-password
+      @keyup.enter="confirmLogin"
+    />
+    <template #footer>
+      <el-button type="primary" :disabled="!loginKey.trim()" @click="confirmLogin">进入管理界面</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import { useViewport } from './composables/useViewport.js'
+import { getAdminKey, setAdminKey } from './api.js'
 
 const { isMobile } = useViewport()
 const route = useRoute()
 
 const collapsed = ref(localStorage.getItem('sidebar-collapsed') === '1')
 const drawerOpen = ref(false)
+
+const showLogin = ref(false)
+const loginKey = ref('')
+
+function onUnauthorized() {
+  loginKey.value = getAdminKey()
+  showLogin.value = true
+}
+
+function confirmLogin() {
+  const key = loginKey.value.trim()
+  if (!key) return
+  setAdminKey(key)
+  showLogin.value = false
+  location.reload()
+}
+
+onMounted(() => {
+  if (!getAdminKey()) showLogin.value = true
+  window.addEventListener('gateway-unauthorized', onUnauthorized)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('gateway-unauthorized', onUnauthorized)
+})
 
 watch(collapsed, (v) => {
   localStorage.setItem('sidebar-collapsed', v ? '1' : '0')

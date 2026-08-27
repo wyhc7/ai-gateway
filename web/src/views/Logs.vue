@@ -110,6 +110,7 @@
 <script setup>
 import { ref, reactive, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
+import { api } from '../api.js'
 
 const logs = ref([])
 const loading = ref(false)
@@ -168,9 +169,7 @@ async function loadLogs() {
     if (filters.type && filters.type !== 'all') params.set('type', filters.type)
     if (filters.status) params.set('status', filters.status)
     if (filters.q && filters.q.trim()) params.set('q', filters.q.trim())
-    const resp = await fetch(`/api/logs?${params.toString()}`)
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    const data = await resp.json()
+    const data = await api.getLogs(params.toString())
     logs.value = data.logs || []
   } catch (e) {
     ElMessage.error(`加载日志失败：${e.message}`)
