@@ -1,6 +1,6 @@
 # AI Gateway
 
-[English](README_EN.md) | 简体中文
+[English](README_EN.md) | [简体中文](README.md)
 
 一个**零依赖配置、开箱即用**的自托管 AI 中转站（网关）。可视化平台管理、多 Key 自动故障切换、模型自动拉取、仪表盘真实统计、Token 消耗记录。
 
