@@ -1,6 +1,6 @@
 import express from 'express'
 import { existsSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import crypto from 'node:crypto'
 import { state, persist, persistImmediate, getProvider, genId, todayKey, getAdminKey } from './store.js'
@@ -12,6 +12,7 @@ const app = express()
 const PORT = process.env.PORT || 3001
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const WEB_DIST = process.env.WEB_DIST || join(__dirname, '..', 'web', 'dist')
+const WEB_DIST_ROOT = resolve(WEB_DIST)
 
 const CALL_PLAN_FIELDS = ['auth_type', 'auth_header', 'auth_prefix', 'auth_query_param', 'chat_path', 'models_path', 'models_method']
 
@@ -358,12 +359,14 @@ if (existsSync(join(WEB_DIST, 'index.html'))) {
   app.use((req, res, next) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next()
     if (req.path.startsWith('/api/')) return next()
+    // 规范化后的路径必须仍位于 WEB_DIST 内，防止 ../ 越界探测服务器文件系统（路径遍历）
+    const safePath = resolve(WEB_DIST, `.${req.path}`)
+    if (safePath !== WEB_DIST_ROOT && !safePath.startsWith(WEB_DIST_ROOT + sep)) {
+      return res.status(404).send('Not Found')
+    }
     // 不存在的静态资源直接 404，避免返回 index.html 造成 MIME 错误难以排查
-    if (req.path !== '/') {
-      const filePath = join(WEB_DIST, req.path.replace(/^\//, ''))
-      if (!existsSync(filePath)) {
-        return res.status(404).send('Not Found')
-      }
+    if (req.path !== '/' && !existsSync(safePath)) {
+      return res.status(404).send('Not Found')
     }
     res.sendFile(join(WEB_DIST, 'index.html'))
   })
