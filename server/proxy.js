@@ -125,7 +125,8 @@ function mergeAuthAndCustomHeaders(extraHeaders, plan, apiKey) {
 function matchProvider(model, providerIdHint) {
   if (providerIdHint) {
     const p = getProvider(providerIdHint)
-    if (p && p.enabled) return p
+    // 必须校验模型归属，否则 provider:xxx/任意model 可绕过模型白名单定向消耗 Key
+    if (p && p.enabled && p.models.some((m) => m.id === model)) return p
   }
   const candidates = state.providers.filter((p) => p.enabled && p.models.some((m) => m.id === model))
   if (candidates.length === 0) return null
@@ -306,6 +307,8 @@ async function forwardWithFailover(provider, kind, body, res) {
   const startIdx = nextRoundRobin(provider.id, keys)
   const attempts = []
   let started = false
+  // 记录实际使用的 Key 名称，供日志使用（不再通过响应头暴露给客户端）
+  let usedKeyName = null
   const connectTimeoutMs = body?.stream ? STREAM_CONNECT_TIMEOUT_MS : JSON_CONNECT_TIMEOUT_MS
   for (let i = 0; i < keys.length; i += 1) {
     const key = keys[(startIdx + i) % keys.length]
@@ -325,24 +328,24 @@ async function forwardWithFailover(provider, kind, body, res) {
         applyCooldown(key, resp.status)
         bumpFailover()
         await resp.body?.cancel()
+        // 429 限流时稍作等待再切换，避免瞬时打爆上游、放大限流
+        if (resp.status === 429) await new Promise((r) => setTimeout(r, 500))
         continue
       }
       started = true
+      usedKeyName = key.name || key.id.slice(0, 8)
       res.status(resp.status)
       const contentType = resp.headers.get('content-type') || ''
       const safeContentType = safeHeaderValue(contentType)
       if (safeContentType) res.setHeader('Content-Type', safeContentType)
-      // Key 名称可能是中文（如"永久1"），必须过滤为 ASCII 后再放入响应头
-      const upstreamKeyName = safeHeaderValue(key.name) || key.id
-      res.setHeader('X-Upstream-Key', upstreamKeyName)
       const isStream = resp.body && contentType.toLowerCase().includes('text/event-stream')
       if (isStream) {
         const reader = resp.body.getReader()
         const textDecoder = new TextDecoder()
         let lastUsageData = null
         let sseBuffer = ''
-        let sawTerminator = false
         let clientClosed = false
+        let idleTimedOut = false
         const lastActivity = { t: Date.now() }
 
         const onClientClose = () => {
@@ -354,6 +357,7 @@ async function forwardWithFailover(provider, kind, body, res) {
         const watcher = setInterval(() => {
           const idle = Date.now() - lastActivity.t
           if (idle >= STREAM_IDLE_TIMEOUT_MS) {
+            idleTimedOut = true
             controller.abort()
             return
           }
@@ -368,28 +372,45 @@ async function forwardWithFailover(provider, kind, body, res) {
             const { done, value } = await reader.read()
             if (done) break
             if (value && value.byteLength > 0) {
-              res.write(value)
               lastActivity.t = Date.now()
+              // 背压处理：缓冲区满时等待 drain，避免慢客户端导致内存无限堆积
+              if (!res.write(value)) {
+                await new Promise((resolve) => {
+                  const onDrain = () => { cleanup(); resolve() }
+                  const onClose = () => { cleanup(); resolve() }
+                  const cleanup = () => {
+                    res.removeListener('drain', onDrain)
+                    res.removeListener('close', onClose)
+                  }
+                  res.once('drain', onDrain)
+                  res.once('close', onClose)
+                })
+              }
             }
             sseBuffer += textDecoder.decode(value, { stream: true })
+            // 防御：单行超长（>1MB 无换行）时丢弃，避免缓冲区无限增长
+            if (sseBuffer.length > 1024 * 1024) sseBuffer = ''
             const parsed = parseSseUsage(sseBuffer)
             sseBuffer = parsed.rest
             if (parsed.lastUsageData) lastUsageData = parsed.lastUsageData
-            if (parsed.sawTerminator) sawTerminator = true
           }
         } catch (err) {
           const isClientAbort =
             clientClosed ||
             err.code === 'ERR_STREAM_PREMATURE_CLOSE' ||
             err.code === 'ERR_STREAM_DESTROYED'
-          if (!isClientAbort) {
+          // 空闲超时是主动 abort，不算 Key 的网络错误，不应触发冷却
+          if (!isClientAbort && !idleTimedOut) {
             applyCooldown(key, 'network')
             markResult(provider.id, false)
           }
           if (!res.writableEnded) res.end()
           return {
             ok: false,
-            error: err.name === 'AbortError' ? '上游请求超时或长时间无响应' : `流式转发中断: ${err.message}`
+            keyName: usedKeyName,
+            error: idleTimedOut
+              ? '上游长时间无数据（空闲超时，已断开）'
+              : err.name === 'AbortError' ? '上游请求超时或长时间无响应' : `流式转发中断: ${err.message}`
           }
         } finally {
           clearInterval(watcher)
@@ -402,7 +423,7 @@ async function forwardWithFailover(provider, kind, body, res) {
         if (lastUsageData) {
           bumpTokens(provider.id, extractTokenCount(lastUsageData))
         }
-        return { ok: true }
+        return { ok: true, keyName: usedKeyName }
       }
       if (resp.body) {
         let text
@@ -430,14 +451,14 @@ async function forwardWithFailover(provider, kind, body, res) {
         if (!res.writableEnded) res.end()
       }
       markResult(provider.id, true)
-      return { ok: true }
+      return { ok: true, keyName: usedKeyName }
     } catch (err) {
       const msg = err.name === 'AbortError' ? '上游请求超时' : `网络错误: ${err.message}`
       if (started) {
         applyCooldown(key, 'network')
         if (!res.writableEnded) res.end()
         markResult(provider.id, false)
-        return { ok: false, error: msg }
+        return { ok: false, keyName: usedKeyName, error: msg }
       }
       attempts.push(`${key.name || key.id.slice(0, 8)}: ${msg}`)
       applyCooldown(key, 'network')
@@ -448,10 +469,10 @@ async function forwardWithFailover(provider, kind, body, res) {
   respondJson(res, 502, { error: { message: `所有 Key 均请求失败（已自动切换 ${attempts.length} 次）：${attempts.join('；')}`, type: 'all_keys_failed' } })
   return { ok: false, error: `所有 Key 均请求失败（已自动切换 ${attempts.length} 次）：${attempts.join('；')}` }
 }
-// HTTP 响应头值只允许 ASCII 可见字符，过滤中文等非法字符避免 ERR_INVALID_CHAR
+// HTTP 响应头值只允许 ASCII 可见字符（不含 CR/LF），过滤中文等非法字符避免 ERR_INVALID_CHAR
 function safeHeaderValue(value) {
   if (value == null) return ''
-  return String(value).replace(/[^\x09\x0A\x0D\x20-\x7E]/g, '')
+  return String(value).replace(/[^\x20-\x7E]/g, '')
 }
 
 function respondJson(res, status, payload) {
@@ -496,7 +517,7 @@ export async function handleChat(req, res) {
     ...baseLog,
     status: res.statusCode || (result.ok ? 200 : 502),
     ok: result.ok,
-    key: res.getHeader('X-Upstream-Key') || undefined,
+    key: result.keyName || undefined,
     duration_ms: Date.now() - startTime,
     error: result.ok ? undefined : (result.error || '')
   })
