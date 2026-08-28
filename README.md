@@ -2,13 +2,17 @@
 
 [English](README_EN.md) | [简体中文](README.md)
 
+[![CI](https://github.com/wyhc7/ai-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/wyhc7/ai-gateway/actions/workflows/ci.yml)
+
 一个**零依赖配置、开箱即用**的自托管 AI 中转站（网关）。可视化平台管理、多 Key 自动故障切换、模型自动拉取、仪表盘真实统计、Token 消耗记录。
 
 ## 功能
 
 - **多平台多 Key 管理** — 内置 23 个 AI 平台模版（OpenAI、DeepSeek、通义千问、Gemini、Claude 等），一键创建
-- **自动故障切换** — 平台 Key 不可用时自动轮换到下一个 Key，请求不中断
+- **自动故障切换** — Key 不可用时自动轮换到下一个 Key，请求不中断
+- **分级冷却与半开探测** — 区分「Key 失效」（401/403，长冷却）与「上游抖动」（5xx/限流，短冷却且限制同时冷却数量）；冷却过半后自动放行探测请求，上游恢复即刻可用
 - **模型自动拉取** — 输入 API Key 后一键拉取平台可用模型列表
+- **Token 统计** — 优先采用上游返回的 usage；上游不返回时按输出长度估算（含思考内容），不会静默漏计
 - **仪表盘统计** — 请求量、成功率、Token 消耗（每日/总计）、Key 健康状态，10 秒自动刷新
 - **完全兼容 OpenAI API** — 任何 OpenAI SDK / 客户端均可无缝接入，无需修改代码
 - **思考功能透传** — 流式 / 非流式响应完整透传，DeepSeek R1 的 reasoning_content 等思考输出原样保留
@@ -77,7 +81,7 @@ git pull && docker compose up -d --build
 ### Ubuntu / Debian 一键部署
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/linux/complete-deploy.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/linux/complete-deploy.sh | sudo bash
 ```
 
 拉取更新：
@@ -89,19 +93,19 @@ sudo bash /opt/ai-gateway/deploy/linux/complete-deploy.sh --update
 ### macOS 一键部署
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/macos/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/macos/install.sh | bash
 ```
 
 拉取更新：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/macos/install.sh | bash -s -- --update
+curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/macos/install.sh | bash -s -- --update
 ```
 
 ### Windows
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/windows/start.bat -o start.bat && start.bat
+curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/windows/start.bat -o start.bat && start.bat
 ```
 
 拉取更新：在项目目录中执行 `git pull` 后重新运行 `start.bat`。
@@ -111,13 +115,13 @@ curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/windows/start.
 ### Termux (Android) 一键部署
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/termux/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/termux/install.sh | bash
 ```
 
 拉取更新：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/termux/install.sh | bash -s -- --update
+curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/termux/install.sh | bash -s -- --update
 ```
 
 详见 [DEPLOYMENT.md](docs/DEPLOYMENT.md)
@@ -170,10 +174,22 @@ server/        — Node.js 后端（Express）
   proxy.js     — 模型匹配、故障切换、转发
   store.js     — 配置持久化与统计
   templates.js — 23 个平台模板
+  test/        — 集成测试
 web/           — Vue 3 + Element Plus 管理界面
 deploy/        — 各系统部署脚本与配置
 docs/          — 部署文档
 ```
+
+## 开发
+
+```bash
+# 运行后端集成测试（Node 内置 test runner，无需额外依赖）
+npm test --prefix server
+```
+
+测试使用本地 mock 上游，覆盖故障切换、流式透传、Token 统计、模型白名单越权等核心路径。
+CI 在每次推送时运行测试，并每日校验 README 与部署脚本里的一键安装地址是否仍然可达——
+这类链接失效不会让构建变红，却会让新用户按文档操作时直接失败。
 
 ## License
 

@@ -6,7 +6,7 @@
 
 ```bash
 # 克隆代码
-git clone https://github.com/wyhc7/ai.git && cd ai
+git clone https://github.com/wyhc7/ai-gateway.git && cd ai-gateway
 
 # 以 root 权限运行安装脚本
 sudo bash deploy/linux/install-ubuntu.sh
@@ -115,5 +115,5 @@ sudo tailscale up
 
 ## 需要帮助？
 
-- 文档：https://github.com/wyhc7/ai/blob/main/docs/DEPLOYMENT.md
-- 问题反馈：https://github.com/wyhc7/ai/issues
+- 文档：https://github.com/wyhc7/ai-gateway/blob/main/docs/DEPLOYMENT.md
+- 问题反馈：https://github.com/wyhc7/ai-gateway/issues

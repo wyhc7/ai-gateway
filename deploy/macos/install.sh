@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # AI 中转站 macOS 一键部署/更新脚本
-# 全新部署: curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/macos/install.sh | bash
-# 更新代码: curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/macos/install.sh | bash -s -- --update
+# 全新部署: curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/macos/install.sh | bash
+# 更新代码: curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/macos/install.sh | bash -s -- --update
 set -euo pipefail
 trap 'echo -e "\033[0;31m[ERROR]\033[0m 操作失败，请检查上方报错"; exit 1' ERR
 
@@ -24,7 +24,7 @@ if [[ "$MODE" == "--update" ]]; then
   echo "  从 GitHub 拉取最新代码..."
   TMP_REPO="/tmp/ai-gateway-update"
   rm -rf "$TMP_REPO"
-  git clone --depth 1 https://github.com/wyhc7/ai.git "$TMP_REPO"
+  git clone --depth 1 https://github.com/wyhc7/ai-gateway.git "$TMP_REPO"
 
   echo "==> 更新后端代码..."
   cp -r "$TMP_REPO/server"/* "$APP_DIR/server/"
@@ -86,7 +86,7 @@ elif [ -f "$SCRIPT_DIR/../../server/package.json" ]; then
 else
   REPO_DIR="/tmp/ai-gateway-install"
   rm -rf "$REPO_DIR"
-  git clone --depth 1 https://github.com/wyhc7/ai.git "$REPO_DIR"
+  git clone --depth 1 https://github.com/wyhc7/ai-gateway.git "$REPO_DIR"
   echo "   已从 GitHub 克隆"
 fi
 
@@ -121,7 +121,7 @@ for i in $(seq 1 20); do
     echo "  管理界面: http://localhost:$PORT"
     echo "  API 端点: http://localhost:$PORT/api/v1"
     echo "  停止服务: launchctl unload $PLIST_DEST"
-    echo "  更新代码: curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/macos/install.sh | bash -s -- --update"
+    echo "  更新代码: curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/macos/install.sh | bash -s -- --update"
     echo "========================================"
     exit 0
   fi

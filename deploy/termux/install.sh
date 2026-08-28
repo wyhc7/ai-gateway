@@ -1,7 +1,7 @@
 #!/data/data/com.termux/files/usr/bin/bash
 # AI 中转站 Termux (Android) 一键部署/更新脚本
-# 全新部署: curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/termux/install.sh | bash
-# 更新代码: curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/termux/install.sh | bash -s -- --update
+# 全新部署: curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/termux/install.sh | bash
+# 更新代码: curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/termux/install.sh | bash -s -- --update
 set -euo pipefail
 
 APP_DIR=${APP_DIR:-$HOME/ai-gateway}
@@ -31,7 +31,7 @@ if [[ "$MODE" == "--update" ]]; then
   echo "  从 GitHub 拉取最新代码..."
   TMP_REPO="$HOME/ai-gateway-update-tmp"
   rm -rf "$TMP_REPO"
-  git clone --depth 1 https://github.com/wyhc7/ai.git "$TMP_REPO"
+  git clone --depth 1 https://github.com/wyhc7/ai-gateway.git "$TMP_REPO"
 
   echo "==> 更新后端代码..."
   cp -r "$TMP_REPO/server"/* "$APP_DIR/server/"
@@ -83,7 +83,7 @@ elif [ -f "$SCRIPT_DIR/../../server/package.json" ]; then
 else
   REPO_DIR="$HOME/ai-gateway-install-tmp"
   rm -rf "$REPO_DIR"
-  git clone --depth 1 https://github.com/wyhc7/ai.git "$REPO_DIR"
+  git clone --depth 1 https://github.com/wyhc7/ai-gateway.git "$REPO_DIR"
   echo "   已从 GitHub 克隆"
 fi
 
@@ -133,7 +133,7 @@ for i in $(seq 1 15); do
     [ -n "$IP" ] && echo "  局域网访问: http://$IP:$PORT"
     echo "  API 端点:   http://localhost:$PORT/api/v1"
     echo "  停止服务:   pkill -f 'node.*server/index.js'"
-    echo "  更新代码:   curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/termux/install.sh | bash -s -- --update"
+    echo "  更新代码:   curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/termux/install.sh | bash -s -- --update"
     echo "========================================"
     exit 0
   fi

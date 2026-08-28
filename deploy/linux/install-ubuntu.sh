@@ -45,7 +45,7 @@ if [[ -f "server/package.json" ]]; then
    WORK_DIR="$(pwd)"
 else
    log_info "克隆代码..."
-   git clone https://github.com/wyhc7/ai.git .
+   git clone https://github.com/wyhc7/ai-gateway.git .
    WORK_DIR="$(pwd)"
 fi
 

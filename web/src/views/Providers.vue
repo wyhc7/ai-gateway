@@ -128,7 +128,8 @@
               <el-select v-model="providerForm.protocol" style="width: 100%" @change="onProtocolChange">
                 <el-option label="OpenAI Chat" value="openai-chat" />
                 <el-option label="OpenAI Responses" value="openai-responses" />
-                <el-option label="Anthropic" value="anthropic" />
+                <el-option label="Anthropic（OpenAI 兼容端点）" value="anthropic-openai" />
+                <el-option label="Anthropic 原生 Messages（需转换层）" value="anthropic" />
                 <el-option label="自定义调用方案" value="custom" />
               </el-select>
             </el-form-item>
@@ -283,7 +284,8 @@ const previewSelected = ref([])
 const PROTOCOL_LABELS = {
   'openai-chat': 'OpenAI Chat',
   'openai-responses': 'OpenAI Responses',
-  'anthropic': 'Anthropic',
+  'anthropic-openai': 'Anthropic（OpenAI 兼容）',
+  'anthropic': 'Anthropic 原生',
   'custom': '自定义'
 }
 

@@ -268,7 +268,8 @@ function copyText(text) {
 const PROTOCOL_LABELS = {
   'openai-chat': 'OpenAI Chat',
   'openai-responses': 'OpenAI Responses',
-  'anthropic': 'Anthropic',
+  'anthropic-openai': 'Anthropic（OpenAI 兼容）',
+  'anthropic': 'Anthropic 原生',
   'custom': '自定义'
 }
 

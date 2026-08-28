@@ -16,25 +16,84 @@ function extractTokenCount(usage) {
   return tokenCount != null ? Number(tokenCount) : null
 }
 
-// 鉴权失败/限流/上游 5xx 均触发 Key 自动切换（5xx 冷却回退到 network 30s）
-const RETRYABLE_STATUS = new Set([401, 403, 429, 500, 502, 503, 504])
+// 多数上游的流式响应默认不带 usage，只有显式声明 include_usage 才会在末尾补发。
+// 只对已知支持的平台注入该字段，避免把不认识的字段丢给上游换来一个 400。
+export function withUsageOption(provider, body) {
+  if (!body || !body.stream) return body
+  let host = ''
+  try {
+    host = new URL(provider.base_url).host
+  } catch {
+    return body
+  }
+  if (!USAGE_STREAM_HOSTS.some((h) => host === h || host.endsWith(`.${h}`))) return body
+  if (body.stream_options?.include_usage !== undefined) return body
+  return { ...body, stream_options: { ...(body.stream_options || {}), include_usage: true } }
+}
+
+// 上游始终不返回 usage 时的兜底估算
+// CJK 约 0.7 token/字，其余按 4 字符/token 粗略折算
+export function estimateTokens(text) {
+  if (!text) return 0
+  const cjk = (text.match(/[㐀-䶿一-鿿぀-ヿ가-힯]/g) || []).length
+  const rest = Math.max(text.length - cjk, 0)
+  return Math.max(1, Math.round(cjk * 0.7 + rest / 4))
+}
+
+// Key 级错误：凭证本身有问题（无效/无权限），需要长时间冷却
+const KEY_LEVEL_STATUS = new Set([401, 403])
+// 上游级错误：平台侧抖动或限流，与 Key 好坏无关，短冷却且限制同时冷却的 Key 数量
+const UPSTREAM_LEVEL_STATUS = new Set([429, 500, 502, 503, 504])
+const RETRYABLE_STATUS = new Set([...KEY_LEVEL_STATUS, ...UPSTREAM_LEVEL_STATUS])
 const COOLDOWN_MS = {
   401: 10 * 60 * 1000,
   403: 10 * 60 * 1000,
-  429: 60 * 1000,
+  429: 30 * 1000,
   network: 30 * 1000
 }
+// 上游抖动时若已有一半以上 Key 在冷却，剩余冷却时间压到很短，避免整站被一次性冻死
+const UPSTREAM_CROWD_COOLDOWN_MS = 5000
 
-const STREAM_CONNECT_TIMEOUT_MS = 1800000
-const JSON_CONNECT_TIMEOUT_MS = 600000
+// 超时分两段：连接阶段（含等待响应头）用短超时快速失败，
+// 拿到响应后切换为长超时。此前连接与总时长共用一个 30 分钟超时，
+// 上游半开连接时客户端会一直挂到超时，期间该 Key 也不会被冷却。
+const CONNECT_TIMEOUT_MS = 30000
+const STREAM_TOTAL_TIMEOUT_MS = 1800000
+const JSON_TOTAL_TIMEOUT_MS = 120000
 const SSE_HEARTBEAT_INTERVAL_MS = 30000
 const STREAM_IDLE_TIMEOUT_MS = 300000
+
+// 部分上游的流式响应默认不返回 usage，需显式声明 include_usage 才会带上
+const USAGE_STREAM_HOSTS = [
+  'api.openai.com',
+  'api.deepseek.com',
+  'api.moonshot.cn',
+  'dashscope.aliyuncs.com',
+  'open.bigmodel.cn',
+  'api.siliconflow.cn',
+  'ark.cn-beijing.volces.com',
+  'qianfan.baidubce.com',
+  'api.hunyuan.cloud.tencent.com',
+  'api.minimax.chat',
+  'api.stepfun.com',
+  'spark-api-open.xf-yun.com',
+  'api.groq.com',
+  'api.x.ai',
+  'api.openrouter.ai',
+  'openrouter.ai',
+  'integrate.api.nvidia.com',
+  'generativelanguage.googleapis.com'
+]
 
 export const DEFAULT_PROTOCOL = 'openai-chat'
 
 const PROTOCOLS = {
   'openai-chat': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/chat/completions', modelsMethod: 'GET' },
   'openai-responses': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/responses', modelsMethod: 'GET' },
+  // Anthropic 官方的 OpenAI 兼容端点：鉴权仍是 x-api-key，但请求与响应都是 OpenAI 格式，可直接透传
+  'anthropic-openai': { auth: 'anthropic', authHeader: 'x-api-key', authPrefix: '', modelsPath: '/models', chatPath: '/chat/completions', modelsMethod: 'GET' },
+  // 原生 Messages 接口：请求体需 max_tokens、system 独立成字段、响应结构也不同，
+  // 直接转发 OpenAI 格式必然 400。保留此项仅供自建了转换层的场景使用。
   'anthropic': { auth: 'anthropic', authHeader: 'x-api-key', authPrefix: '', modelsPath: '/models', chatPath: '/messages', modelsMethod: 'GET' },
   'custom': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/chat/completions', modelsMethod: 'GET' }
 }
@@ -150,13 +209,38 @@ function resolveTarget(body) {
 
 function usableKeys(provider) {
   const now = Date.now()
-  return provider.keys.filter((k) => k.enabled && (!k.cooldown_until || k.cooldown_until <= now))
+  const enabled = provider.keys.filter((k) => k.enabled)
+  const fresh = enabled.filter((k) => !k.cooldown_until || k.cooldown_until <= now)
+  if (fresh.length > 0) return fresh
+
+  // 全部处于冷却：放行冷却进度过半的一个 Key 做半开探测。
+  // 没有这个机制时，一次上游抖动把所有 Key 冻住后，
+  // 必须等满冷却时间才可能恢复，哪怕上游早就好了。
+  const probing = enabled
+    .filter((k) => {
+      const start = k.cooldown_at || k.cooldown_until
+      return now >= start + (k.cooldown_until - start) / 2
+    })
+    .sort((a, b) => a.cooldown_until - b.cooldown_until)
+  return probing.slice(0, 1)
 }
 
-function applyCooldown(key, status) {
-  key.cooldown_until = Date.now() + (COOLDOWN_MS[status] || COOLDOWN_MS.network)
+function applyCooldown(provider, key, status) {
+  const now = Date.now()
+  let ms = COOLDOWN_MS[status] || COOLDOWN_MS.network
+
+  // 5xx/429 通常是平台抖动而不是 Key 失效：
+  // 若已有半数以上 Key 处于冷却，把冷却压到 5 秒，保证始终有 Key 可用
+  if (UPSTREAM_LEVEL_STATUS.has(status) && provider?.keys?.length > 1) {
+    const cooling = provider.keys.filter((k) => k.enabled && k.cooldown_until && k.cooldown_until > now).length
+    if (cooling >= Math.ceil(provider.keys.length / 2)) ms = Math.min(ms, UPSTREAM_CROWD_COOLDOWN_MS)
+  }
+
+  key.cooldown_at = now
+  key.cooldown_ms = ms
+  key.cooldown_until = now + ms
   key.last_error = status === 'network' ? '网络错误' : `HTTP ${status}`
-  key.last_error_at = Date.now()
+  key.last_error_at = now
   persist()
 }
 
@@ -191,12 +275,12 @@ export async function refreshModels(providerId) {
       lastError = `HTTP ${resp.status}${previewHint(resp.status)}`
       await resp.body?.cancel()
       if (RETRYABLE_STATUS.has(resp.status)) {
-        applyCooldown(key, resp.status)
+        applyCooldown(provider, key, resp.status)
       }
     } catch (err) {
       if (timer) clearTimeout(timer)
       lastError = err.name === 'AbortError' ? '请求超时' : `网络错误: ${err.message}`
-      applyCooldown(key, 'network')
+      applyCooldown(provider, key, 'network')
     }
   }
   return { ok: false, error: `所有 Key 均不可用，最后错误: ${lastError}` }
@@ -280,6 +364,7 @@ function parseSseUsage(lineBuffer) {
   const rest = lines.pop()
   let lastUsageData = null
   let sawTerminator = false
+  let deltaText = ''
   for (const line of lines) {
     const trimmed = line.trim()
     if (!trimmed.startsWith('data:')) continue
@@ -294,9 +379,18 @@ function parseSseUsage(lineBuffer) {
       if (SSE_TERMINATORS.some((t) => t === json.type)) sawTerminator = true
       const usage = json.usage || (json.choices?.[0]?.usage)
       if (usage) lastUsageData = usage
+      // 累积输出文本，供上游不返回 usage 时估算 token
+      const delta = json.choices?.[0]?.delta
+      if (delta) {
+        if (typeof delta.content === 'string') deltaText += delta.content
+        if (typeof delta.reasoning_content === 'string') deltaText += delta.reasoning_content
+      }
+      if (json.type === 'content_block_delta' && typeof json.delta?.text === 'string') {
+        deltaText += json.delta.text
+      }
     } catch { /* skip partial */ }
   }
-  return { rest, lastUsageData, sawTerminator }
+  return { rest, lastUsageData, sawTerminator, deltaText }
 }
 
 async function forwardWithFailover(provider, kind, body, res) {
@@ -313,24 +407,29 @@ async function forwardWithFailover(provider, kind, body, res) {
   let started = false
   // 记录实际使用的 Key 名称，供日志使用（不再通过响应头暴露给客户端）
   let usedKeyName = null
-  const connectTimeoutMs = body?.stream ? STREAM_CONNECT_TIMEOUT_MS : JSON_CONNECT_TIMEOUT_MS
+  const totalTimeoutMs = body?.stream ? STREAM_TOTAL_TIMEOUT_MS : JSON_TOTAL_TIMEOUT_MS
+  const upstreamBody = kind === 'chat' ? JSON.stringify(withUsageOption(provider, body)) : undefined
   for (let i = 0; i < keys.length; i += 1) {
     const key = keys[(startIdx + i) % keys.length]
     const upstream = joinUrl(provider.base_url, path, queryAuth(plan, key.api_key))
     const controller = new AbortController()
     let timer = null
     try {
-      timer = setTimeout(() => controller.abort(), connectTimeoutMs)
+      // 连接与等待响应头阶段用短超时：上游半开连接时快速失败并切换 Key，
+      // 而不是让客户端挂到总时长超时（此前为 30 分钟）
+      timer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS)
       const resp = await fetch(upstream, {
         method: kind === 'chat' ? 'POST' : plan.modelsMethod,
         headers: buildHeaders(provider, plan, key.api_key),
-        body: kind === 'chat' ? JSON.stringify(body) : undefined,
+        body: upstreamBody,
         signal: controller.signal
       })
+      // 已收到响应头，改为总时长超时，长推理模型的持续输出不受影响
       clearTimeout(timer)
+      timer = setTimeout(() => controller.abort(), totalTimeoutMs)
       if (RETRYABLE_STATUS.has(resp.status)) {
         attempts.push(`${key.name || key.id.slice(0, 8)}: HTTP ${resp.status}`)
-        applyCooldown(key, resp.status)
+        applyCooldown(provider, key, resp.status)
         bumpFailover()
         await resp.body?.cancel()
         // 429 限流时稍作等待再切换，避免瞬时打爆上游、放大限流
@@ -349,6 +448,7 @@ async function forwardWithFailover(provider, kind, body, res) {
         const textDecoder = new TextDecoder()
         let lastUsageData = null
         let sseBuffer = ''
+        let streamedText = ''
         let clientClosed = false
         let idleTimedOut = false
         const lastActivity = { t: Date.now() }
@@ -398,6 +498,7 @@ async function forwardWithFailover(provider, kind, body, res) {
             const parsed = parseSseUsage(sseBuffer)
             sseBuffer = parsed.rest
             if (parsed.lastUsageData) lastUsageData = parsed.lastUsageData
+            if (parsed.deltaText) streamedText += parsed.deltaText
           }
         } catch (err) {
           const isClientAbort =
@@ -406,7 +507,7 @@ async function forwardWithFailover(provider, kind, body, res) {
             err.code === 'ERR_STREAM_DESTROYED'
           // 空闲超时是主动 abort，不算 Key 的网络错误，不应触发冷却
           if (!isClientAbort && !idleTimedOut) {
-            applyCooldown(key, 'network')
+            applyCooldown(provider, key, 'network')
             markResult(provider.id, false)
           }
           if (!res.writableEnded) res.end()
@@ -425,19 +526,24 @@ async function forwardWithFailover(provider, kind, body, res) {
         if (!res.writableEnded) res.end()
         // 流式数据完整读完即视为成功（部分上游不发送 [DONE]/message_stop 终止符）
         markResult(provider.id, true)
-        if (lastUsageData) {
-          bumpTokens(provider.id, extractTokenCount(lastUsageData))
+        const reported = lastUsageData ? extractTokenCount(lastUsageData) : null
+        if (reported != null && reported > 0) {
+          bumpTokens(provider.id, reported)
+          return { ok: true, keyName: usedKeyName, tokens: reported, tokensEstimated: false }
         }
-        return { ok: true, keyName: usedKeyName }
+        // 上游不返回 usage 时按输出长度估算，避免仪表盘 Token 统计系统性偏低
+        const estimated = estimateTokens(streamedText)
+        if (estimated > 0) bumpTokens(provider.id, estimated)
+        return { ok: true, keyName: usedKeyName, tokens: estimated, tokensEstimated: estimated > 0 }
       }
       if (resp.body) {
         let text
         try {
-          text = await readJsonBody(resp, JSON_CONNECT_TIMEOUT_MS, controller)
+          text = await readJsonBody(resp, JSON_TOTAL_TIMEOUT_MS, controller)
         } catch (err) {
           const msg = err.name === 'AbortError' ? '上游响应超时' : `上游读取失败: ${err.message}`
           attempts.push(`${key.name || key.id.slice(0, 8)}: ${msg}`)
-          applyCooldown(key, 'network')
+          applyCooldown(provider, key, 'network')
           bumpFailover()
           continue
         }
@@ -458,17 +564,20 @@ async function forwardWithFailover(provider, kind, body, res) {
       markResult(provider.id, true)
       return { ok: true, keyName: usedKeyName }
     } catch (err) {
-      if (timer) clearTimeout(timer)
       const msg = err.name === 'AbortError' ? '上游请求超时' : `网络错误: ${err.message}`
       if (started) {
-        applyCooldown(key, 'network')
+        applyCooldown(provider, key, 'network')
         if (!res.writableEnded) res.end()
         markResult(provider.id, false)
         return { ok: false, keyName: usedKeyName, error: msg }
       }
       attempts.push(`${key.name || key.id.slice(0, 8)}: ${msg}`)
-      applyCooldown(key, 'network')
+      applyCooldown(provider, key, 'network')
       bumpFailover()
+    } finally {
+      // 所有退出路径（含流式成功返回）都要清理超时定时器。
+      // 此前流式成功时不会走到 catch，定时器会一直挂到 30 分钟超时为止。
+      if (timer) clearTimeout(timer)
     }
   }
   markResult(provider.id, false)
@@ -525,6 +634,8 @@ export async function handleChat(req, res) {
     ok: result.ok,
     key: result.keyName || undefined,
     duration_ms: Date.now() - startTime,
+    tokens: result.tokens || undefined,
+    tokens_estimated: result.tokensEstimated ? true : undefined,
     error: result.ok ? undefined : (result.error || '')
   })
 }

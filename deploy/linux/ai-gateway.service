@@ -1,6 +1,6 @@
 [Unit]
 Description=AI Gateway - 自托管多平台 AI 中转站
-Documentation=https://github.com/wyhc7/api
+Documentation=https://github.com/wyhc7/ai-gateway
 After=network-online.target
 Wants=network-online.target
 

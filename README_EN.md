@@ -2,13 +2,17 @@
 
 [简体中文](README.md) | [English](README_EN.md)
 
+[![CI](https://github.com/wyhc7/ai-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/wyhc7/ai-gateway/actions/workflows/ci.yml)
+
 A **zero-config, out-of-the-box** self-hosted AI relay gateway. Visual platform management, multi-key automatic failover, automatic model discovery, real dashboard statistics, and token usage tracking.
 
 ## Features
 
 - **Multi-platform, multi-key management** — 23 built-in AI platform templates (OpenAI, DeepSeek, Qwen, Gemini, Claude, and more), one-click creation
 - **Automatic failover** — rotates to the next key automatically when a platform key becomes unavailable, requests are never interrupted
+- **Tiered cooldown with half-open probing** — distinguishes key-level failures (401/403, long cooldown) from upstream hiccups (5xx/rate limits, short cooldown with a cap on how many keys cool down at once); once a cooldown is half over, one probe request is let through so recovery is immediate
 - **Automatic model discovery** — fetch a platform's available model list with one click after entering an API key
+- **Token accounting** — prefers the upstream `usage` field; falls back to estimating from output length (reasoning included) when upstream omits it, so counts are never silently missed
 - **Dashboard statistics** — request volume, success rate, token usage (daily/total), key health status, auto-refresh every 10 seconds
 - **Fully OpenAI API compatible** — works with any OpenAI SDK / client seamlessly, no code changes required
 - **Reasoning passthrough** — streaming and non-streaming responses are forwarded intact, including reasoning output such as DeepSeek R1's `reasoning_content`
@@ -77,7 +81,7 @@ git pull && docker compose up -d --build
 ### Ubuntu / Debian one-line install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/linux/complete-deploy.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/linux/complete-deploy.sh | sudo bash
 ```
 
 Pull updates:
@@ -89,19 +93,19 @@ sudo bash /opt/ai-gateway/deploy/linux/complete-deploy.sh --update
 ### macOS one-line install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/macos/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/macos/install.sh | bash
 ```
 
 Pull updates:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/macos/install.sh | bash -s -- --update
+curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/macos/install.sh | bash -s -- --update
 ```
 
 ### Windows
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/windows/start.bat -o start.bat && start.bat
+curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/windows/start.bat -o start.bat && start.bat
 ```
 
 Pull updates: run `git pull` in the project directory, then run `start.bat` again.
@@ -111,13 +115,13 @@ To register it as a system service, see the Windows NSSM section in [DEPLOYMENT.
 ### Termux (Android) one-line install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/termux/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/termux/install.sh | bash
 ```
 
 Pull updates:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/wyhc7/ai/main/deploy/termux/install.sh | bash -s -- --update
+curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/termux/install.sh | bash -s -- --update
 ```
 
 See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for details.
@@ -170,10 +174,22 @@ server/        — Node.js backend (Express)
   proxy.js     — model matching, failover, forwarding
   store.js     — config persistence and statistics
   templates.js — 23 platform templates
+  test/        — integration tests
 web/           — Vue 3 + Element Plus admin dashboard
 deploy/        — deployment scripts and configs for each platform
 docs/          — deployment docs
 ```
+
+## Development
+
+```bash
+# Run the backend integration tests (Node's built-in test runner, no extra dependencies)
+npm test --prefix server
+```
+
+Tests spin up a local mock upstream and cover the core paths: failover, streaming passthrough, token accounting, and model allowlist enforcement.
+CI runs them on every push, and additionally re-checks each day that the one-click install URLs in the README and deploy scripts are still reachable —
+a broken link there never turns the build red, but it does break the very first thing a new user tries.
 
 ## License
 

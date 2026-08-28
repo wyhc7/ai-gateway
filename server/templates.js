@@ -20,6 +20,8 @@ export const TEMPLATES = [
   { id: 'ollama', name: 'Ollama 本地', group: '本地部署', protocol: 'openai-chat', base_url: 'http://localhost:11434/v1' },
   { id: 'lmstudio', name: 'LM Studio 本地', group: '本地部署', protocol: 'openai-chat', base_url: 'http://localhost:1234/v1' },
   { id: 'vllm', name: 'vLLM 本地', group: '本地部署', protocol: 'openai-chat', base_url: 'http://localhost:8000/v1' },
-  { id: 'anthropic', name: 'Anthropic', group: 'Anthropic 格式', protocol: 'anthropic', base_url: 'https://api.anthropic.com/v1' },
+  // 走官方 OpenAI 兼容端点：鉴权仍是 x-api-key，请求体无需转换即可透传。
+  // 直接用原生 /v1/messages 会因缺少 max_tokens、响应结构不同而必然 400。
+  { id: 'anthropic', name: 'Anthropic Claude', group: 'Anthropic 格式', protocol: 'anthropic-openai', base_url: 'https://api.anthropic.com/v1' },
   { id: 'azure', name: 'Azure OpenAI', group: '自定义调用方案', protocol: 'custom', base_url: 'https://RESOURCE_NAME.openai.azure.com/openai', auth_type: 'header', auth_header: 'api-key', auth_prefix: '', chat_path: '/deployments/DEPLOYMENT_NAME/chat/completions?api-version=2024-10-21', models_path: '/models?api-version=2024-10-21' }
 ]
