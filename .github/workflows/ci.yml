@@ -19,8 +19,8 @@ jobs:
       matrix:
         node-version: [20, 22]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node-version }}
       - name: 安装依赖
@@ -32,7 +32,7 @@ jobs:
     name: 校验文档中的一键安装地址可达
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: 提取并检查所有 raw 安装地址
         run: |
           set -uo pipefail
@@ -72,7 +72,7 @@ jobs:
     name: Docker 构建与启动冒烟
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: 构建镜像（含前端构建）
         run: docker build -t ai-gateway:ci .
       - name: 启动容器并等待健康检查
