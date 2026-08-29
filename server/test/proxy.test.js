@@ -12,7 +12,7 @@ const dataDir = mkdtempSync(join(tmpdir(), 'ai-gateway-test-'))
 process.env.DATA_DIR = dataDir
 
 const { state } = await import('../store.js')
-const { handleChat, withUsageOption, estimateTokens } = await import('../proxy.js')
+const { handleChat, withUsageOption, estimateTokens, shouldSendHeartbeat, heartbeatTickInterval } = await import('../proxy.js')
 
 after(() => {
   rmSync(dataDir, { recursive: true, force: true })
@@ -404,6 +404,23 @@ test('estimateTokens 对中英文分别折算', () => {
   const english = estimateTokens('a'.repeat(400))
   assert.ok(english >= 90 && english <= 110, '英文约 4 字符 1 token')
   assert.ok(estimateTokens('中文abc') > estimateTokens('abc'), '中文应比等长英文计更多 token')
+})
+
+test('心跳只在空闲超过阈值后补发一次，不随检查周期重复刷', () => {
+  const interval = 15000
+  // 空闲未达阈值：不发
+  assert.equal(shouldSendHeartbeat({ idleMs: 5000, sinceLastHeartbeatMs: 15000, heartbeatIntervalMs: interval }), false, '空闲未达心跳间隔时不应发送')
+  // 空闲达标但距上次心跳不足一个周期：不发（防止每检查一次就发一次）
+  assert.equal(shouldSendHeartbeat({ idleMs: 20000, sinceLastHeartbeatMs: 5000, heartbeatIntervalMs: interval }), false, '距上次心跳不足一个周期时不应重复发送')
+  // 两者都达标：发送
+  assert.equal(shouldSendHeartbeat({ idleMs: 20000, sinceLastHeartbeatMs: 15000, heartbeatIntervalMs: interval }), true, '空闲与距上次心跳都达标时才发送')
+})
+
+test('心跳检查间隔随配置缩放且设上下限', () => {
+  assert.equal(heartbeatTickInterval(15000), 5000, '默认 15 秒心跳对应 5 秒一次的检查（上限 5 秒）')
+  assert.equal(heartbeatTickInterval(60000), 5000, '更长的心跳也不必超过 5 秒检查一次')
+  assert.equal(heartbeatTickInterval(2000), 1000, '短心跳时检查间隔取一半')
+  assert.equal(heartbeatTickInterval(100), 500, '极短配置下有 0.5 秒下限保护')
 })
 
 test('冷却后的 Key 在冷却结束后恢复可用', async (t) => {
