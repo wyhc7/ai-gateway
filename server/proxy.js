@@ -501,8 +501,28 @@ async function forwardWithFailover(provider, kind, body, res) {
         if (resp.status === 429) await new Promise((r) => setTimeout(r, 500))
         continue
       }
+      // 400 也可能是上游处理中途的瞬时失败：线上日志曾观察到一条 5.7 秒后才返回
+      // 400 的请求（若参数错误会在 1 秒内立刻拒绝），周围同一 Key 的请求全部 200。
+      // 给一次切换其他 Key 重试的机会，让瞬时抖动无感恢复；真正的坏请求重试后
+      // 仍会 400 并以原状态透传，不影响客户端感知。400 不视为 Key 的问题，不冷却。
+      if (resp.status === 400 && attempts.length < 1) {
+        attempts.push(`${key.name || key.id.slice(0, 8)}: HTTP 400（瞬时重试）`)
+        bumpFailover()
+        await resp.body?.cancel()
+        continue
+      }
       started = true
       usedKeyName = key.name || key.id.slice(0, 8)
+      // 诊断用：把上游非 2xx 的真实错误体打到日志，便于定位 4xx 透传问题
+      if (resp.status < 200 || resp.status >= 300) {
+        const _ct = (resp.headers.get('content-type') || '').toLowerCase()
+        const _m = body?.model || provider?.id
+        if (!_ct.includes('text/event-stream')) {
+          resp.clone().text().then((b) => console.error(`[上游错误体] status=${resp.status} model=${_m} body=${b.slice(0, 600)}`)).catch(() => {})
+        } else {
+          console.error(`[上游错误体] status=${resp.status} model=${_m} (流式，错误体已在响应中透传)`)
+        }
+      }
       res.status(resp.status)
       const contentType = resp.headers.get('content-type') || ''
       const safeContentType = safeHeaderValue(contentType)
