@@ -165,6 +165,48 @@ test('401 时自动切换到下一个 Key，请求不中断', async (t) => {
   assert.match(badKey.last_error, /401/)
 })
 
+test('上游瞬时 400 会切换其他 Key 重试，重试成功则正常返回', async (t) => {
+  let calls = 0
+  const { server, port } = await startUpstream(({ res }) => {
+    calls++
+    if (calls === 1) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: { message: 'transient' } }))
+      return
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }))
+  })
+  t.after(() => server.close())
+
+  const provider = makeProvider({ port, keys: [makeKey('k1'), makeKey('k2')] })
+  const res = fakeRes()
+  await handleChat({ body: { model: provider.testModel, messages: [{ role: 'user', content: 'hi' }] } }, res)
+
+  assert.equal(calls, 2, '应切换到第二个 Key 重试一次')
+  assert.equal(res.statusCode, 200, '重试成功后应返回 200')
+  assert.equal(res.json().choices[0].message.content, 'ok')
+  assert.ok(provider.keys.every((k) => !k.cooldown_until), '400 不应给 Key 施加冷却')
+})
+
+test('持续 400 时最多重试一次，并把上游 400 透传给客户端', async (t) => {
+  let calls = 0
+  const { server, port } = await startUpstream(({ res }) => {
+    calls++
+    res.writeHead(400, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ error: { message: 'bad request body' } }))
+  })
+  t.after(() => server.close())
+
+  const provider = makeProvider({ port, keys: [makeKey('k1'), makeKey('k2'), makeKey('k3')] })
+  const res = fakeRes()
+  await handleChat({ body: { model: provider.testModel, messages: [{ role: 'user', content: 'hi' }] } }, res)
+
+  assert.equal(calls, 2, '400 只重试一次，不应无限切换')
+  assert.equal(res.statusCode, 400, '重试后仍 400 应透传上游状态')
+  assert.equal(res.json().error.message, 'bad request body', '上游错误体应透传')
+})
+
 test('429 限流切换 Key，且不会把多个 Key 一次性全冻住', async (t) => {
   const { server, port } = await startUpstream(({ res }) => {
     res.writeHead(429, { 'Content-Type': 'application/json' })
