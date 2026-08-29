@@ -278,6 +278,24 @@ test('SSE 流式响应完整透传并统计 usage', async (t) => {
   assert.equal(tokenDelta(before), 137, '应按上游返回的 usage 精确统计')
 })
 
+test('流式响应关闭中间层缓冲，避免长回答被反代截断', async (t) => {
+  const { server, port } = await startUpstream(({ res }) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    res.write('data: {"choices":[{"delta":{"content":"你好"}}]}\n\n')
+    res.write('data: [DONE]\n\n')
+    res.end()
+  })
+  t.after(() => server.close())
+
+  const provider = makeProvider({ port, keys: [makeKey('k')] })
+  const res = fakeRes()
+  await handleChat({ body: { model: provider.testModel, stream: true, messages: [{ role: 'user', content: 'hi' }] } }, res)
+
+  assert.equal(res.headers['X-Accel-Buffering'], 'no', 'Nginx 默认缓冲响应，长回答会被攒住甚至截断')
+  assert.match(res.headers['Cache-Control'], /no-cache/, '流式响应不应被任何中间层缓存')
+  assert.match(res.headers['Cache-Control'], /no-transform/, '阻止中间设备对响应做压缩等改写')
+})
+
 test('流式响应缺少 usage 时按输出长度估算，不静默漏计', async (t) => {
   const before = state.stats.totalTokens || 0
   const { server, port } = await startUpstream(({ res }) => {

@@ -57,11 +57,24 @@ const UPSTREAM_CROWD_COOLDOWN_MS = 5000
 // 超时分两段：连接阶段（含等待响应头）用短超时快速失败，
 // 拿到响应后切换为长超时。此前连接与总时长共用一个 30 分钟超时，
 // 上游半开连接时客户端会一直挂到超时，期间该 Key 也不会被冷却。
-const CONNECT_TIMEOUT_MS = 30000
-const STREAM_TOTAL_TIMEOUT_MS = 1800000
-const JSON_TOTAL_TIMEOUT_MS = 120000
-const SSE_HEARTBEAT_INTERVAL_MS = 30000
-const STREAM_IDLE_TIMEOUT_MS = 300000
+// 读取毫秒配置：非法值（非数字、0、负数）一律回退到默认值
+function toMs(value, fallback) {
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
+
+const CONNECT_TIMEOUT_MS = toMs(process.env.CONNECT_TIMEOUT_MS, 30000)
+const STREAM_TOTAL_TIMEOUT_MS = toMs(process.env.STREAM_TOTAL_TIMEOUT_MS, 1800000)
+const JSON_TOTAL_TIMEOUT_MS = toMs(process.env.JSON_TOTAL_TIMEOUT_MS, 120000)
+// 心跳间隔必须小于链路上最短空闲超时的一半，否则中间设备会先于网关切断连接。
+// Nginx 默认 proxy_read_timeout 为 60 秒，这里取 15 秒留足余量。
+const SSE_HEARTBEAT_INTERVAL_MS = toMs(process.env.SSE_HEARTBEAT_INTERVAL_MS, 15000)
+// 上游多久没有数据就判定流已死。推理模型的思考阶段可能几分钟不发任何内容，
+// 默认放宽到 10 分钟，避免长思考被误杀。
+const STREAM_IDLE_TIMEOUT_MS = toMs(process.env.STREAM_IDLE_TIMEOUT_MS, 600000)
+// 背压等待上限：客户端长期不消费时不能无限等待，
+// 否则上游的发送缓冲一直堵着，最终会被上游主动断开
+const BACKPRESSURE_MAX_WAIT_MS = toMs(process.env.BACKPRESSURE_MAX_WAIT_MS, 60000)
 
 // 部分上游的流式响应默认不返回 usage，需显式声明 include_usage 才会带上
 const USAGE_STREAM_HOSTS = [
@@ -444,6 +457,12 @@ async function forwardWithFailover(provider, kind, body, res) {
       if (safeContentType) res.setHeader('Content-Type', safeContentType)
       const isStream = resp.body && contentType.toLowerCase().includes('text/event-stream')
       if (isStream) {
+        // 关掉中间层的响应缓冲：Nginx 的 proxy_buffering 默认开启，会把流式响应攒在
+        // 缓冲区里——短回答能整体送达，长回答则被延迟甚至截断，表现就是"只有长回答会断"。
+        // X-Accel-Buffering 是 Nginx 的标准开关，链路上没有 Nginx 时完全无害。
+        // no-transform 同时阻止中间设备对响应做压缩等改写。
+        res.setHeader('Cache-Control', 'no-cache, no-transform')
+        res.setHeader('X-Accel-Buffering', 'no')
         const reader = resp.body.getReader()
         const textDecoder = new TextDecoder()
         let lastUsageData = null
@@ -452,6 +471,7 @@ async function forwardWithFailover(provider, kind, body, res) {
         let clientClosed = false
         let idleTimedOut = false
         const lastActivity = { t: Date.now() }
+        let lastHeartbeat = Date.now()
 
         const onClientClose = () => {
           clientClosed = true
@@ -466,7 +486,12 @@ async function forwardWithFailover(provider, kind, body, res) {
             controller.abort()
             return
           }
-          if (idle >= SSE_HEARTBEAT_INTERVAL_MS && !res.writableEnded) {
+          // 心跳只是为了让中间设备与客户端知道连接还活着，按固定间隔发一次即可。
+          // 此前没有间隔判断，一旦闲置超过阈值就会每 5 秒重复发送，白白占用带宽。
+          if (idle >= SSE_HEARTBEAT_INTERVAL_MS &&
+              Date.now() - lastHeartbeat >= SSE_HEARTBEAT_INTERVAL_MS &&
+              !res.writableEnded) {
+            lastHeartbeat = Date.now()
             try { res.write(': keep-alive\n\n') } catch { /* socket 已关闭 */ }
           }
         }, 5000)
@@ -478,17 +503,23 @@ async function forwardWithFailover(provider, kind, body, res) {
             if (done) break
             if (value && value.byteLength > 0) {
               lastActivity.t = Date.now()
-              // 背压处理：缓冲区满时等待 drain，避免慢客户端导致内存无限堆积
+              // 背压处理：缓冲区满时等待 drain，避免慢客户端导致内存无限堆积。
+              // 但等待必须有上限——无限等待会让上游的发送缓冲一直堵着，
+              // 直到上游判定超时主动断开，这正是长回答中途断流的成因之一。
               if (!res.write(value)) {
                 await new Promise((resolve) => {
-                  const onDrain = () => { cleanup(); resolve() }
-                  const onClose = () => { cleanup(); resolve() }
-                  const cleanup = () => {
-                    res.removeListener('drain', onDrain)
-                    res.removeListener('close', onClose)
+                  let settled = false
+                  const guard = setTimeout(finish, BACKPRESSURE_MAX_WAIT_MS)
+                  function finish() {
+                    if (settled) return
+                    settled = true
+                    clearTimeout(guard)
+                    res.removeListener('drain', finish)
+                    res.removeListener('close', finish)
+                    resolve()
                   }
-                  res.once('drain', onDrain)
-                  res.once('close', onClose)
+                  res.once('drain', finish)
+                  res.once('close', finish)
                 })
               }
             }
