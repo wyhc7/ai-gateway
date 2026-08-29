@@ -227,6 +227,27 @@ test('所有 Key 处于冷却时返回 503，并保留半开探测的机会', as
   assert.equal(res2.statusCode, 200, '冷却过半后应放行半开探测请求')
 })
 
+test('Key 只是短暂冷却时等待恢复，而不是直接 503', async (t) => {
+  const { server, port } = await startUpstream(({ res }) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }))
+  })
+  t.after(() => server.close())
+
+  const provider = makeProvider({ port, keys: [makeKey('k')] })
+  const key = provider.keys[0]
+  // 冷却 2 秒，半开探测点在 1 秒后，短于等待上限，应当等到并成功返回
+  key.cooldown_at = Date.now()
+  key.cooldown_until = Date.now() + 2000
+
+  const res = fakeRes()
+  const startedAt = Date.now()
+  await handleChat({ body: { model: provider.testModel, messages: [{ role: 'user', content: 'hi' }] } }, res)
+
+  assert.equal(res.statusCode, 200, '短暂冷却应等待后成功，而不是把请求直接打回')
+  assert.ok(Date.now() - startedAt >= 900, '确实等待到了冷却过半')
+})
+
 // ---- 模型归属与越权 ----
 
 test('provider 前缀不能绕过模型白名单', async (t) => {
