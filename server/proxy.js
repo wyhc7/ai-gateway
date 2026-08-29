@@ -31,6 +31,19 @@ export function withUsageOption(provider, body) {
   return { ...body, stream_options: { ...(body.stream_options || {}), include_usage: true } }
 }
 
+// 心跳发送条件：上游空闲超过心跳间隔，并且距离上次心跳也超过心跳间隔。
+// 第二个条件防止"每检查一次就发一次"的重复刷心跳——这正是此前日志里
+// 30 秒空闲后每 5 秒狂发 keep-alive、白白占用带宽的根因。
+export function shouldSendHeartbeat({ idleMs, sinceLastHeartbeatMs, heartbeatIntervalMs }) {
+  return idleMs >= heartbeatIntervalMs && sinceLastHeartbeatMs >= heartbeatIntervalMs
+}
+
+// 空闲检查的间隔取心跳间隔的一半，否则心跳的实际发出时间会被检查周期拖后；
+// 心跳较长时不必过于频繁地唤醒（上限 5 秒一次），配置得很小时也有下限保护（0.5 秒）。
+export function heartbeatTickInterval(heartbeatIntervalMs) {
+  return Math.min(5000, Math.max(500, Math.floor(heartbeatIntervalMs / 2)))
+}
+
 // 上游始终不返回 usage 时的兜底估算
 // CJK 约 0.7 token/字，其余按 4 字符/token 粗略折算
 export function estimateTokens(text) {
@@ -527,13 +540,17 @@ async function forwardWithFailover(provider, kind, body, res) {
           }
           // 心跳只是为了让中间设备与客户端知道连接还活着，按固定间隔发一次即可。
           // 此前没有间隔判断，一旦闲置超过阈值就会每 5 秒重复发送，白白占用带宽。
-          if (idle >= SSE_HEARTBEAT_INTERVAL_MS &&
-              Date.now() - lastHeartbeat >= SSE_HEARTBEAT_INTERVAL_MS &&
-              !res.writableEnded) {
+          if (!res.writableEnded &&
+              shouldSendHeartbeat({
+                idleMs: idle,
+                sinceLastHeartbeatMs: Date.now() - lastHeartbeat,
+                heartbeatIntervalMs: SSE_HEARTBEAT_INTERVAL_MS
+              })) {
             lastHeartbeat = Date.now()
             try { res.write(': keep-alive\n\n') } catch { /* socket 已关闭 */ }
           }
-        }, 5000)
+          // 检查间隔取心跳间隔的一半，否则心跳的实际发出时间会被检查周期拖后
+        }, heartbeatTickInterval(SSE_HEARTBEAT_INTERVAL_MS))
         if (watcher.unref) watcher.unref()
 
         try {
