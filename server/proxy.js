@@ -710,8 +710,29 @@ function readJsonBody(resp, ms, controller) {
   return resp.text().finally(() => clearTimeout(timer))
 }
 
+// 商汤等上游的 max_tokens 有硬性上限（实测报错：should be in [1, 65536]）。
+// 客户端可能发送 0（表示"不限"）、负数、非整数或远大于上限的值（例如想要超长输出），
+// 上游会直接 400 拒绝整次调用。网关在转发前收敛到合法范围：
+// - 非法（<1 / 非数字）→ 删除，交给上游用默认值
+// - 超上限 → 压到 65536，保留"想要长输出"的意图
+function sanitizeMaxTokens(body) {
+  const v = body?.max_tokens
+  if (v == null) return
+  if (!Number.isFinite(v) || v < 1) {
+    delete body.max_tokens
+    console.warn(`[max_tokens 收敛] 非法值 ${v} 已移除，交由上游使用默认值`)
+    return
+  }
+  const clamped = Math.min(Math.floor(v), 65536)
+  if (clamped !== v) {
+    body.max_tokens = clamped
+    console.warn(`[max_tokens 收敛] ${v} -> ${clamped}（上游上限 65536）`)
+  }
+}
+
 export async function handleChat(req, res) {
   const { model, providerIdHint, body } = resolveTarget(req.body)
+  sanitizeMaxTokens(body)
   const provider = matchProvider(model, providerIdHint)
   bumpStats(provider?.id)
   const startTime = Date.now()
