@@ -12,7 +12,7 @@ const dataDir = mkdtempSync(join(tmpdir(), 'ai-gateway-test-'))
 process.env.DATA_DIR = dataDir
 
 const { state } = await import('../store.js')
-const { handleChat, withUsageOption, estimateTokens, shouldSendHeartbeat, heartbeatTickInterval } = await import('../proxy.js')
+const { handleChat, withUsageOption, estimateTokens, shouldSendHeartbeat, heartbeatTickInterval, jsonTotalTimeout } = await import('../proxy.js')
 
 after(() => {
   rmSync(dataDir, { recursive: true, force: true })
@@ -522,6 +522,15 @@ test('心跳检查间隔随配置缩放且设上下限', () => {
   assert.equal(heartbeatTickInterval(60000), 5000, '更长的心跳也不必超过 5 秒检查一次')
   assert.equal(heartbeatTickInterval(2000), 1000, '短心跳时检查间隔取一半')
   assert.equal(heartbeatTickInterval(100), 500, '极短配置下有 0.5 秒下限保护')
+})
+
+test('非流式长任务按 max_tokens 扩充时长预算，短请求仍受 2 分钟护栏', () => {
+  assert.equal(jsonTotalTimeout(undefined, false), 120000, '未设 max_tokens 保持默认 2 分钟')
+  assert.equal(jsonTotalTimeout(0, false), 120000, 'max_tokens 为 0 不扩充')
+  assert.equal(jsonTotalTimeout(2048, false), 120000, '短请求仍在 2 分钟护栏内')
+  assert.equal(jsonTotalTimeout(16384, false), 655360, '16384 tokens 约给 10.9 分钟（40ms/token）')
+  assert.equal(jsonTotalTimeout(1000000, false), 1800000, '极大值封顶到 30 分钟')
+  assert.equal(jsonTotalTimeout(999999, true), 1800000, '流式固定 30 分钟预算')
 })
 
 test('冷却后的 Key 在冷却结束后恢复可用', async (t) => {
