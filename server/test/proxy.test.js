@@ -241,6 +241,31 @@ test('max_tokens 为 0 或负数时移除，交由上游使用默认值', async 
   assert.equal(res.statusCode, 200)
 })
 
+test('max_tokens 超该模型更小上限时，按上游报错范围收敛后重试', async (t) => {
+  let calls = 0
+  let received = null
+  const { server, port } = await startUpstream(({ res, body }) => {
+    calls++
+    if (calls === 1) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: { message: 'field MaxTokens invalid, should be in [1, 32768]' } }))
+      return
+    }
+    received = body
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }))
+  })
+  t.after(() => server.close())
+
+  const provider = makeProvider({ port, keys: [makeKey('k1'), makeKey('k2')] })
+  const res = fakeRes()
+  await handleChat({ body: { model: provider.testModel, max_tokens: 100000, messages: [{ role: 'user', content: 'hi' }] } }, res)
+
+  assert.equal(calls, 2, '应重试一次')
+  assert.equal(received.max_tokens, 32768, '应按上游报错范围收敛到 32768')
+  assert.equal(res.statusCode, 200)
+})
+
 test('429 限流切换 Key，且不会把多个 Key 一次性全冻住', async (t) => {
   const { server, port } = await startUpstream(({ res }) => {
     res.writeHead(429, { 'Content-Type': 'application/json' })
