@@ -207,6 +207,40 @@ test('持续 400 时最多重试一次，并把上游 400 透传给客户端', a
   assert.equal(res.json().error.message, 'bad request body', '上游错误体应透传')
 })
 
+test('max_tokens 超出上游上限时收敛到 65536，而不是让上游 400', async (t) => {
+  let received = null
+  const { server, port } = await startUpstream(({ res, body }) => {
+    received = body
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }))
+  })
+  t.after(() => server.close())
+
+  const provider = makeProvider({ port, keys: [makeKey('k1')] })
+  const res = fakeRes()
+  await handleChat({ body: { model: provider.testModel, max_tokens: 100000, messages: [{ role: 'user', content: 'hi' }] } }, res)
+
+  assert.equal(received.max_tokens, 65536, '超限值应被压到上游上限')
+  assert.equal(res.statusCode, 200, '收敛后不应 400')
+})
+
+test('max_tokens 为 0 或负数时移除，交由上游使用默认值', async (t) => {
+  let received = null
+  const { server, port } = await startUpstream(({ res, body }) => {
+    received = body
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }))
+  })
+  t.after(() => server.close())
+
+  const provider = makeProvider({ port, keys: [makeKey('k1')] })
+  const res = fakeRes()
+  await handleChat({ body: { model: provider.testModel, max_tokens: 0, messages: [{ role: 'user', content: 'hi' }] } }, res)
+
+  assert.ok(!('max_tokens' in received), '非法值应被移除')
+  assert.equal(res.statusCode, 200)
+})
+
 test('429 限流切换 Key，且不会把多个 Key 一次性全冻住', async (t) => {
   const { server, port } = await startUpstream(({ res }) => {
     res.writeHead(429, { 'Content-Type': 'application/json' })
