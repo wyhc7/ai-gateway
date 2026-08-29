@@ -473,7 +473,7 @@ async function forwardWithFailover(provider, kind, body, res) {
   // 记录实际使用的 Key 名称，供日志使用（不再通过响应头暴露给客户端）
   let usedKeyName = null
   const totalTimeoutMs = body?.stream ? STREAM_TOTAL_TIMEOUT_MS : JSON_TOTAL_TIMEOUT_MS
-  const upstreamBody = kind === 'chat' ? JSON.stringify(withUsageOption(provider, body)) : undefined
+  let upstreamBody = kind === 'chat' ? JSON.stringify(withUsageOption(provider, body)) : undefined
   for (let i = 0; i < keys.length; i += 1) {
     const key = keys[(startIdx + i) % keys.length]
     const upstream = joinUrl(provider.base_url, path, queryAuth(plan, key.api_key))
@@ -505,10 +505,32 @@ async function forwardWithFailover(provider, kind, body, res) {
       // 400 的请求（若参数错误会在 1 秒内立刻拒绝），周围同一 Key 的请求全部 200。
       // 给一次切换其他 Key 重试的机会，让瞬时抖动无感恢复；真正的坏请求重试后
       // 仍会 400 并以原状态透传，不影响客户端感知。400 不视为 Key 的问题，不冷却。
+      //
+      // 特殊情形：不同模型的 max_tokens 上限不同（商汤 65536，有的模型更小），
+      // 65536 的统一收敛可能仍超个别模型上限。若上游 400 报错里带范围
+      // （"should be in [1, N]"），按该范围重新收敛 max_tokens 后再重试一次。
       if (resp.status === 400 && attempts.length < 1) {
-        attempts.push(`${key.name || key.id.slice(0, 8)}: HTTP 400（瞬时重试）`)
+        let clamped = null
+        try {
+          let readTimer
+          const text = await Promise.race([
+            resp.text(),
+            new Promise((_, rej) => { readTimer = setTimeout(() => rej(new Error('读取错误体超时')), 5000) })
+          ]).finally(() => clearTimeout(readTimer))
+          const m = text?.match(/should be in\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]/)
+          const cur = body?.max_tokens
+          if (m && Number.isFinite(cur)) {
+            clamped = Math.min(Math.max(Math.floor(cur), +m[1]), +m[2])
+            if (clamped !== cur) body.max_tokens = clamped
+          }
+        } catch { /* 读不到错误体则按普通瞬时 400 重试 */ }
+        if (clamped != null) {
+          console.warn(`[max_tokens 自适应] 模型 ${body?.model} 上限 ${clamped}，按上游报错范围收敛后重试`)
+          // upstreamBody 在循环外已序列化，这里要重新生成，否则重试仍带上旧值
+          upstreamBody = kind === 'chat' ? JSON.stringify(withUsageOption(provider, body)) : undefined
+        }
+        attempts.push(`${key.name || key.id.slice(0, 8)}: HTTP 400${clamped != null ? '（max_tokens 收敛后重试）' : '（瞬时重试）'}`)
         bumpFailover()
-        await resp.body?.cancel()
         continue
       }
       started = true
