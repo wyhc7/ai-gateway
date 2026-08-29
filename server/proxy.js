@@ -75,6 +75,9 @@ const STREAM_IDLE_TIMEOUT_MS = toMs(process.env.STREAM_IDLE_TIMEOUT_MS, 600000)
 // 背压等待上限：客户端长期不消费时不能无限等待，
 // 否则上游的发送缓冲一直堵着，最终会被上游主动断开
 const BACKPRESSURE_MAX_WAIT_MS = toMs(process.env.BACKPRESSURE_MAX_WAIT_MS, 60000)
+// 所有 Key 都在冷却时，最多等这么久再放弃。多数冷却源自 429 限流，几秒内即恢复，
+// 直接拒绝会让用户看到请求失败，等一小会儿通常就能拿到可用的 Key。
+const COOLDOWN_WAIT_MAX_MS = toMs(process.env.COOLDOWN_WAIT_MAX_MS, 10000)
 
 // 部分上游的流式响应默认不返回 usage，需显式声明 include_usage 才会带上
 const USAGE_STREAM_HOSTS = [
@@ -406,12 +409,48 @@ function parseSseUsage(lineBuffer) {
   return { rest, lastUsageData, sawTerminator, deltaText }
 }
 
+// 距离最早可作半开探测的 Key 还有多久（毫秒）。
+// usableKeys 允许冷却过半后放行探测，所以这里算的是"冷却过半"而不是"冷却结束"。
+function nextProbeDelay(provider) {
+  const now = Date.now()
+  let best = Infinity
+  for (const k of provider.keys) {
+    if (!k.enabled) continue
+    const until = k.cooldown_until || 0
+    if (until <= now) return 0
+    const start = k.cooldown_at || until
+    const delay = Math.max(start + (until - start) / 2 - now, 0)
+    if (delay < best) best = delay
+  }
+  return best === Infinity ? 0 : Math.ceil(best)
+}
+
 async function forwardWithFailover(provider, kind, body, res) {
-  const keys = usableKeys(provider)
+  let keys = usableKeys(provider)
+
+  // 所有 Key 都在冷却时，与其立刻返回 503 让用户看到"输出断了"，
+  // 不如等最早的那个解锁。线上日志显示这类失败几乎全部来自 429 限流，
+  // 而限流通常在几秒内就恢复，直接拒绝非常可惜。
   if (keys.length === 0) {
+    const delay = nextProbeDelay(provider)
+    if (delay > 0 && delay <= COOLDOWN_WAIT_MAX_MS) {
+      await new Promise((r) => setTimeout(r, delay + 50))
+      keys = usableKeys(provider)
+    }
+  }
+
+  if (keys.length === 0) {
+    const waitMs = nextProbeDelay(provider)
+    const hint = waitMs > 0 ? `，约 ${Math.ceil(waitMs / 1000)} 秒后恢复` : ''
     markResult(provider.id, false)
-    respondJson(res, 503, { error: { message: '该平台没有可用的 Key（可能全部处于冷却状态）', type: 'no_keys' } })
-    return { ok: false, error: '该平台没有可用的 Key（可能全部处于冷却状态）' }
+    respondJson(res, 503, {
+      error: {
+        message: `该平台没有可用的 Key（全部处于冷却状态${hint}）`,
+        type: 'no_keys',
+        retry_after_ms: waitMs > 0 ? waitMs : undefined
+      }
+    })
+    return { ok: false, error: `该平台没有可用的 Key（全部处于冷却状态${hint}）` }
   }
   const plan = callPlan(provider)
   const path = kind === 'chat' ? plan.chatPath : plan.modelsPath
