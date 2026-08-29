@@ -79,6 +79,17 @@ function toMs(value, fallback) {
 const CONNECT_TIMEOUT_MS = toMs(process.env.CONNECT_TIMEOUT_MS, 30000)
 const STREAM_TOTAL_TIMEOUT_MS = toMs(process.env.STREAM_TOTAL_TIMEOUT_MS, 1800000)
 const JSON_TOTAL_TIMEOUT_MS = toMs(process.env.JSON_TOTAL_TIMEOUT_MS, 120000)
+// 非流式长任务（大 max_tokens）的时间预算：固定 2 分钟护栏会掐断真正想写长文的请求。
+// 按每个 token 预留 40ms（约 25 tok/s，flash 模型保守下限）推算生成时长，
+// 上限封顶到流式的 30 分钟。短请求仍受 2 分钟护栏保护，避免挂死的连接久拖不决。
+const JSON_LONG_MS_PER_TOKEN = 40
+
+// 计算一次请求的总时长预算；导出便于测试
+export function jsonTotalTimeout(maxTokens, stream) {
+  if (stream) return STREAM_TOTAL_TIMEOUT_MS
+  const byTokens = Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens * JSON_LONG_MS_PER_TOKEN : 0
+  return Math.min(STREAM_TOTAL_TIMEOUT_MS, Math.max(JSON_TOTAL_TIMEOUT_MS, byTokens))
+}
 // 心跳间隔必须小于链路上最短空闲超时的一半，否则中间设备会先于网关切断连接。
 // Nginx 默认 proxy_read_timeout 为 60 秒，这里取 15 秒留足余量。
 const SSE_HEARTBEAT_INTERVAL_MS = toMs(process.env.SSE_HEARTBEAT_INTERVAL_MS, 15000)
@@ -472,7 +483,7 @@ async function forwardWithFailover(provider, kind, body, res) {
   let started = false
   // 记录实际使用的 Key 名称，供日志使用（不再通过响应头暴露给客户端）
   let usedKeyName = null
-  const totalTimeoutMs = body?.stream ? STREAM_TOTAL_TIMEOUT_MS : JSON_TOTAL_TIMEOUT_MS
+  const totalTimeoutMs = jsonTotalTimeout(body?.max_tokens, body?.stream)
   let upstreamBody = kind === 'chat' ? JSON.stringify(withUsageOption(provider, body)) : undefined
   for (let i = 0; i < keys.length; i += 1) {
     const key = keys[(startIdx + i) % keys.length]
