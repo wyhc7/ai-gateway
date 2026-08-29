@@ -188,7 +188,7 @@ npm test --prefix server
 ```
 
 Tests spin up a local mock upstream and cover the core paths: failover, streaming passthrough, token accounting, and model allowlist enforcement.
-CI runs them on every push, and additionally re-checks each day that the one-click install URLs in the README and deploy scripts are still reachable —
+CI runs them on every push, and additionally re-checks every week that the one-click install URLs in the README and deploy scripts are still reachable —
 a broken link there never turns the build red, but it does break the very first thing a new user tries.
 
 ## License
