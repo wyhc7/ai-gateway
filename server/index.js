@@ -46,6 +46,26 @@ function _readRawBody(req, res, limit) {
   })
 }
 
+// 从可能裹了原始 HTTP 请求行的 body 中恢复出 JSON。
+// 策略：先试整体解析；失败则依次尝试 BOM 剥离、首条空行之后、首个 { / [ 之后。
+function recoverBody(text) {
+  const tryParse = (s) => { try { JSON.parse(s); return s } catch { return null } }
+  let r = tryParse(text)
+  if (r !== null) return r
+  const t = text.replace(/^\uFEFF/, '')
+  r = tryParse(t); if (r !== null) return r
+  // 情形A：整段原始 HTTP 请求（请求行+头+空行+JSON），取首个空行之后
+  const m = t.match(/\r?\n\r?\n([\s\S]*)$/)
+  if (m) { r = tryParse(m[1].trim()); if (r !== null) return r }
+  // 情形B：首个 { 起即为 JSON（请求行/头里不含 {）
+  const i = t.indexOf('{')
+  if (i > 0) { r = tryParse(t.slice(i)); if (r !== null) return r }
+  // 情形C：首个 [ 起即为 JSON（数组载荷）
+  const j = t.indexOf('[')
+  if (j > 0) { r = tryParse(t.slice(j)); if (r !== null) return r }
+  return null
+}
+
 async function jsonBody(req, res, next) {
   const ct = req.headers['content-type'] || ''
   if (req.method === 'GET' || req.method === 'HEAD' || (!ct.includes('application/json') && !ct.includes('text/plain'))) {
@@ -54,19 +74,16 @@ async function jsonBody(req, res, next) {
   try {
     const raw = await _readRawBody(req, res, 50 * 1024 * 1024)
     req._rawBody = raw
-    let text = raw.toString('utf8').replace(/^\uFEFF/, '')
-    // 容错1：body 其实是整段原始 HTTP 请求（请求行+头+空行+JSON）
-    const m = text.match(/^[A-Z]+\s+\S+\s+HTTP\/\d\.\d\r?\n[\s\S]*?\r?\n\r?\n([\s\S]*)$/)
-    if (m) {
-      try { JSON.parse(m[1]); text = m[1]; console.warn(`[body修复] ${req.method} ${req.path} 请求体含原始 HTTP 请求行，已剥离头后解析`) }
-      catch { /* 不是，保留原 text 走下面失败分支 */ }
-    }
-    try {
-      req.body = JSON.parse(text)
-    } catch (e) {
+    const text = raw.toString('utf8')
+    const recovered = recoverBody(text)
+    if (recovered === null) {
       const err = new SyntaxError('请求体不是合法的 JSON'); err.type = 'entity.parse.failed'
       throw err
     }
+    if (recovered !== text.replace(/^\uFEFF/, '') && recovered !== text) {
+      console.warn(`[body修复] ${req.method} ${req.path} 已修复非标准请求体（剥离嵌入的 HTTP 请求行/头后解析）`)
+    }
+    req.body = JSON.parse(recovered)
     next()
   } catch (err) {
     next(err)
@@ -78,9 +95,11 @@ app.use((err, req, res, next) => {
   if (err.type === 'entity.parse.failed' || err instanceof SyntaxError) {
     const buf = req._rawBody
     const snippet = buf ? buf.toString('latin1') : ''
-    const head = snippet.slice(0, 500)
-    const tail = snippet.slice(-300)
-    console.error(`[请求体解析失败] ${req.method} ${req.path} err=${err.message} len=${buf ? buf.length : 'n/a'}`)
+    const head = snippet.slice(0, 800)
+    const tail = snippet.slice(-400)
+    const firstBrace = snippet.indexOf('{')
+    const firstBlank = snippet.search(/\r?\n\r?\n/)
+    console.error(`[请求体解析失败] ${req.method} ${req.path} err=${err.message} len=${buf ? buf.length : 'n/a'} firstBrace=${firstBrace} firstBlank=${firstBlank}`)
     if (snippet) {
       console.error(`[请求体解析失败] head=${JSON.stringify(head)}`)
       console.error(`[请求体解析失败] tail=${JSON.stringify(tail)}`)
