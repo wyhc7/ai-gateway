@@ -25,10 +25,19 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(ha, hb)
 }
 
-app.use(express.json({ limit: '50mb' }))
+app.use(express.json({ limit: '50mb', verify: (req, res, buf) => { req._rawBody = buf } }))
 
 app.use((err, req, res, next) => {
   if (err.type === 'entity.parse.failed' || err instanceof SyntaxError) {
+    const buf = req._rawBody
+    const snippet = buf ? buf.toString('latin1') : ''
+    const head = snippet.slice(0, 500)
+    const tail = snippet.slice(-300)
+    console.error(`[请求体解析失败] ${req.method} ${req.path} err=${err.message} len=${buf ? buf.length : 'n/a'}`)
+    if (snippet) {
+      console.error(`[请求体解析失败] head=${JSON.stringify(head)}`)
+      console.error(`[请求体解析失败] tail=${JSON.stringify(tail)}`)
+    }
     return res.status(400).json({ error: { message: '请求体不是合法的 JSON' } })
   }
   if (err.type === 'entity.too.large') {
