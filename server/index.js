@@ -25,7 +25,54 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(ha, hb)
 }
 
-app.use(express.json({ limit: '50mb', verify: (req, res, buf) => { req._rawBody = buf } }))
+// 自定义 JSON 请求体解析：相比 express.json 多了两层容错
+// 1) 客户端把整段原始 HTTP 请求（请求行+头）误塞进 body 时，剥离头后解析 JSON
+// 2) 捕获客户端中途断连（aborted），给出清晰日志而非默认 400
+function _readRawBody(req, res, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let size = 0
+    req.on('data', (c) => {
+      size += c.length
+      if (size > limit) {
+        const e = new Error('request entity too large'); e.type = 'entity.too.large'
+        req.destroy(); reject(e); return
+      }
+      chunks.push(c)
+    })
+    req.on('aborted', () => { const e = new Error('request aborted'); e.type = 'request.aborted'; reject(e) })
+    req.on('end', () => resolve(Buffer.concat(chunks)))
+    req.on('error', reject)
+  })
+}
+
+async function jsonBody(req, res, next) {
+  const ct = req.headers['content-type'] || ''
+  if (req.method === 'GET' || req.method === 'HEAD' || (!ct.includes('application/json') && !ct.includes('text/plain'))) {
+    return next()
+  }
+  try {
+    const raw = await _readRawBody(req, res, 50 * 1024 * 1024)
+    req._rawBody = raw
+    let text = raw.toString('utf8').replace(/^\uFEFF/, '')
+    // 容错1：body 其实是整段原始 HTTP 请求（请求行+头+空行+JSON）
+    const m = text.match(/^[A-Z]+\s+\S+\s+HTTP\/\d\.\d\r?\n[\s\S]*?\r?\n\r?\n([\s\S]*)$/)
+    if (m) {
+      try { JSON.parse(m[1]); text = m[1]; console.warn(`[body修复] ${req.method} ${req.path} 请求体含原始 HTTP 请求行，已剥离头后解析`) }
+      catch { /* 不是，保留原 text 走下面失败分支 */ }
+    }
+    try {
+      req.body = JSON.parse(text)
+    } catch (e) {
+      const err = new SyntaxError('请求体不是合法的 JSON'); err.type = 'entity.parse.failed'
+      throw err
+    }
+    next()
+  } catch (err) {
+    next(err)
+  }
+}
+app.use(jsonBody)
 
 app.use((err, req, res, next) => {
   if (err.type === 'entity.parse.failed' || err instanceof SyntaxError) {
@@ -39,6 +86,11 @@ app.use((err, req, res, next) => {
       console.error(`[请求体解析失败] tail=${JSON.stringify(tail)}`)
     }
     return res.status(400).json({ error: { message: '请求体不是合法的 JSON' } })
+  }
+  if (err.type === 'request.aborted') {
+    if (res.headersSent) return
+    console.log(`[客户端断连] ${req.method} ${req.path} 请求体传输完成前断开`)
+    return res.status(400).json({ error: { message: '客户端在请求体传输完成前断开了连接，请重试' } })
   }
   if (err.type === 'entity.too.large') {
     return res.status(413).json({ error: { message: '请求体过大（超过 50MB 限制）' } })
