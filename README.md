@@ -4,11 +4,11 @@
 
 [![CI](https://github.com/wyhc7/ai-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/wyhc7/ai-gateway/actions/workflows/ci.yml)
 
-一个**零依赖配置、开箱即用**的自托管 AI 中转站（网关）。可视化平台管理、多 Key 自动故障切换、模型自动拉取、仪表盘真实统计、Token 消耗记录。
+一个**零依赖配置、开箱即用**的自托管 AI 中转站（网关）。可视化平台管理、多 Key 自动故障切换、模型自动拉取、仪表盘真实统计、Token 消耗记录。既能接常规 OpenAI 兼容厂商，也能接 **ChatGPT / Grok / Codex 订阅账号**（OAuth 授权或 access_token 导入），把各类账号统一调度成一个 OpenAI 兼容端点。
 
 ## 功能
 
-- **多平台多 Key 管理** — 内置 23 个 AI 平台模版（OpenAI、DeepSeek、通义千问、Gemini、Claude 等），一键创建
+- **25+ 平台模板** — OpenAI 兼容厂商（DeepSeek、通义千问、Gemini、硅基流动、OpenRouter 等）、Grok 订阅 OAuth、Codex 订阅 OAuth、网页版 ChatGPT（chatgpt2api）一键盘点
 - **自动故障切换** — Key 不可用时自动轮换到下一个 Key，请求不中断
 - **分级冷却与半开探测** — 区分「Key 失效」（401/403，长冷却）与「上游抖动」（5xx/限流，短冷却且限制同时冷却数量）；冷却过半后自动放行探测请求，上游恢复即刻可用
 - **模型自动拉取** — 输入 API Key 后一键拉取平台可用模型列表
@@ -16,6 +16,7 @@
 - **仪表盘统计** — 请求量、成功率、Token 消耗（每日/总计）、Key 健康状态，10 秒自动刷新
 - **完全兼容 OpenAI API** — 任何 OpenAI SDK / 客户端均可无缝接入，无需修改代码
 - **思考功能透传** — 流式 / 非流式响应完整透传，DeepSeek R1 的 reasoning_content 等思考输出原样保留
+- **出网代理支持** — 设 `HTTPS_PROXY` / `HTTP_PROXY` 环境变量即全局走代理，受限网络（部分机房、需代理出口）也能访问上游
 - **深色主题响应式界面** — 桌面端、移动端均可使用
 
 ## 快速开始
@@ -43,6 +44,7 @@ cd server && node index.js
 | `DATA_DIR` | `server/data` | 数据目录（含平台 Key，请做好备份） |
 | `WEB_DIST` | `web/dist` | 前端构建产物目录 |
 | `ADMIN_KEY` | 自动生成 | 管理界面登录密钥，见下文 |
+| `HTTPS_PROXY` / `HTTP_PROXY` | 未设置 | 设置后 Node 全局 fetch 走代理（受限网络访问上游必备，含 Grok/Codex 的 auth 域） |
 
 ### 管理密钥
 
@@ -126,6 +128,35 @@ curl -fsSL https://raw.githubusercontent.com/wyhc7/ai-gateway/main/deploy/termux
 
 详见 [DEPLOYMENT.md](docs/DEPLOYMENT.md)
 
+## 订阅账号接入（OAuth / 逆向通道）
+
+网关不止接 API Key，还能把**订阅类账号**当成上游统一调度。三种通道选型见 [docs/MODEL-ACCESS-GUIDE.md](docs/MODEL-ACCESS-GUIDE.md)。
+
+### Gemini（最省事）
+
+Google 官方 OpenAI 兼容端点，选 `Google Gemini` 模板，填 [AI Studio API Key](https://aistudio.google.com/apikey) 即用。无区域封禁（仅国内需过 GFW，可走 `HTTPS_PROXY`），有免费额度。
+
+### Codex（ChatGPT Plus/Pro 编程智能体）
+
+选 `Codex 订阅账号` 模板 → 设备码 OAuth 授权（网页打开 `auth.openai.com/codex/device` 用订阅号确认），网关自动做 Responses API ↔ chat/completions 双向转换。详见 [docs/CODEX-ONBOARDING.md](docs/CODEX-ONBOARDING.md)。
+
+### 网页版 ChatGPT（对话 / 文生图）
+
+走 `chatgpt.com/backend-api/conversation` 私有协议，需经 [chatgpt2api](https://github.com/basketikun/chatgpt2api) 反向代理转成 OpenAI 兼容端点，再用 `ChatGPT 网页/手机版（chatgpt2api）` 模板接入。**直接粘贴 ChatGPT access_token 即可，绕过 device-code 的手机号验证**。一键部署脚本见 [scripts/deploy-chatgpt2api.bat](scripts/deploy-chatgpt2api.bat)，详细见 [docs/CHATGPT2API-ONBOARDING.md](docs/CHATGPT2API-ONBOARDING.md)。
+
+> 注意：Codex 与网页版 ChatGPT 的上游（auth.openai.com / chatgpt.com）对出口区域敏感，服务器需能让流量走 OpenAI 支持区域（美/日/新/韩），否则会被封。配合下方「出网代理」使用。
+
+## 出网代理（受限网络必读）
+
+部分机房 / 本地网络无法直接访问上游（如香港机房 IP 被 Cloudflare / OpenAI 拦截）。网关启动时检测 `HTTPS_PROXY` / `HTTP_PROXY` 环境变量，用 undici ProxyAgent 全局接管 Node fetch（覆盖 Grok OAuth 的 auth 域、Codex 的 chatgpt.com 等所有上游请求）；未设置时零开销、行为不变。
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:7897 HTTP_PROXY=http://127.0.0.1:7897 node server/index.js
+```
+
+- 仅代理「网关 → 上游」流量，不影响客户端 → 网关的请求
+- 连接超时可用 `PROXY_CONNECT_TIMEOUT_MS` 调整
+
 ## 如何使用
 
 ### 1. 添加平台
@@ -171,13 +202,16 @@ print(resp.choices[0].message.content)
 ```
 server/        — Node.js 后端（Express）
   index.js     — API 路由 + 鉴权
-  proxy.js     — 模型匹配、故障切换、转发
+  proxy.js     — 模型匹配、故障切换、转发、协议转换
   store.js     — 配置持久化与统计
-  templates.js — 23 个平台模板
+  templates.js — 25+ 个平台模板
+  codex-oauth.js / codex-responses.js — Codex 设备码授权 + Responses 双向转换
+  oauth.js     — Grok 订阅 OAuth
   test/        — 集成测试
 web/           — Vue 3 + Element Plus 管理界面
 deploy/        — 各系统部署脚本与配置
-docs/          — 部署文档
+scripts/       — 辅助脚本（如 chatgpt2api 本机一键部署）
+docs/          — 部署与接入文档（含各订阅通道速查卡）
 ```
 
 ## 开发

@@ -30,6 +30,10 @@ export const TEMPLATES = [
   { id: 'ollama', name: 'Ollama 本地', group: '本地部署', protocol: 'openai-chat', base_url: 'http://localhost:11434/v1' },
   { id: 'lmstudio', name: 'LM Studio 本地', group: '本地部署', protocol: 'openai-chat', base_url: 'http://localhost:1234/v1' },
   { id: 'vllm', name: 'vLLM 本地', group: '本地部署', protocol: 'openai-chat', base_url: 'http://localhost:8000/v1' },
+  // ChatGPT 网页/手机版账号：经 chatgpt2api 反向代理转成 OpenAI 兼容 /v1。
+  // 凭据在 chatgpt2api 侧以 access_token 导入（手机已登录号可绕过 device-code 的手机号验证），
+  // 网关只做统一调度与负载均衡。chatgpt2api 默认 API 端口 3000，部署改端口时同步改 base_url。
+  { id: 'chatgpt-web', name: 'ChatGPT 网页/手机版（chatgpt2api）', group: '本地中转', protocol: 'openai-chat', base_url: 'http://127.0.0.1:3000/v1', default_models: ['gpt-5', 'gpt-5-mini', 'gpt-5-1', 'gpt-5-2', 'gpt-5-3', 'gpt-5-3-mini', 'gpt-image-2'] },
   // 走官方 OpenAI 兼容端点：鉴权仍是 x-api-key，请求体无需转换即可透传。
   // 直接用原生 /v1/messages 会因缺少 max_tokens、响应结构不同而必然 400。
   { id: 'anthropic', name: 'Anthropic Claude', group: 'Anthropic 格式', protocol: 'anthropic-openai', base_url: 'https://api.anthropic.com/v1' },
