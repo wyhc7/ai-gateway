@@ -9,6 +9,11 @@ export const TEMPLATES = [
   { id: 'siliconflow', name: '硅基流动', group: 'OpenAI 兼容', protocol: 'openai-chat', base_url: 'https://api.siliconflow.cn/v1' },
   { id: 'groq', name: 'Groq', group: 'OpenAI 兼容', protocol: 'openai-chat', base_url: 'https://api.groq.com/openai/v1' },
   { id: 'xai', name: 'xAI', group: 'OpenAI 兼容', protocol: 'openai-chat', base_url: 'https://api.x.ai/v1' },
+  // Grok 订阅账号：凭据来自 OAuth 授权（SuperGrok / X Premium 订阅）或直接粘贴 token。
+  // 两个上游任选：cli-chat-proxy.grok.com 是订阅专用，api.x.ai 是官方 API 端点（token 可能两者通用）。
+  // 上游通常没有干净的 /models，default_models 作为拉取失败的兜底。
+  { id: 'grok-oauth', name: 'Grok 订阅账号（OAuth）', group: 'OAuth 订阅', protocol: 'grok-oauth', base_url: 'https://cli-chat-proxy.grok.com/v1', default_models: ['grok-4', 'grok-4-fast', 'grok-4-reasoning', 'grok-4-reasoning-fast', 'grok-3', 'grok-3-fast', 'grok-3-mini-fast', 'grok-3-reasoner', 'grok-3-reasoner-fast', 'grok-2', 'grok-2-fast'] },
+  { id: 'grok-oauth-api', name: 'Grok 订阅账号（api.x.ai 直连）', group: 'OAuth 订阅', protocol: 'grok-oauth', base_url: 'https://api.x.ai/v1', default_models: ['grok-4', 'grok-4-fast', 'grok-4-reasoning', 'grok-4-reasoning-fast', 'grok-3', 'grok-3-fast', 'grok-3-mini-fast', 'grok-3-reasoner', 'grok-3-reasoner-fast', 'grok-2', 'grok-2-fast'] },
   { id: 'openrouter', name: 'OpenRouter', group: 'OpenAI 兼容', protocol: 'openai-chat', base_url: 'https://openrouter.ai/api/v1', extra_headers: { 'HTTP-Referer': 'https://local.ai-gateway.dev', 'X-Title': 'AI Gateway' } },
   { id: 'volc', name: '火山方舟', group: 'OpenAI 兼容', protocol: 'openai-chat', base_url: 'https://ark.cn-beijing.volces.com/api/v3' },
   { id: 'baidu', name: '百度千帆', group: 'OpenAI 兼容', protocol: 'openai-chat', base_url: 'https://qianfan.baidubce.com/v2' },

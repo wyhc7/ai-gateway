@@ -1,5 +1,18 @@
 import { state, getProvider, bumpStats, bumpFailover, markResult, bumpTokens, persist, persistImmediate } from './store.js'
 import { addLog } from './logger.js'
+import { ensureAccessToken, XAI_OAUTH_BASE_URL } from './oauth.js'
+import { TEMPLATES } from './templates.js'
+
+// 部分订阅类上游（如 Grok 的 cli-chat-proxy / api.x.ai）没有干净的 GET /models，
+// 拉取失败时回退到模板里内置的默认模型列表，保证平台建完即可用，不用手填。
+export function defaultModelsFor(protocol) {
+  for (const t of TEMPLATES) {
+    if (t.protocol === protocol && Array.isArray(t.default_models) && t.default_models.length) {
+      return t.default_models.map((id) => ({ id, owned_by: t.name }))
+    }
+  }
+  return null
+}
 
 function extractTokenCount(usage) {
   if (!usage) return null
@@ -135,6 +148,9 @@ const PROTOCOLS = {
   // 原生 Messages 接口：请求体需 max_tokens、system 独立成字段、响应结构也不同，
   // 直接转发 OpenAI 格式必然 400。保留此项仅供自建了转换层的场景使用。
   'anthropic': { auth: 'anthropic', authHeader: 'x-api-key', authPrefix: '', modelsPath: '/models', chatPath: '/messages', modelsMethod: 'GET' },
+  // Grok 订阅账号（OAuth 凭据）：上游是 CLI chat proxy，接口形态仍是 OpenAI 兼容，
+  // 与 api.x.ai 的区别只在鉴权来源——一个是订阅，一个是按量 API Key。
+  'grok-oauth': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/chat/completions', modelsMethod: 'GET' },
   'custom': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/chat/completions', modelsMethod: 'GET' }
 }
 
@@ -247,6 +263,20 @@ function resolveTarget(body) {
   return { model, providerIdHint, body }
 }
 
+// OAuth 账号的凭据会过期（xAI 的 access_token 寿命约 6 小时），
+// 发请求前必须确认它还有效，否则上游只回一个无从分辨的 401。
+// 刷新成功立刻落盘——进程重启后拿已失效的 token 去撞墙没有意义。
+// 抛错代表这个账号当前不可用，调用方应冷却它并切下一个。
+export async function resolveKeyToken(key) {
+  if (!key || key.type !== 'oauth') return key?.api_key
+  const { credential, refreshed } = await ensureAccessToken(key)
+  if (refreshed) {
+    Object.assign(key, credential)
+    persistImmediate()
+  }
+  return key.access_token
+}
+
 function usableKeys(provider) {
   const now = Date.now()
   const enabled = provider.keys.filter((k) => k.enabled)
@@ -293,14 +323,21 @@ export async function refreshModels(providerId) {
 
   let lastError = null
   for (const key of keys) {
-    const url = joinUrl(provider.base_url, plan.modelsPath, queryAuth(plan, key.api_key))
+    let token
+    try {
+      token = await resolveKeyToken(key)
+    } catch (err) {
+      lastError = `凭据刷新失败：${err.message}`
+      continue
+    }
+    const url = joinUrl(provider.base_url, plan.modelsPath, queryAuth(plan, token))
     const controller = new AbortController()
     let timer = null
     try {
       timer = setTimeout(() => controller.abort(), 60000)
       const resp = await fetch(url, {
         method: plan.modelsMethod,
-        headers: buildHeaders(provider, plan, key.api_key),
+        headers: buildHeaders(provider, plan, token),
         signal: controller.signal
       })
       clearTimeout(timer)
@@ -322,6 +359,16 @@ export async function refreshModels(providerId) {
       lastError = err.name === 'AbortError' ? '请求超时' : `网络错误: ${err.message}`
       applyCooldown(provider, key, 'network')
     }
+  }
+  // 全部 Key 均不可用：若该协议有内置默认模型（Grok 订阅账号常见），
+  // 退回默认列表并标注来源，避免平台因为拉不到 /models 而完全不可用。
+  const fallback = defaultModelsFor(provider.protocol)
+  if (fallback && fallback.length) {
+    provider.models = fallback
+    provider.models_updated_at = Date.now()
+    provider.models_source = 'default'
+    persistImmediate()
+    return { ok: true, count: fallback.length, provider, fallback: true }
   }
   return { ok: false, error: `所有 Key 均不可用，最后错误: ${lastError}` }
 }
@@ -371,6 +418,9 @@ export async function previewModels({ base_url, protocol, api_key, extra_headers
     clearTimeout(timer)
     if (!resp.ok) {
       await resp.body?.cancel()
+      // 上游没有 /models 时回退到内置默认列表（Grok 订阅账号常见这种情况）
+      const fallback = defaultModelsFor(target.protocol)
+      if (fallback) return { ok: true, models: fallback, fallback: true }
       const hint = previewHint(resp.status)
       return { ok: false, error: `拉取失败：HTTP ${resp.status}${hint}` }
     }
@@ -379,6 +429,8 @@ export async function previewModels({ base_url, protocol, api_key, extra_headers
     return { ok: true, models }
   } catch (err) {
     if (timer) clearTimeout(timer)
+    const fallback = defaultModelsFor(target.protocol)
+    if (fallback) return { ok: true, models: fallback, fallback: true }
     const msg = err.name === 'AbortError' ? '拉取超时' : `网络错误: ${err.message}`
     return { ok: false, error: `拉取失败：${msg}（请检查网络或按服务商文档手动填写模型名称）` }
   }
@@ -487,7 +539,18 @@ async function forwardWithFailover(provider, kind, body, res) {
   let upstreamBody = kind === 'chat' ? JSON.stringify(withUsageOption(provider, body)) : undefined
   for (let i = 0; i < keys.length; i += 1) {
     const key = keys[(startIdx + i) % keys.length]
-    const upstream = joinUrl(provider.base_url, path, queryAuth(plan, key.api_key))
+    // OAuth 账号：发请求前确认 access_token 有效。刷新失败不算请求失败，
+    // 冷却这个账号后换下一个——用户看到的是正常切换，而不是一次凭空的报错。
+    let token
+    try {
+      token = await resolveKeyToken(key)
+    } catch (err) {
+      attempts.push(`${key.name || key.id.slice(0, 8)}: 凭据刷新失败（${err.message}）`)
+      applyCooldown(provider, key, 401)
+      bumpFailover()
+      continue
+    }
+    const upstream = joinUrl(provider.base_url, path, queryAuth(plan, token))
     const controller = new AbortController()
     let timer = null
     try {
@@ -496,7 +559,7 @@ async function forwardWithFailover(provider, kind, body, res) {
       timer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS)
       const resp = await fetch(upstream, {
         method: kind === 'chat' ? 'POST' : plan.modelsMethod,
-        headers: buildHeaders(provider, plan, key.api_key),
+        headers: buildHeaders(provider, plan, token),
         body: upstreamBody,
         signal: controller.signal
       })

@@ -4,9 +4,17 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import crypto from 'node:crypto'
 import { state, persist, persistImmediate, getProvider, genId, todayKey, getAdminKey } from './store.js'
-import { handleChat, handleModels, refreshModels, previewModels, DEFAULT_PROTOCOL } from './proxy.js'
+import { handleChat, handleModels, refreshModels, previewModels, defaultModelsFor, DEFAULT_PROTOCOL } from './proxy.js'
 import { TEMPLATES } from './templates.js'
 import { addLog, getLogs, initLogger } from './logger.js'
+import {
+  startDeviceFlow,
+  pollDeviceFlow,
+  cancelDeviceFlow,
+  listPendingSessions,
+  refreshAccessToken,
+  XAI_OAUTH_BASE_URL
+} from './oauth.js'
 
 const app = express()
 // 不暴露框架指纹，降低被针对性扫描的概率
@@ -75,6 +83,14 @@ async function jsonBody(req, res, next) {
     const raw = await _readRawBody(req, res, 50 * 1024 * 1024)
     req._rawBody = raw
     const text = raw.toString('utf8')
+    // 空请求体不是错误：前端对所有请求统一带 Content-Type: application/json，
+    // 但「刷新模型」「重置 Key」「删除」这类接口只用路径参数、不发 body。
+    // express.json 对空 body 的处理就是给出 {}，这里必须保持一致，
+    // 否则会误报「请求体不是合法的 JSON」。
+    if (text.trim() === '') {
+      req.body = {}
+      return next()
+    }
     const recovered = recoverBody(text)
     if (recovered === null) {
       const err = new SyntaxError('请求体不是合法的 JSON'); err.type = 'entity.parse.failed'
@@ -136,14 +152,33 @@ function maskKey(value) {
   return `***...${value.slice(-4)}`
 }
 
+// OAuth 凭据比静态 Key 更敏感：refresh_token 长期有效，泄露等于把整个订阅账号交出去。
+// 列表接口一律只回掩码和状态，明文绝不出现在响应里。
+function serializeKey(k) {
+  const out = { ...k }
+  if (k.type === 'oauth') {
+    out.access_token = k.access_token ? maskKey(k.access_token) : ''
+    out.refresh_token = k.refresh_token ? '***（已保存）' : ''
+    out.refresh_token_present = Boolean(k.refresh_token)
+    out.id_token = undefined
+    out.token_present = Boolean(k.access_token)
+    const skew = 60 * 60 * 1000
+    out.credential_state = !k.access_token
+      ? 'missing'
+      : k.expires_at && Date.now() + skew >= k.expires_at
+        ? 'expiring'
+        : 'valid'
+  } else {
+    out.api_key = maskKey(k.api_key)
+    out.api_key_present = Boolean(k.api_key)
+  }
+  return out
+}
+
 function serializeProvider(p) {
   return {
     ...p,
-    keys: (p.keys || []).map((k) => ({
-      ...k,
-      api_key: maskKey(k.api_key),
-      api_key_present: Boolean(k.api_key)
-    }))
+    keys: (p.keys || []).map(serializeKey)
   }
 }
 
@@ -257,6 +292,11 @@ app.post('/api/providers', (req, res) => {
     ...pickCallPlan(req.body),
     created_at: Date.now()
   }
+  // 订阅类平台（Grok）常没有 /models：创建时若未填模型，预填内置默认列表，避免空模型不可用
+  if (provider.models.length === 0) {
+    const def = defaultModelsFor(provider.protocol)
+    if (def && def.length) provider.models = def
+  }
   if (api_key) {
     provider.keys.push({
       id: genId(),
@@ -320,6 +360,36 @@ app.post('/api/providers/:id/keys', (req, res) => {
   const p = getProvider(req.params.id)
   if (!p) return res.status(404).json({ error: { message: '平台不存在' } })
   const { api_key, name = '', enabled = true } = req.body
+
+  // OAuth 凭据直接导入：粘贴 access_token / sso_token 当订阅账号用（Grok 商城账号常见）。
+  // 没有 refresh_token / expires_at 时按长期有效处理，不主动续期。
+  if (req.body.type === 'oauth') {
+    const { access_token, refresh_token, expires_in, account_id, email } = req.body
+    if (!access_token) return res.status(400).json({ error: { message: 'access_token 不能为空' } })
+    const key = {
+      id: genId(),
+      type: 'oauth',
+      provider: 'grok',
+      name: name || `Grok 账号 ${(p.keys || []).length + 1}`,
+      enabled: Boolean(enabled),
+      cooldown_until: 0,
+      last_error: null,
+      last_error_at: null,
+      created_at: Date.now(),
+      access_token,
+      token_type: 'Bearer'
+    }
+    if (refresh_token) key.refresh_token = refresh_token
+    if (account_id) key.account_id = account_id
+    if (email) key.email = email
+    const expiresIn = Number(expires_in)
+    if (Number.isFinite(expiresIn) && expiresIn > 0) key.expires_at = Date.now() + expiresIn * 1000
+    p.keys = p.keys || []
+    p.keys.push(key)
+    persistImmediate()
+    return res.status(201).json(serializeProvider(p))
+  }
+
   if (!api_key) return res.status(400).json({ error: { message: 'API Key 不能为空' } })
   const key = {
     id: genId(),
@@ -341,10 +411,16 @@ app.put('/api/providers/:id/keys/:keyId', (req, res) => {
   if (!p) return res.status(404).json({ error: { message: '平台不存在' } })
   const key = p.keys.find((k) => k.id === req.params.keyId)
   if (!key) return res.status(404).json({ error: { message: 'Key 不存在' } })
-  const { api_key, name, enabled } = req.body
+  const { api_key, name, enabled, access_token, refresh_token, expires_in } = req.body
   if (api_key !== undefined && api_key) key.api_key = api_key
   if (name !== undefined) key.name = name
   if (enabled !== undefined) key.enabled = Boolean(enabled)
+  if (key.type === 'oauth') {
+    if (access_token) key.access_token = access_token
+    if (refresh_token) key.refresh_token = refresh_token
+    const expiresIn = Number(expires_in)
+    if (Number.isFinite(expiresIn) && expiresIn > 0) key.expires_at = Date.now() + expiresIn * 1000
+  }
   persistImmediate()
   res.json(serializeProvider(p))
 })
@@ -369,6 +445,93 @@ app.post('/api/providers/:id/keys/:keyId/reset', (req, res) => {
   key.last_error_at = null
   persistImmediate()
   res.json(serializeProvider(p))
+})
+
+// ---------------------------------------------------------------------------
+// Grok 订阅账号（OAuth）授权
+//
+// 设备码流程分两步，前端才有机会展示"等待用户在浏览器确认"的中间态：
+//   start —— 申请 user_code，返回验证地址
+//   poll  —— 前端按 retry_after 节奏反复调用，直到 done / error / expired
+// 授权成功后若带了 provider_id，凭据直接绑定为该平台的一个 Key，
+// 之后与普通 API Key 走同一套轮询、冷却、故障转移逻辑。
+// ---------------------------------------------------------------------------
+app.post('/api/oauth/grok/device/start', api(async (req, res) => {
+  const { provider_id = null, name = '' } = req.body || {}
+  if (provider_id && !getProvider(provider_id)) {
+    return res.status(404).json({ error: { message: '平台不存在' } })
+  }
+  try {
+    const flow = await startDeviceFlow({ providerId: provider_id, name })
+    addLog({ type: 'oauth', action: 'device_start', provider_id, detail: `等待用户确认（${flow.user_code}）` })
+    res.status(201).json(flow)
+  } catch (err) {
+    res.status(502).json({ error: { message: err.message } })
+  }
+}))
+
+app.post('/api/oauth/grok/device/:id/poll', api(async (req, res) => {
+  const result = await pollDeviceFlow(req.params.id)
+  if (result.status !== 'done') return res.json(result)
+
+  const { credential, provider_id } = result
+  const p = provider_id ? getProvider(provider_id) : null
+  if (!p) return res.json({ status: 'done', credential: serializeKey(credential) })
+
+  const key = {
+    id: genId(),
+    type: 'oauth',
+    provider: 'grok',
+    name: credential.name || `Grok 账号 ${(p.keys || []).length + 1}`,
+    enabled: true,
+    cooldown_until: 0,
+    last_error: null,
+    last_error_at: null,
+    created_at: Date.now(),
+    ...credential
+  }
+  p.keys = p.keys || []
+  p.keys.push(key)
+  persistImmediate()
+  addLog({ type: 'oauth', action: 'bound', provider_id, detail: `${key.name} 已绑定` })
+  res.json({ status: 'done', key_id: key.id, provider: serializeProvider(p) })
+}))
+
+app.delete('/api/oauth/grok/device/:id', (req, res) => {
+  res.json({ ok: cancelDeviceFlow(req.params.id) })
+})
+
+app.get('/api/oauth/grok/device', (req, res) => {
+  res.json({ sessions: listPendingSessions() })
+})
+
+app.post('/api/oauth/grok/accounts/:providerId/:keyId/refresh', api(async (req, res) => {
+  const p = getProvider(req.params.providerId)
+  if (!p) return res.status(404).json({ error: { message: '平台不存在' } })
+  const key = (p.keys || []).find((k) => k.id === req.params.keyId)
+  if (!key) return res.status(404).json({ error: { message: '账号不存在' } })
+  if (key.type !== 'oauth') {
+    return res.status(400).json({ error: { message: '该凭据不是 OAuth 账号，无需续期' } })
+  }
+  try {
+    const next = await refreshAccessToken(key)
+    Object.assign(key, next)
+    key.last_error = null
+    key.cooldown_until = 0
+    persistImmediate()
+    addLog({ type: 'oauth', action: 'refresh', provider_id: p.id, detail: `${key.name} 续期成功` })
+    res.json({ ok: true, provider: serializeProvider(p) })
+  } catch (err) {
+    // 续期失败只影响这一个账号——记录错误让它进入冷却，别的账号照常服务
+    key.last_error = err.message
+    key.last_error_at = Date.now()
+    persistImmediate()
+    res.status(400).json({ error: { message: err.message } })
+  }
+}))
+
+app.get('/api/oauth/grok/defaults', (req, res) => {
+  res.json({ base_url: XAI_OAUTH_BASE_URL, protocol: 'grok-oauth' })
 })
 
 app.post('/api/v1/chat/completions', api(handleChat))
@@ -408,8 +571,16 @@ app.post('/api/providers/import', (req, res) => {
       models: normalizeModels(item.models, item.name),
       keys: Array.isArray(item.keys) ? item.keys.map((k) => ({
         id: genId(),
+        type: k.type === 'oauth' ? 'oauth' : undefined,
+        provider: k.provider || 'grok',
         name: k.name || 'Key 1',
         api_key: k.api_key || '',
+        access_token: k.access_token || '',
+        refresh_token: k.refresh_token || '',
+        account_id: k.account_id,
+        email: k.email,
+        token_type: k.token_type || 'Bearer',
+        expires_at: k.expires_at || 0,
         enabled: k.enabled !== undefined ? k.enabled : true,
         cooldown_until: 0,
         last_error: null,

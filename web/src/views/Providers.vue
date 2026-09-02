@@ -1,34 +1,38 @@
 <template>
   <div>
-    <div style="display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-bottom: 16px">
-      <el-button type="primary" @click="openCreateDialog">
-        <svg style="margin-right: 5px" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
-        添加平台
-      </el-button>
-      <el-button type="success" plain @click="exportProviders">
-        <svg style="margin-right: 5px" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-        导出
-      </el-button>
-      <el-button type="info" plain @click="triggerImport">
-        <svg style="margin-right: 5px" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
-        导入
-      </el-button>
+    <div class="tool-row">
+      <span class="label-micro">{{ providers.length }} 个平台</span>
+      <div class="tool-actions">
+        <el-button plain @click="triggerImport">
+          <svg style="margin-right: 5px" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
+          导入
+        </el-button>
+        <el-button plain @click="exportProviders">
+          <svg style="margin-right: 5px" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
+          导出
+        </el-button>
+        <el-button type="primary" @click="openCreateDialog">
+          <svg style="margin-right: 5px" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
+          添加平台
+        </el-button>
+      </div>
       <input ref="importInput" type="file" accept=".json" style="display: none" @change="importProviders" />
     </div>
 
-    <div v-loading="loading" style="display: flex; flex-direction: column; gap: 14px">
+    <div v-loading="loading" class="provider-list">
       <div v-if="!loading && providers.length === 0" class="empty-state">
-        <div class="empty-icon">
-          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
-            <path d="M3.3 7l8.7 5 8.7-5" /><path d="M12 22V12" />
-          </svg>
-        </div>
+        <div class="empty-mark">空</div>
         <div class="empty-title">还没有任何平台</div>
         <div class="empty-desc">点击「添加平台」，选择接口格式（OpenAI Chat / Responses / Anthropic），填入 API 地址与 Token 即可接入。<br />支持拉取模型列表、一个平台配置多个 Key，自动限流切换。</div>
         <el-button type="primary" @click="openCreateDialog">添加第一个平台</el-button>
       </div>
-      <div v-for="p in providers" :key="p.id" class="provider-card">
+
+      <div
+        v-for="p in providers"
+        :key="p.id"
+        class="provider-card"
+        :class="{ 'is-open': expandedId === p.id }"
+      >
         <div class="provider-head" @click="toggle(p)">
           <div :class="['provider-avatar', !p.enabled && 'offline']">{{ p.name.charAt(0).toUpperCase() }}</div>
           <div class="provider-info">
@@ -47,63 +51,89 @@
             <div class="stat"><div class="num">{{ p.keys.length }}</div><div class="label">Key</div></div>
             <div class="stat"><div class="num">{{ p.models.length }}</div><div class="label">模型</div></div>
           </div>
-          <el-icon style="color: var(--text-muted); transition: transform 0.2s; flex-shrink: 0" :style="{ transform: expandedId === p.id ? 'rotate(180deg)' : '' }">
-            <ArrowDown />
-          </el-icon>
+          <span class="chev" :class="{ open: expandedId === p.id }">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6" /></svg>
+          </span>
         </div>
 
         <el-collapse-transition>
-          <div v-show="expandedId === p.id" class="provider-expand" style="border-top: 1px solid var(--border-soft)">
+          <div v-show="expandedId === p.id" class="provider-expand">
             <el-row :gutter="20">
               <el-col :xs="24" :md="14">
-                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px">
-                  <span class="section-title" style="margin-bottom: 0">API Keys · {{ p.keys.length }}</span>
-                  <el-button size="small" type="primary" plain @click="openAddKeyDialog(p)">添加 Key</el-button>
+                <div class="sub-head">
+                  <span class="section-title">{{ isOAuthProvider(p) ? '订阅账号' : 'API Keys' }} · {{ p.keys.length }}</span>
+                  <div class="head-actions">
+                    <template v-if="isOAuthProvider(p)">
+                      <el-button size="small" plain @click="openImportCredentialDialog(p)">导入 Token</el-button>
+                      <el-button size="small" plain @click="openGrokAuth(p)">授权 Grok 账号</el-button>
+                    </template>
+                    <el-button v-else size="small" plain @click="openAddKeyDialog(p)">添加 Key</el-button>
+                  </div>
                 </div>
-                <div v-if="p.keys.length === 0" class="muted" style="padding: 14px 0">尚未配置 Key，点击右上角添加。</div>
-                <div v-for="k in p.keys" :key="k.id" class="key-item">
-                  <span class="badge-dot" :class="keyDot(k)"></span>
-                  <span class="key-name">{{ k.name }}</span>
-                  <span class="mask">{{ k.api_key }}</span>
-                  <template v-if="isCooldown(k)">
-                    <span class="badge badge-red">冷却中 {{ cooldownText(k) }}</span>
-                    <el-tooltip :content="k.last_error || ''" placement="top">
-                      <span class="badge badge-amber">{{ k.last_error }}</span>
-                    </el-tooltip>
-                    <el-button size="small" type="warning" plain @click="resetKey(p, k)">立即恢复</el-button>
-                  </template>
-                  <el-switch v-model="k.enabled" @change="toggleKey(p, k)" />
-                  <el-button size="small" text type="primary" @click="openEditKeyDialog(p, k)">编辑</el-button>
-                  <el-button size="small" text type="danger" @click="removeKey(p, k)">删除</el-button>
+                <div class="key-ledger">
+                  <div v-if="p.keys.length === 0" class="key-empty">
+                    {{ isOAuthProvider(p) ? '尚未绑定订阅账号，点击「授权 Grok 账号」添加。' : '尚未配置 Key，点击右上角添加。' }}
+                  </div>
+                  <div
+                    v-for="k in p.keys"
+                    :key="k.id"
+                    class="key-item"
+                    :class="{ 'is-off': !k.enabled }"
+                  >
+                    <span class="badge-dot" :class="keyDot(k)"></span>
+                    <span class="key-name">{{ k.name }}</span>
+                    <template v-if="k.type === 'oauth'">
+                      <span class="mask">{{ k.email || '订阅账号' }}</span>
+                      <span class="badge" :class="credBadge(k)">{{ credText(k) }}</span>
+                      <el-button
+                        v-if="k.refresh_token_present"
+                        size="small"
+                        text
+                        :loading="refreshingCred === k.id"
+                        @click="refreshCredential(p, k)"
+                      >续期</el-button>
+                    </template>
+                    <span v-else class="mask">{{ k.api_key }}</span>
+                    <template v-if="isCooldown(k)">
+                      <span class="badge badge-red">冷却 {{ cooldownText(k) }}</span>
+                      <el-tooltip :content="k.last_error || '无错误信息'" placement="top">
+                        <span class="badge badge-amber key-err">{{ k.last_error || '失败' }}</span>
+                      </el-tooltip>
+                      <el-button size="small" plain @click="resetKey(p, k)">立即恢复</el-button>
+                    </template>
+                    <SwitchRail v-model="k.enabled" small :label="`Key ${k.name}`" @change="toggleKey(p, k)" />
+                    <el-button v-if="k.type !== 'oauth'" size="small" text @click="openEditKeyDialog(p, k)">编辑</el-button>
+                    <el-button size="small" text type="danger" @click="removeKey(p, k)">删除</el-button>
+                  </div>
                 </div>
               </el-col>
 
               <el-col :xs="24" :md="10">
-                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px">
-                  <span class="section-title" style="margin-bottom: 0">模型列表 · {{ p.models.length }}</span>
+                <div class="sub-head">
+                  <span class="section-title">模型列表 · {{ p.models.length }}</span>
                   <el-button size="small" :loading="refreshingId === p.id" @click="refreshModels(p)">
-                    <svg style="margin-right: 4px" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></svg>
-                    刷新模型
+                    <svg style="margin-right: 4px" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></svg>
+                    刷新
                   </el-button>
                 </div>
-                <div v-if="p.models.length === 0" class="muted" style="padding: 14px 0">模型为空，点击"刷新模型"自动从平台拉取。</div>
+                <div v-if="p.models.length === 0" class="key-empty">模型为空，点击「刷新」自动从平台拉取。</div>
                 <div v-else class="model-list">
                   <div v-for="m in p.models" :key="m.id" class="model-item">
                     <span class="model-id">{{ m.id }}</span>
                     <span class="muted">{{ m.owned_by }}</span>
                   </div>
                 </div>
-                <div v-if="p.models_updated_at" class="muted" style="margin-top: 10px">最近更新：{{ formatTime(p.models_updated_at) }}</div>
+                <div v-if="p.models_updated_at" class="muted" style="margin-top: 8px">最近更新：{{ formatTime(p.models_updated_at) }}</div>
               </el-col>
             </el-row>
 
             <div class="provider-actions">
-              <span class="muted" style="margin-right: auto">平台开关：</span>
-              <el-switch v-model="p.enabled" @change="toggleProvider(p)" />
+              <span class="muted" style="margin-right: auto">平台开关</span>
+              <SwitchRail v-model="p.enabled" :label="`平台 ${p.name}`" @change="toggleProvider(p)" />
               <el-button size="small" @click="openEditDialog(p)">编辑平台</el-button>
               <el-popconfirm title="确定删除该平台及其所有 Key？" @confirm="removeProvider(p)">
                 <template #reference>
-                  <el-button size="small" type="danger" plain>删除平台</el-button>
+                  <el-button size="small" plain type="danger">删除平台</el-button>
                 </template>
               </el-popconfirm>
             </div>
@@ -147,7 +177,7 @@
           <el-input v-model="providerForm.api_key" placeholder="请输入 API Token" show-password />
         </el-form-item>
 
-        <el-collapse v-model="advancedOpen" style="margin-bottom: 18px; border: 1px solid var(--border-soft); border-radius: 10px; overflow: hidden">
+        <el-collapse v-model="advancedOpen" style="margin-bottom: 18px; border: 1px solid var(--rule-soft); border-radius: 6px; overflow: hidden">
           <el-collapse-item name="advanced">
             <template #title>
               <span style="font-size: 13px">高级调用方案（鉴权 / 端点路径，留空 = 使用所选接口格式的默认配置）</span>
@@ -190,7 +220,7 @@
         </el-form-item>
         <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 20px">
           <el-button type="primary" plain :loading="previewing" @click="doPreview">
-            <svg style="margin-right: 5px" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></svg>
+            <svg style="margin-right: 5px" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></svg>
             拉取列表
           </el-button>
           <span class="muted" style="font-size: 12px; line-height: 1.7; padding-top: 4px">输入 API Token 后可拉取可用模型列表选择，选择后填入「模型名称」；<br />拉取失败时按服务商文档手动填写。</span>
@@ -233,12 +263,83 @@
           <el-input v-model="keyForm.api_key" placeholder="sk-..." show-password />
         </el-form-item>
         <el-form-item label="启用">
-          <el-switch v-model="keyForm.enabled" />
+          <SwitchRail v-model="keyForm.enabled" />
         </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="keyDialog = false">取消</el-button>
         <el-button type="primary" @click="saveKey">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="grokDialog"
+      title="授权 Grok 订阅账号"
+      width="520px"
+      :close-on-click-modal="false"
+      @closed="closeGrokAuth"
+    >
+      <div v-if="!deviceFlow" class="grok-intro">
+        <p>用你的 SuperGrok / X Premium 订阅账号授权，授权后这个账号的额度即可通过网关调用。</p>
+        <p class="grok-note">不需要 API Key，也不会保存你的登录密码。网关只拿到一枚可撤销的访问令牌。</p>
+      </div>
+
+      <div v-else-if="deviceFlow.status === 'pending'" class="device-step">
+        <div class="device-code">{{ deviceFlow.user_code }}</div>
+        <p class="device-hint">
+          请在浏览器打开
+          <a :href="deviceFlow.verify_url" target="_blank" rel="noopener noreferrer">{{ deviceFlow.verify_url }}</a>
+          ，输入上面的验证码完成授权。
+        </p>
+        <div class="device-actions">
+          <el-button size="small" plain @click="copyCode">复制验证码</el-button>
+          <el-button v-if="deviceFlow.verify_url_complete" size="small" text @click="openVerifyPage">
+            直接打开验证页
+          </el-button>
+        </div>
+        <p class="device-status">
+          等待授权确认……页面会自动检查，无需手动刷新。
+        </p>
+      </div>
+
+      <div v-else-if="deviceFlow.status === 'done'" class="device-done">
+        <p>授权成功，账号已绑定到该平台。</p>
+      </div>
+
+      <div v-else class="device-error">
+        <p>{{ deviceFlow.error || '授权失败' }}</p>
+      </div>
+
+      <template #footer>
+        <el-button @click="grokDialog = false">{{ deviceFlow?.status === 'done' ? '完成' : '取消' }}</el-button>
+        <el-button v-if="!deviceFlow" type="primary" :loading="startingAuth" @click="startGrokAuth">
+          开始授权
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="importDialog" title="导入 Grok 账号 Token" width="520px" :close-on-click-modal="false">
+      <div class="grok-intro">
+        <p>粘贴商城/工具提供的 Grok 订阅账号 Token（access_token 或 sso_token），网关直接把它当 Bearer 转发到上游，无需浏览器授权。</p>
+        <p class="grok-note">不填 refresh_token 时按长期有效处理；填了的话可以点账号旁的「续期」刷新。</p>
+      </div>
+      <el-form label-width="130px">
+        <el-form-item label="账号名称">
+          <el-input v-model="importForm.name" placeholder="可选，如 Grok-01" />
+        </el-form-item>
+        <el-form-item label="access_token / sso_token" required>
+          <el-input v-model="importForm.access_token" placeholder="eyJ0eXAiOi...（或以 . 分隔的会话票据）" show-password />
+        </el-form-item>
+        <el-form-item label="refresh_token（可选）">
+          <el-input v-model="importForm.refresh_token" placeholder="有就填，填了才能自动续期" show-password />
+        </el-form-item>
+        <el-form-item label="有效时长（秒）">
+          <el-input v-model="importForm.expires_in" placeholder="留空 = 长期有效；如 21600（6 小时）" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="importDialog = false">取消</el-button>
+        <el-button type="primary" :loading="importingCred" @click="saveImportCredential">导入</el-button>
       </template>
     </el-dialog>
   </div>
@@ -247,8 +348,8 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowDown } from '@element-plus/icons-vue'
-import api, { notifyError } from '../api.js'
+import api from '../api.js'
+import SwitchRail from '../components/SwitchRail.vue'
 
 const providers = ref([])
 const loading = ref(false)
@@ -285,8 +386,8 @@ const PROTOCOL_LABELS = {
   'openai-chat': 'OpenAI Chat',
   'openai-responses': 'OpenAI Responses',
   'anthropic-openai': 'Anthropic（OpenAI 兼容）',
-  'anthropic': 'Anthropic 原生',
-  'custom': '自定义'
+  anthropic: 'Anthropic 原生',
+  custom: '自定义'
 }
 
 function protocolLabel(proto) {
@@ -384,7 +485,7 @@ async function load() {
   try {
     providers.value = await api.getProviders()
   } catch (e) {
-    notifyError(e, '加载平台列表失败')
+    ElMessage.error(e?.message || '加载平台列表失败')
   } finally {
     loading.value = false
   }
@@ -459,7 +560,7 @@ async function saveProvider() {
     providerDialog.value = false
     await load()
   } catch (e) {
-    notifyError(e, '保存平台失败')
+    ElMessage.error(e?.message || '保存平台失败')
   }
 }
 
@@ -496,7 +597,7 @@ async function doPreview() {
     previewSelected.value = []
     previewDialog.value = true
   } catch (e) {
-    notifyError(e, '拉取模型列表失败')
+    ElMessage.error(e?.message || '拉取模型列表失败')
   } finally {
     previewing.value = false
   }
@@ -517,7 +618,7 @@ async function removeProvider(p) {
     if (expandedId.value === p.id) expandedId.value = null
     await load()
   } catch (e) {
-    notifyError(e, '删除平台失败')
+    ElMessage.error(e?.message || '删除平台失败')
   }
 }
 
@@ -526,7 +627,7 @@ async function toggleProvider(p) {
     await api.updateProvider(p.id, { enabled: p.enabled })
   } catch (e) {
     p.enabled = !p.enabled
-    notifyError(e, '更新失败')
+    ElMessage.error(e?.message || '更新失败')
   }
 }
 
@@ -537,7 +638,7 @@ async function refreshModels(p) {
     ElMessage.success(`已获取 ${result.count} 个模型`)
     await load()
   } catch (e) {
-    notifyError(e, '刷新模型失败')
+    ElMessage.error(e?.message || '刷新模型失败')
   } finally {
     refreshingId.value = null
   }
@@ -572,7 +673,7 @@ async function saveKey() {
     keyDialog.value = false
     await load()
   } catch (e) {
-    notifyError(e, '保存 Key 失败')
+    ElMessage.error(e?.message || '保存 Key 失败')
   }
 }
 
@@ -581,7 +682,7 @@ async function toggleKey(p, k) {
     await api.updateKey(p.id, k.id, { enabled: k.enabled })
   } catch (e) {
     k.enabled = !k.enabled
-    notifyError(e, '更新失败')
+    ElMessage.error(e?.message || '更新失败')
   }
 }
 
@@ -592,7 +693,7 @@ async function removeKey(p, k) {
     ElMessage.success('Key 已删除')
     await load()
   } catch (e) {
-    if (e !== 'cancel' && e?.message !== 'cancel') notifyError(e, '删除失败')
+    if (e !== 'cancel' && e?.message !== 'cancel') ElMessage.error(e?.message || '删除失败')
   }
 }
 
@@ -602,7 +703,173 @@ async function resetKey(p, k) {
     ElMessage.success('已恢复该 Key')
     await load()
   } catch (e) {
-    notifyError(e, '恢复失败')
+    ElMessage.error(e?.message || '恢复失败')
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Grok 订阅账号（OAuth 设备码授权）
+//
+// 流程：服务端申请 user_code → 用户在浏览器确认 → 前端按服务端给的节奏轮询
+// 直到 done / error / expired。轮询间隔由服务端决定（含 slow_down 退避），
+// 前端不自己拍脑袋定频率。
+// ---------------------------------------------------------------------------
+const grokDialog = ref(false)
+const startingAuth = ref(false)
+const deviceFlow = ref(null)
+const refreshingCred = ref(null)
+const authProvider = ref(null)
+let pollTimer = null
+
+// 「导入 Token」直接粘贴 access_token / sso_token 作为订阅账号凭据
+const importDialog = ref(false)
+const importingCred = ref(false)
+const importProvider = ref(null)
+const importForm = ref({ name: '', access_token: '', refresh_token: '', expires_in: '' })
+
+function openImportCredentialDialog(p) {
+  importProvider.value = p
+  importForm.value = { name: '', access_token: '', refresh_token: '', expires_in: '' }
+  importDialog.value = true
+}
+
+async function saveImportCredential() {
+  const { name, access_token, refresh_token, expires_in } = importForm.value
+  if (!access_token || !access_token.trim()) return ElMessage.warning('请先填写 access_token / sso_token')
+  importingCred.value = true
+  try {
+    await api.addKey(importProvider.value.id, {
+      type: 'oauth',
+      provider: 'grok',
+      name: name || '',
+      access_token: access_token.trim(),
+      refresh_token: refresh_token ? refresh_token.trim() : '',
+      expires_in: expires_in ? Number(expires_in) : 0,
+      enabled: true
+    })
+    ElMessage.success('Token 已导入，账号已绑定')
+    importDialog.value = false
+    await load()
+  } catch (e) {
+    ElMessage.error(e?.message || '导入失败')
+  } finally {
+    importingCred.value = false
+  }
+}
+
+function isOAuthProvider(p) {
+  return p?.protocol === 'grok-oauth'
+}
+
+// 状态由后端判定（后端用统一的 1 小时提前量），前端只负责呈现，避免两边口径不一致
+function credBadge(k) {
+  if (k.credential_state === 'valid') return 'badge-green'
+  if (k.credential_state === 'expiring') return 'badge-amber'
+  return 'badge-red'
+}
+
+function credText(k) {
+  if (k.credential_state === 'valid') return '正常'
+  if (k.credential_state === 'expiring') return '即将过期'
+  return '凭据缺失'
+}
+
+function openGrokAuth(p) {
+  authProvider.value = p
+  deviceFlow.value = null
+  grokDialog.value = true
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    clearTimeout(pollTimer)
+    pollTimer = null
+  }
+}
+
+function closeGrokAuth() {
+  stopPolling()
+  const flow = deviceFlow.value
+  // 用户中途放弃时通知服务端丢弃会话，别让它在那儿空转到过期
+  if (flow?.status === 'pending' && flow?.session_id) {
+    api.cancelGrokDevice(flow.session_id).catch(() => {})
+  }
+  deviceFlow.value = null
+  authProvider.value = null
+}
+
+async function startGrokAuth() {
+  startingAuth.value = true
+  try {
+    const flow = await api.startGrokDevice({ provider_id: authProvider.value?.id })
+    deviceFlow.value = {
+      status: 'pending',
+      session_id: flow.session_id,
+      user_code: flow.user_code,
+      verify_url: flow.verification_uri,
+      verify_url_complete: flow.verification_uri_complete
+    }
+    schedulePoll(2000)
+  } catch (e) {
+    // 最常见的失败原因是服务器访问不到 auth.x.ai，提示要说到点子上
+    ElMessage.error(e?.message || '发起授权失败，请确认服务器可以访问 auth.x.ai')
+  } finally {
+    startingAuth.value = false
+  }
+}
+
+function schedulePoll(delay) {
+  stopPolling()
+  pollTimer = setTimeout(pollOnce, delay)
+}
+
+async function pollOnce() {
+  const sessionId = deviceFlow.value?.session_id
+  if (!sessionId) return
+  try {
+    const r = await api.pollGrokDevice(sessionId)
+    if (r.status === 'done') {
+      stopPolling()
+      deviceFlow.value = { status: 'done' }
+      ElMessage.success('Grok 账号授权成功')
+      await load()
+      return
+    }
+    if (r.status === 'error' || r.status === 'expired') {
+      stopPolling()
+      deviceFlow.value = { status: 'error', error: r.error || '授权已超时，请重新发起' }
+      return
+    }
+    schedulePoll(Math.max((r.retry_after || 5) * 1000, 2000))
+  } catch (e) {
+    stopPolling()
+    deviceFlow.value = { status: 'error', error: e?.message || '轮询失败' }
+  }
+}
+
+async function copyCode() {
+  try {
+    await navigator.clipboard.writeText(deviceFlow.value.user_code)
+    ElMessage.success('验证码已复制')
+  } catch {
+    ElMessage.warning('复制失败，请手动选中')
+  }
+}
+
+function openVerifyPage() {
+  window.open(deviceFlow.value.verify_url_complete, '_blank', 'noopener')
+}
+
+async function refreshCredential(p, k) {
+  refreshingCred.value = k.id
+  try {
+    await api.refreshGrokAccount(p.id, k.id)
+    ElMessage.success('凭据已续期')
+    await load()
+  } catch (e) {
+    ElMessage.error(e?.message || '续期失败')
+  } finally {
+    refreshingCred.value = null
   }
 }
 
@@ -617,7 +884,7 @@ async function exportProviders() {
     URL.revokeObjectURL(url)
     ElMessage.success('导出成功（含 Key 和模型）')
   } catch (e) {
-    notifyError(e, '导出失败')
+    ElMessage.error(e?.message || '导出失败')
   }
 }
 
@@ -658,7 +925,7 @@ async function importProviders(event) {
       ElMessage.info('已取消导入')
     })
   } catch (e) {
-    notifyError(e, '导入失败')
+    ElMessage.error(e?.message || '导入失败')
   }
   event.target.value = ''
 }
@@ -675,31 +942,55 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.tool-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.tool-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.provider-list { display: flex; flex-direction: column; gap: 12px; }
+
+.sub-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.sub-head .section-title { margin-bottom: 0; flex: 1; }
+
+.key-err {
+  max-width: 170px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+}
+
 .preset-label {
   font-size: 12px;
-  color: var(--text-muted);
+  color: var(--ink-3);
   margin-bottom: 6px;
 }
 
 .preview-summary {
   margin-top: 14px;
-  background: var(--bg-850);
-  border: 1px solid var(--border-soft);
-  border-radius: 10px;
+  background: var(--paper-sunk);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--r-sm);
   padding: 12px;
   max-height: 200px;
   overflow-y: auto;
 }
 
-.preview-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.provider-expand {
-  padding: 20px;
-}
+.preview-tags { display: flex; flex-wrap: wrap; gap: 4px; }
 
 .adv-grid {
   display: grid;
@@ -708,126 +999,44 @@ onBeforeUnmount(() => {
   padding-top: 4px;
 }
 
-.provider-actions {
-  display: flex;
-  gap: 10px;
-  margin-top: 18px;
-  justify-content: flex-end;
-  align-items: center;
-  flex-wrap: wrap;
-}
-
-@media (max-width: 767px) {
-  .provider-expand {
-    padding: 14px;
-  }
-
-  .adv-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .adv-grid .el-form-item {
-    margin-bottom: 12px;
-  }
-
-  .provider-actions {
-    gap: 8px;
-  }
-
-  .provider-actions .muted {
-    flex-basis: 100%;
-  }
-}
-
 .empty-state {
   display: flex;
   flex-direction: column;
   align-items: center;
   text-align: center;
-  padding: 60px 20px;
-  background: var(--bg-800);
-  border: 1px dashed var(--border);
-  border-radius: 14px;
+  padding: 56px 20px;
+  background: var(--surface);
+  border: 1px dashed var(--rule-strong);
+  border-radius: var(--r);
 }
 
-.empty-icon {
-  width: 64px;
-  height: 64px;
-  border-radius: 16px;
-  background: rgba(99, 102, 241, 0.12);
-  color: #a5b4fc;
+.empty-mark {
+  width: 46px;
+  height: 46px;
+  border: 1.5px dashed var(--rule-strong);
+  border-radius: var(--r-sm);
+  color: var(--ink-4);
+  font-family: var(--font-mono);
+  font-size: 15px;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: 16px;
+  margin-bottom: 14px;
 }
 
-.empty-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 8px;
-}
+.empty-title { font-size: 15.5px; font-weight: 600; margin-bottom: 8px; color: var(--ink); }
 
 .empty-desc {
-  color: var(--text-muted);
+  color: var(--ink-3);
   font-size: 13px;
   line-height: 1.8;
   margin-bottom: 20px;
 }
 
-.openai-hint {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-  background: rgba(52, 211, 153, 0.08);
-  border: 1px solid rgba(52, 211, 153, 0.25);
-  border-radius: 10px;
-  padding: 10px 12px;
-  color: #6ee7b7;
-  font-size: 12.5px;
-  line-height: 1.7;
-}
-
-.openai-hint code {
-  background: rgba(0, 0, 0, 0.3);
-  border-radius: 4px;
-  padding: 0 5px;
-  font-family: ui-monospace, monospace;
-  font-size: 11.5px;
-}
-
-.model-list {
-  max-height: 280px;
-  overflow-y: auto;
-  border: 1px solid var(--border-soft);
-  border-radius: 10px;
-}
-
-.model-item {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 7px 13px;
-  border-bottom: 1px solid var(--border-soft);
-  font-size: 12.5px;
-  align-items: center;
-}
-
-.model-item:last-child {
-  border-bottom: none;
-}
-
-.model-item:hover {
-  background: var(--bg-850);
-}
-
-.model-id {
-  word-break: break-all;
-  font-family: ui-monospace, monospace;
-  color: var(--text-main);
-}
-
-.model-item .muted {
-  flex-shrink: 0;
+@media (max-width: 767px) {
+  .adv-grid { grid-template-columns: 1fr; }
+  .tool-row { flex-wrap: wrap; }
+  .tool-actions { margin-left: 0; flex-basis: 100%; }
+  .tool-actions .el-button { flex: 1; }
 }
 </style>
