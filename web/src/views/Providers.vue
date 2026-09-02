@@ -65,14 +65,14 @@
                   <div class="head-actions">
                     <template v-if="isOAuthProvider(p)">
                       <el-button size="small" plain @click="openImportCredentialDialog(p)">导入 Token</el-button>
-                      <el-button size="small" plain @click="openGrokAuth(p)">授权 Grok 账号</el-button>
+                      <el-button size="small" plain @click="openGrokAuth(p)">授权 {{ authLabel(p) }} 账号</el-button>
                     </template>
                     <el-button v-else size="small" plain @click="openAddKeyDialog(p)">添加 Key</el-button>
                   </div>
                 </div>
                 <div class="key-ledger">
                   <div v-if="p.keys.length === 0" class="key-empty">
-                    {{ isOAuthProvider(p) ? '尚未绑定订阅账号，点击「授权 Grok 账号」添加。' : '尚未配置 Key，点击右上角添加。' }}
+                    {{ isOAuthProvider(p) ? `尚未绑定订阅账号，点击「授权 ${authLabel(p)} 账号」添加。` : '尚未配置 Key，点击右上角添加。' }}
                   </div>
                   <div
                     v-for="k in p.keys"
@@ -274,14 +274,20 @@
 
     <el-dialog
       v-model="grokDialog"
-      title="授权 Grok 订阅账号"
+      :title="`授权 ${authLabel(authProvider)} 订阅账号`"
       width="520px"
       :close-on-click-modal="false"
       @closed="closeGrokAuth"
     >
       <div v-if="!deviceFlow" class="grok-intro">
-        <p>用你的 SuperGrok / X Premium 订阅账号授权，授权后这个账号的额度即可通过网关调用。</p>
+        <p v-if="isCodexProvider(authProvider)">
+          用你的 ChatGPT Plus / Pro / Business 订阅账号授权，授权后这个账号的 Codex 额度即可通过网关调用。
+        </p>
+        <p v-else>用你的 SuperGrok / X Premium 订阅账号授权，授权后这个账号的额度即可通过网关调用。</p>
         <p class="grok-note">不需要 API Key，也不会保存你的登录密码。网关只拿到一枚可撤销的访问令牌。</p>
+        <p v-if="isCodexProvider(authProvider)" class="grok-note">
+          注意：需先在 ChatGPT → 设置 → 安全 中开启「允许设备码登录」（默认关闭），否则无法完成授权。
+        </p>
       </div>
 
       <div v-else-if="deviceFlow.status === 'pending'" class="device-step">
@@ -318,20 +324,26 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="importDialog" title="导入 Grok 账号 Token" width="520px" :close-on-click-modal="false">
+    <el-dialog v-model="importDialog" :title="`导入 ${authLabel(importProvider)} 账号 Token`" width="520px" :close-on-click-modal="false">
       <div class="grok-intro">
-        <p>粘贴商城/工具提供的 Grok 订阅账号 Token（access_token 或 sso_token），网关直接把它当 Bearer 转发到上游，无需浏览器授权。</p>
+        <p v-if="isCodexProvider(importProvider)">
+          粘贴 ~/.codex/auth.json 里的凭据（access_token 和可选的 refresh_token、account_id），网关直接当 Bearer 转发到上游。account_id 在 Codex 上游的 ChatGPT-Account-Id 头里要用，务必填对。
+        </p>
+        <p v-else>粘贴商城/工具提供的 Grok 订阅账号 Token（access_token 或 sso_token），网关直接把它当 Bearer 转发到上游，无需浏览器授权。</p>
         <p class="grok-note">不填 refresh_token 时按长期有效处理；填了的话可以点账号旁的「续期」刷新。</p>
       </div>
       <el-form label-width="130px">
         <el-form-item label="账号名称">
-          <el-input v-model="importForm.name" placeholder="可选，如 Grok-01" />
+          <el-input v-model="importForm.name" :placeholder="`可选，如 ${authLabel(importProvider)}-01`" />
         </el-form-item>
         <el-form-item label="access_token / sso_token" required>
           <el-input v-model="importForm.access_token" placeholder="eyJ0eXAiOi...（或以 . 分隔的会话票据）" show-password />
         </el-form-item>
         <el-form-item label="refresh_token（可选）">
           <el-input v-model="importForm.refresh_token" placeholder="有就填，填了才能自动续期" show-password />
+        </el-form-item>
+        <el-form-item v-if="isCodexProvider(importProvider)" label="account_id">
+          <el-input v-model="importForm.account_id" placeholder="Codex 上游需要，如 acct_xxxx 或 openai 账号 ID" />
         </el-form-item>
         <el-form-item label="有效时长（秒）">
           <el-input v-model="importForm.expires_in" placeholder="留空 = 长期有效；如 21600（6 小时）" />
@@ -386,6 +398,8 @@ const PROTOCOL_LABELS = {
   'openai-chat': 'OpenAI Chat',
   'openai-responses': 'OpenAI Responses',
   'anthropic-openai': 'Anthropic（OpenAI 兼容）',
+  'grok-oauth': 'Grok 订阅（OAuth）',
+  'codex-oauth': 'Codex 订阅（OAuth）',
   anthropic: 'Anthropic 原生',
   custom: '自定义'
 }
@@ -708,11 +722,12 @@ async function resetKey(p, k) {
 }
 
 // ---------------------------------------------------------------------------
-// Grok 订阅账号（OAuth 设备码授权）
+// Grok / Codex 订阅账号（OAuth 设备码授权）
 //
 // 流程：服务端申请 user_code → 用户在浏览器确认 → 前端按服务端给的节奏轮询
 // 直到 done / error / expired。轮询间隔由服务端决定（含 slow_down 退避），
 // 前端不自己拍脑袋定频率。
+// Grok 与 Codex 走同一套 UI 与状态机，差异只在端点与文案，按协议分流。
 // ---------------------------------------------------------------------------
 const grokDialog = ref(false)
 const startingAuth = ref(false)
@@ -721,29 +736,49 @@ const refreshingCred = ref(null)
 const authProvider = ref(null)
 let pollTimer = null
 
+function isOAuthProvider(p) {
+  return p?.protocol === 'grok-oauth' || p?.protocol === 'codex-oauth'
+}
+
+function isCodexProvider(p) {
+  return p?.protocol === 'codex-oauth'
+}
+
+// 前端操作归属哪一套 OAuth 端点
+function oauthKind(p) {
+  return isCodexProvider(p) ? 'codex' : 'grok'
+}
+
+function authLabel(p) {
+  return isCodexProvider(p) ? 'Codex' : 'Grok'
+}
+
 // 「导入 Token」直接粘贴 access_token / sso_token 作为订阅账号凭据
 const importDialog = ref(false)
 const importingCred = ref(false)
 const importProvider = ref(null)
-const importForm = ref({ name: '', access_token: '', refresh_token: '', expires_in: '' })
+const importForm = ref({ name: '', access_token: '', refresh_token: '', account_id: '', expires_in: '' })
 
 function openImportCredentialDialog(p) {
   importProvider.value = p
-  importForm.value = { name: '', access_token: '', refresh_token: '', expires_in: '' }
+  importForm.value = { name: '', access_token: '', refresh_token: '', account_id: '', expires_in: '' }
   importDialog.value = true
 }
 
 async function saveImportCredential() {
-  const { name, access_token, refresh_token, expires_in } = importForm.value
+  const { name, access_token, refresh_token, account_id, expires_in } = importForm.value
   if (!access_token || !access_token.trim()) return ElMessage.warning('请先填写 access_token / sso_token')
   importingCred.value = true
   try {
     await api.addKey(importProvider.value.id, {
       type: 'oauth',
-      provider: 'grok',
+      // Codex 平台导入时必须标 codex，凭据刷新与账号头才会走对的那套逻辑
+      provider: oauthKind(importProvider.value),
       name: name || '',
       access_token: access_token.trim(),
       refresh_token: refresh_token ? refresh_token.trim() : '',
+      // Codex 上游需要 ChatGPT-Account-Id，导入时顺手带上
+      account_id: account_id ? account_id.trim() : '',
       expires_in: expires_in ? Number(expires_in) : 0,
       enabled: true
     })
@@ -755,10 +790,6 @@ async function saveImportCredential() {
   } finally {
     importingCred.value = false
   }
-}
-
-function isOAuthProvider(p) {
-  return p?.protocol === 'grok-oauth'
 }
 
 // 状态由后端判定（后端用统一的 1 小时提前量），前端只负责呈现，避免两边口径不一致
@@ -792,7 +823,8 @@ function closeGrokAuth() {
   const flow = deviceFlow.value
   // 用户中途放弃时通知服务端丢弃会话，别让它在那儿空转到过期
   if (flow?.status === 'pending' && flow?.session_id) {
-    api.cancelGrokDevice(flow.session_id).catch(() => {})
+    const kind = isCodexProvider(authProvider.value) ? 'codex' : 'grok'
+    ;(kind === 'codex' ? api.cancelCodexDevice(flow.session_id) : api.cancelGrokDevice(flow.session_id)).catch(() => {})
   }
   deviceFlow.value = null
   authProvider.value = null
@@ -801,7 +833,10 @@ function closeGrokAuth() {
 async function startGrokAuth() {
   startingAuth.value = true
   try {
-    const flow = await api.startGrokDevice({ provider_id: authProvider.value?.id })
+    const kind = oauthKind(authProvider.value)
+    const flow = kind === 'codex'
+      ? await api.startCodexDevice({ provider_id: authProvider.value?.id })
+      : await api.startGrokDevice({ provider_id: authProvider.value?.id })
     deviceFlow.value = {
       status: 'pending',
       session_id: flow.session_id,
@@ -811,8 +846,9 @@ async function startGrokAuth() {
     }
     schedulePoll(2000)
   } catch (e) {
-    // 最常见的失败原因是服务器访问不到 auth.x.ai，提示要说到点子上
-    ElMessage.error(e?.message || '发起授权失败，请确认服务器可以访问 auth.x.ai')
+    // 最常见的失败原因是服务器访问不到上游授权服务器，提示要说到点子上
+    const host = isCodexProvider(authProvider.value) ? 'auth.openai.com' : 'auth.x.ai'
+    ElMessage.error(e?.message || `发起授权失败，请确认服务器可以访问 ${host}`)
   } finally {
     startingAuth.value = false
   }
@@ -827,11 +863,14 @@ async function pollOnce() {
   const sessionId = deviceFlow.value?.session_id
   if (!sessionId) return
   try {
-    const r = await api.pollGrokDevice(sessionId)
+    const kind = oauthKind(authProvider.value)
+    const r = kind === 'codex'
+      ? await api.pollCodexDevice(sessionId)
+      : await api.pollGrokDevice(sessionId)
     if (r.status === 'done') {
       stopPolling()
       deviceFlow.value = { status: 'done' }
-      ElMessage.success('Grok 账号授权成功')
+      ElMessage.success(`${authLabel(authProvider.value)} 账号授权成功`)
       await load()
       return
     }
@@ -863,7 +902,8 @@ function openVerifyPage() {
 async function refreshCredential(p, k) {
   refreshingCred.value = k.id
   try {
-    await api.refreshGrokAccount(p.id, k.id)
+    const kind = oauthKind(p)
+    await (kind === 'codex' ? api.refreshCodexAccount(p.id, k.id) : api.refreshGrokAccount(p.id, k.id))
     ElMessage.success('凭据已续期')
     await load()
   } catch (e) {

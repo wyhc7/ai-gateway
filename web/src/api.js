@@ -78,7 +78,12 @@ export const api = {
   startGrokDevice: (data) => request('/api/oauth/grok/device/start', { method: 'POST', body: JSON.stringify(data || {}) }),
   pollGrokDevice: (sessionId) => request(`/api/oauth/grok/device/${sessionId}/poll`, { method: 'POST' }),
   cancelGrokDevice: (sessionId) => request(`/api/oauth/grok/device/${sessionId}`, { method: 'DELETE' }),
-  refreshGrokAccount: (providerId, keyId) => request(`/api/oauth/grok/accounts/${providerId}/${keyId}/refresh`, { method: 'POST' })
+  refreshGrokAccount: (providerId, keyId) => request(`/api/oauth/grok/accounts/${providerId}/${keyId}/refresh`, { method: 'POST' }),
+  // Codex 订阅账号（ChatGPT Plus/Pro 的设备码授权）
+  startCodexDevice: (data) => request('/api/oauth/codex/device/start', { method: 'POST', body: JSON.stringify(data || {}) }),
+  pollCodexDevice: (sessionId) => request(`/api/oauth/codex/device/${sessionId}/poll`, { method: 'POST' }),
+  cancelCodexDevice: (sessionId) => request(`/api/oauth/codex/device/${sessionId}`, { method: 'DELETE' }),
+  refreshCodexAccount: (providerId, keyId) => request(`/api/oauth/codex/accounts/${providerId}/${keyId}/refresh`, { method: 'POST' })
 }
 
 export function notifyError(err, fallback = '操作失败') {

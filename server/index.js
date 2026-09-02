@@ -15,6 +15,15 @@ import {
   refreshAccessToken,
   XAI_OAUTH_BASE_URL
 } from './oauth.js'
+import {
+  startDeviceFlow as startCodexDeviceFlow,
+  pollDeviceFlow as pollCodexDeviceFlow,
+  cancelDeviceFlow as cancelCodexDeviceFlow,
+  listPendingSessions as listCodexPendingSessions,
+  refreshAccessToken as refreshCodexToken,
+  CODEX_API_BASE_URL,
+  CODEX_VERIFICATION_URI
+} from './codex-oauth.js'
 
 // —— 出网代理支持 ——
 // 部署在受限网络（部分机房、需要代理出口的环境）时，设置 HTTPS_PROXY / HTTP_PROXY
@@ -383,14 +392,19 @@ app.post('/api/providers/:id/keys', (req, res) => {
 
   // OAuth 凭据直接导入：粘贴 access_token / sso_token 当订阅账号用（Grok 商城账号常见）。
   // 没有 refresh_token / expires_at 时按长期有效处理，不主动续期。
+  // 也支持 Codex：把 ~/.codex/auth.json 里的 tokens 粘进来即可，
+  // 此时 provider 传 codex，并建议带上 account_id（上游 ChatGPT-Account-Id 头要用）。
   if (req.body.type === 'oauth') {
     const { access_token, refresh_token, expires_in, account_id, email } = req.body
     if (!access_token) return res.status(400).json({ error: { message: 'access_token 不能为空' } })
+    // 未显式指定时保持 grok，兼容既有调用与前端
+    const credProvider = req.body.provider === 'codex' ? 'codex' : 'grok'
+    const label = credProvider === 'codex' ? 'Codex 账号' : 'Grok 账号'
     const key = {
       id: genId(),
       type: 'oauth',
-      provider: 'grok',
-      name: name || `Grok 账号 ${(p.keys || []).length + 1}`,
+      provider: credProvider,
+      name: name || `${label} ${(p.keys || []).length + 1}`,
       enabled: Boolean(enabled),
       cooldown_until: 0,
       last_error: null,
@@ -431,13 +445,16 @@ app.put('/api/providers/:id/keys/:keyId', (req, res) => {
   if (!p) return res.status(404).json({ error: { message: '平台不存在' } })
   const key = p.keys.find((k) => k.id === req.params.keyId)
   if (!key) return res.status(404).json({ error: { message: 'Key 不存在' } })
-  const { api_key, name, enabled, access_token, refresh_token, expires_in } = req.body
+  const { api_key, name, enabled, access_token, refresh_token, expires_in, account_id, email } = req.body
   if (api_key !== undefined && api_key) key.api_key = api_key
   if (name !== undefined) key.name = name
   if (enabled !== undefined) key.enabled = Boolean(enabled)
   if (key.type === 'oauth') {
     if (access_token) key.access_token = access_token
     if (refresh_token) key.refresh_token = refresh_token
+    // Codex 上游的 ChatGPT-Account-Id 头用，导入时后补也允许
+    if (account_id) key.account_id = account_id
+    if (email) key.email = email
     const expiresIn = Number(expires_in)
     if (Number.isFinite(expiresIn) && expiresIn > 0) key.expires_at = Date.now() + expiresIn * 1000
   }
@@ -552,6 +569,87 @@ app.post('/api/oauth/grok/accounts/:providerId/:keyId/refresh', api(async (req, 
 
 app.get('/api/oauth/grok/defaults', (req, res) => {
   res.json({ base_url: XAI_OAUTH_BASE_URL, protocol: 'grok-oauth' })
+})
+
+// —— Codex（ChatGPT 订阅账号）设备码授权 ——
+// 流程与 Grok 一致，差异都在 codex-oauth.js 里（JSON 端点、两步换 token）。
+// start 必须带 provider_id：不带的话 poll 成功后凭据无处可去，
+// 只会返回 credential 而不入库（Grok 早期踩过这个坑）。
+app.post('/api/oauth/codex/device/start', api(async (req, res) => {
+  const { provider_id = null, name = '' } = req.body || {}
+  if (provider_id && !getProvider(provider_id)) {
+    return res.status(404).json({ error: { message: '平台不存在' } })
+  }
+  try {
+    const flow = await startCodexDeviceFlow({ providerId: provider_id, name })
+    addLog({ type: 'oauth', action: 'device_start', provider_id, detail: `Codex 等待用户确认（${flow.user_code}）` })
+    res.status(201).json(flow)
+  } catch (err) {
+    res.status(502).json({ error: { message: err.message } })
+  }
+}))
+
+app.post('/api/oauth/codex/device/:id/poll', api(async (req, res) => {
+  const result = await pollCodexDeviceFlow(req.params.id)
+  if (result.status !== 'done') return res.json(result)
+
+  const { credential, provider_id } = result
+  const p = provider_id ? getProvider(provider_id) : null
+  if (!p) return res.json({ status: 'done', credential: serializeKey(credential) })
+
+  const key = {
+    id: genId(),
+    type: 'oauth',
+    provider: 'codex',
+    name: credential.name || `Codex 账号 ${(p.keys || []).length + 1}`,
+    enabled: true,
+    cooldown_until: 0,
+    last_error: null,
+    last_error_at: null,
+    created_at: Date.now(),
+    ...credential
+  }
+  p.keys = p.keys || []
+  p.keys.push(key)
+  persistImmediate()
+  addLog({ type: 'oauth', action: 'bound', provider_id, detail: `${key.name} 已绑定${key.account_id ? `（${key.account_id}）` : ''}` })
+  res.json({ status: 'done', key_id: key.id, provider: serializeProvider(p) })
+}))
+
+app.delete('/api/oauth/codex/device/:id', (req, res) => {
+  res.json({ ok: cancelCodexDeviceFlow(req.params.id) })
+})
+
+app.get('/api/oauth/codex/device', (req, res) => {
+  res.json({ sessions: listCodexPendingSessions() })
+})
+
+app.post('/api/oauth/codex/accounts/:providerId/:keyId/refresh', api(async (req, res) => {
+  const p = getProvider(req.params.providerId)
+  if (!p) return res.status(404).json({ error: { message: '平台不存在' } })
+  const key = (p.keys || []).find((k) => k.id === req.params.keyId)
+  if (!key) return res.status(404).json({ error: { message: '账号不存在' } })
+  if (key.type !== 'oauth') {
+    return res.status(400).json({ error: { message: '该凭据不是 OAuth 账号，无需续期' } })
+  }
+  try {
+    const next = await refreshCodexToken(key)
+    Object.assign(key, next)
+    key.last_error = null
+    key.cooldown_until = 0
+    persistImmediate()
+    addLog({ type: 'oauth', action: 'refresh', provider_id: p.id, detail: `${key.name} 续期成功` })
+    res.json({ ok: true, provider: serializeProvider(p) })
+  } catch (err) {
+    key.last_error = err.message
+    key.last_error_at = Date.now()
+    persistImmediate()
+    res.status(400).json({ error: { message: err.message } })
+  }
+}))
+
+app.get('/api/oauth/codex/defaults', (req, res) => {
+  res.json({ base_url: CODEX_API_BASE_URL, protocol: 'codex-oauth', verification_uri: CODEX_VERIFICATION_URI })
 })
 
 app.post('/api/v1/chat/completions', api(handleChat))

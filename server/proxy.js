@@ -1,6 +1,8 @@
 import { state, getProvider, bumpStats, bumpFailover, markResult, bumpTokens, persist, persistImmediate } from './store.js'
 import { addLog } from './logger.js'
 import { ensureAccessToken, XAI_OAUTH_BASE_URL } from './oauth.js'
+import { ensureAccessToken as ensureCodexToken } from './codex-oauth.js'
+import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexAccountHeader } from './codex-responses.js'
 import { TEMPLATES } from './templates.js'
 
 // 部分订阅类上游（如 Grok 的 cli-chat-proxy / api.x.ai）没有干净的 GET /models，
@@ -151,7 +153,15 @@ const PROTOCOLS = {
   // Grok 订阅账号（OAuth 凭据）：上游是 CLI chat proxy，接口形态仍是 OpenAI 兼容，
   // 与 api.x.ai 的区别只在鉴权来源——一个是订阅，一个是按量 API Key。
   'grok-oauth': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/chat/completions', modelsMethod: 'GET' },
+  // Codex 订阅账号（ChatGPT Plus/Pro 的 OAuth 凭据）：上游是 Responses API，
+  // 请求体用 input[]、响应体用 output[]，与 chat/completions 不同，需要转换层。
+  'codex-oauth': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/responses', modelsMethod: 'GET' },
   'custom': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/chat/completions', modelsMethod: 'GET' }
+}
+
+// 走 Responses API 的协议：请求/响应都需要在 chat/completions 与 Responses 之间转换
+export function isResponsesProtocol(protocol) {
+  return protocol === 'codex-oauth'
 }
 
 export function protocolInfo(protocol) {
@@ -215,8 +225,13 @@ function queryAuth(plan, apiKey) {
   return plan.auth === 'query' ? { [plan.authQueryParam || 'api_key']: apiKey } : null
 }
 
-function buildHeaders(provider, plan, apiKey) {
+function buildHeaders(provider, plan, apiKey, key = null) {
   const headers = { 'Content-Type': 'application/json', ...autoHeaders(provider) }
+  // Codex 上游要求每个账号带上自己的 ChatGPT-Account-Id，值随 Key 变化，
+  // 因此不能放进平台级的 extra_headers，只能在选定 Key 之后按 Key 注入
+  if (isResponsesProtocol(provider.protocol) && key) {
+    Object.assign(headers, codexAccountHeader(key))
+  }
   for (const [k, v] of Object.entries(provider.extra_headers || {})) {
     if (k && v) headers[k] = v
   }
@@ -225,6 +240,16 @@ function buildHeaders(provider, plan, apiKey) {
     headers['anthropic-version'] = '2023-06-01'
   }
   return headers
+}
+
+// 发给上游的请求体。走 Responses 的协议（Codex）需要把 chat/completions
+// 结构转成 input[]/instructions，其余协议原样透传。
+// 抽成函数是因为 400 重试时要按可能被收敛过的 max_tokens 重新序列化。
+function serializeUpstreamBody(provider, body) {
+  const payload = withUsageOption(provider, body)
+  return JSON.stringify(
+    isResponsesProtocol(provider.protocol) ? toCodexRequest(payload) : payload
+  )
 }
 
 function mergeAuthAndCustomHeaders(extraHeaders, plan, apiKey) {
@@ -271,7 +296,10 @@ function resolveTarget(body) {
 // 抛错代表这个账号当前不可用，调用方应冷却它并切下一个。
 export async function resolveKeyToken(key) {
   if (!key || key.type !== 'oauth') return key?.api_key
-  const { credential, refreshed } = await ensureAccessToken(key)
+  // Grok 与 Codex 的 OAuth 端点、参数、凭据字段都不同，
+  // 按凭据自带的 provider 标记分流（导入/授权时写入）
+  const ensure = key.provider === 'codex' ? ensureCodexToken : ensureAccessToken
+  const { credential, refreshed } = await ensure(key)
   if (refreshed) {
     Object.assign(key, credential)
     persistImmediate()
@@ -339,7 +367,7 @@ export async function refreshModels(providerId) {
       timer = setTimeout(() => controller.abort(), 60000)
       const resp = await fetch(url, {
         method: plan.modelsMethod,
-        headers: buildHeaders(provider, plan, token),
+        headers: buildHeaders(provider, plan, token, key),
         signal: controller.signal
       })
       clearTimeout(timer)
@@ -538,7 +566,7 @@ async function forwardWithFailover(provider, kind, body, res) {
   // 记录实际使用的 Key 名称，供日志使用（不再通过响应头暴露给客户端）
   let usedKeyName = null
   const totalTimeoutMs = jsonTotalTimeout(body?.max_tokens, body?.stream)
-  let upstreamBody = kind === 'chat' ? JSON.stringify(withUsageOption(provider, body)) : undefined
+  let upstreamBody = kind === 'chat' ? serializeUpstreamBody(provider, body) : undefined
   for (let i = 0; i < keys.length; i += 1) {
     const key = keys[(startIdx + i) % keys.length]
     // OAuth 账号：发请求前确认 access_token 有效。刷新失败不算请求失败，
@@ -561,7 +589,7 @@ async function forwardWithFailover(provider, kind, body, res) {
       timer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS)
       const resp = await fetch(upstream, {
         method: kind === 'chat' ? 'POST' : plan.modelsMethod,
-        headers: buildHeaders(provider, plan, token),
+        headers: buildHeaders(provider, plan, token, key),
         body: upstreamBody,
         signal: controller.signal
       })
@@ -603,7 +631,7 @@ async function forwardWithFailover(provider, kind, body, res) {
         if (clamped != null) {
           console.warn(`[max_tokens 自适应] 模型 ${body?.model} 上限 ${clamped}，按上游报错范围收敛后重试`)
           // upstreamBody 在循环外已序列化，这里要重新生成，否则重试仍带上旧值
-          upstreamBody = kind === 'chat' ? JSON.stringify(withUsageOption(provider, body)) : undefined
+          upstreamBody = kind === 'chat' ? serializeUpstreamBody(provider, body) : undefined
         }
         attempts.push(`${key.name || key.id.slice(0, 8)}: HTTP 400${clamped != null ? '（max_tokens 收敛后重试）' : '（瞬时重试）'}`)
         bumpFailover()
@@ -642,6 +670,12 @@ async function forwardWithFailover(provider, kind, body, res) {
         let idleTimedOut = false
         const lastActivity = { t: Date.now() }
         let lastHeartbeat = Date.now()
+        // Codex 上游发的是 response.* 事件流，客户端看不懂，必须逐事件转成
+        // chat.completion.chunk。非 Responses 协议不走转换，保持原样零开销透传。
+        const transformer =
+          isResponsesProtocol(provider.protocol) && kind === 'chat'
+            ? createCodexStreamTransformer(body?.model || '')
+            : null
 
         const onClientClose = () => {
           clientClosed = true
@@ -671,31 +705,44 @@ async function forwardWithFailover(provider, kind, body, res) {
         }, heartbeatTickInterval(SSE_HEARTBEAT_INTERVAL_MS))
         if (watcher.unref) watcher.unref()
 
+        // 背压处理：缓冲区满时等待 drain，避免慢客户端导致内存无限堆积。
+        // 但等待必须有上限——无限等待会让上游的发送缓冲一直堵着，
+        // 直到上游判定超时主动断开，这正是长回答中途断流的成因之一。
+        const writeChunk = async (chunk) => {
+          if (res.write(chunk)) return
+          await new Promise((resolve) => {
+            let settled = false
+            const guard = setTimeout(finish, BACKPRESSURE_MAX_WAIT_MS)
+            function finish() {
+              if (settled) return
+              settled = true
+              clearTimeout(guard)
+              res.removeListener('drain', finish)
+              res.removeListener('close', finish)
+              resolve()
+            }
+            res.once('drain', finish)
+            res.once('close', finish)
+          })
+        }
+
         try {
           while (true) {
             const { done, value } = await reader.read()
             if (done) break
+            if (transformer) {
+              // Responses 事件 → chat.completion.chunk。chunk 与事件边界不对齐，
+              // 转换器内部按空行切分，没凑齐时返回空串，这里自然跳过写出。
+              const converted = transformer.push(textDecoder.decode(value, { stream: true }))
+              if (converted) {
+                lastActivity.t = Date.now()
+                await writeChunk(converted)
+              }
+              continue
+            }
             if (value && value.byteLength > 0) {
               lastActivity.t = Date.now()
-              // 背压处理：缓冲区满时等待 drain，避免慢客户端导致内存无限堆积。
-              // 但等待必须有上限——无限等待会让上游的发送缓冲一直堵着，
-              // 直到上游判定超时主动断开，这正是长回答中途断流的成因之一。
-              if (!res.write(value)) {
-                await new Promise((resolve) => {
-                  let settled = false
-                  const guard = setTimeout(finish, BACKPRESSURE_MAX_WAIT_MS)
-                  function finish() {
-                    if (settled) return
-                    settled = true
-                    clearTimeout(guard)
-                    res.removeListener('drain', finish)
-                    res.removeListener('close', finish)
-                    resolve()
-                  }
-                  res.once('drain', finish)
-                  res.once('close', finish)
-                })
-              }
+              await writeChunk(value)
             }
             sseBuffer += textDecoder.decode(value, { stream: true })
             // 防御：单行超长（>1MB 无换行）时丢弃，避免缓冲区无限增长
@@ -704,6 +751,13 @@ async function forwardWithFailover(provider, kind, body, res) {
             sseBuffer = parsed.rest
             if (parsed.lastUsageData) lastUsageData = parsed.lastUsageData
             if (parsed.deltaText) streamedText += parsed.deltaText
+          }
+          // 上游结束时把缓冲里最后一个事件吐出来，并补上 [DONE]，
+          // 否则客户端会一直挂着等终止标记
+          if (transformer) {
+            const tail = transformer.flush()
+            streamedText = transformer.streamedText
+            if (tail) await writeChunk(tail)
           }
         } catch (err) {
           const isClientAbort =
@@ -752,7 +806,15 @@ async function forwardWithFailover(provider, kind, body, res) {
           bumpFailover()
           continue
         }
-        if (!res.writableEnded) res.end(text)
+        // Responses 协议的响应体是 output[]，客户端按 chat/completions 解析会拿不到内容，
+        // 这里转一次。转换失败（比如上游返回的是错误体）就原样透传，别把报错吞掉。
+        let respondText = text
+        if (isResponsesProtocol(provider.protocol) && kind === 'chat') {
+          try {
+            respondText = JSON.stringify(fromCodexResponse(JSON.parse(text), body?.model || ''))
+          } catch { /* 非预期结构，原样透传 */ }
+        }
+        if (!res.writableEnded) res.end(respondText)
         try {
           const data = JSON.parse(text)
           const usage = data.usage || (data.choices?.[0]?.usage)
