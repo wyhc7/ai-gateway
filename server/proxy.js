@@ -175,7 +175,9 @@ const roundRobin = new Map()
 
 const EXTRA_HEADERS = {
   'x-ai': {},
-  'openrouter.ai': { 'HTTP-Referer': 'https://local.ai-gateway.dev', 'X-Title': 'AI Gateway' }
+  'openrouter.ai': { 'HTTP-Referer': 'https://local.ai-gateway.dev', 'X-Title': 'AI Gateway' },
+  // cli-chat-proxy.grok.com 校验客户端版本，不带 x-grok-client-version 会拒绝请求
+  'cli-chat-proxy.grok.com': { 'x-grok-client-version': '0.1.202', 'x-grok-client-surface': 'grok-cli' }
 }
 
 function joinUrl(base, path, query) {
