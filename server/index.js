@@ -16,6 +16,26 @@ import {
   XAI_OAUTH_BASE_URL
 } from './oauth.js'
 
+// —— 出网代理支持 ——
+// 部署在受限网络（部分机房、需要代理出口的环境）时，设置 HTTPS_PROXY / HTTP_PROXY
+// 环境变量即可让网关所有上游请求（含 Grok OAuth 的 auth.x.ai / cli-chat-proxy.grok.com）
+// 自动走代理。Node 的全局 fetch 默认不读代理环境变量，这里显式用 undici ProxyAgent
+// 全局接管；未设置代理时零开销，行为与之前完全一致。
+const OUTBOUND_PROXY = (process.env.HTTPS_PROXY || process.env.https_proxy ||
+  process.env.HTTP_PROXY || process.env.http_proxy || process.env.ALL_PROXY || '').trim()
+if (OUTBOUND_PROXY) {
+  try {
+    const { setGlobalDispatcher, ProxyAgent } = await import('undici')
+    setGlobalDispatcher(new ProxyAgent({
+      uri: OUTBOUND_PROXY,
+      connect: { timeout: Number(process.env.PROXY_CONNECT_TIMEOUT_MS || 15000) }
+    }))
+    console.log(`[proxy] 全局出网代理已启用: ${OUTBOUND_PROXY}`)
+  } catch (err) {
+    console.error(`[proxy] 代理初始化失败，将直连上游: ${err.message}`)
+  }
+}
+
 const app = express()
 // 不暴露框架指纹，降低被针对性扫描的概率
 app.disable('x-powered-by')

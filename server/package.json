@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "ai-gateway": "file:..",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "undici": "^7.29.0"
   }
 }
