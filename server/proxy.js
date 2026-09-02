@@ -195,7 +195,7 @@ function nextRoundRobin(roundRobinKey, list) {
   return idx
 }
 
-function autoHeaders(provider) {
+export function autoHeaders(provider) {
   const h = {}
   const host = new URL(provider.base_url).host
   for (const [domain, headers] of Object.entries(EXTRA_HEADERS)) {

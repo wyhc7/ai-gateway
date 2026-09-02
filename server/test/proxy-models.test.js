@@ -14,10 +14,11 @@ const realFetch = globalThis.fetch
 let state = null
 let defaultModelsFor = null
 let refreshModels = null
+let autoHeaders = null
 
 before(async () => {
   ;({ state } = await import('../store.js'))
-  ;({ defaultModelsFor, refreshModels } = await import('../proxy.js'))
+  ;({ defaultModelsFor, refreshModels, autoHeaders } = await import('../proxy.js'))
 })
 
 beforeEach(() => { globalThis.fetch = realFetch })
@@ -106,5 +107,19 @@ describe('refreshModels 兜底', () => {
     } finally {
       state.providers.length = 0
     }
+  })
+})
+
+describe('autoHeaders（上游自动附加头）', () => {
+  test('cli-chat-proxy.grok.com 自动带上 x-grok-client-version 与 x-grok-client-surface', () => {
+    const h = autoHeaders({ base_url: 'https://cli-chat-proxy.grok.com/v1' })
+    assert.equal(h['x-grok-client-version'], '0.1.202')
+    assert.equal(h['x-grok-client-surface'], 'grok-cli')
+  })
+
+  test('其他平台（api.x.ai）不带 grok 版本头', () => {
+    const h = autoHeaders({ base_url: 'https://api.x.ai/v1' })
+    assert.equal(h['x-grok-client-version'], undefined)
+    assert.equal(h['x-grok-client-surface'], undefined)
   })
 })
