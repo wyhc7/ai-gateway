@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import crypto from 'node:crypto'
@@ -7,6 +7,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const DATA_DIR = process.env.DATA_DIR || join(__dirname, 'data')
 const CONFIG_PATH = join(DATA_DIR, 'config.json')
 const BACKUP_PATH = join(DATA_DIR, 'config.json.bak')
+
+// 原子写：先写同目录临时文件再 rename 覆盖目标。
+// writeFileSync 直接覆盖在写入中途断电/崩溃时会留下半截文件，
+// 而 rename 是文件系统级的原子替换——要么旧文件完整、要么新文件完整，绝不会损坏。
+function atomicWrite(path, data) {
+  const tmp = `${path}.tmp`
+  writeFileSync(tmp, data, 'utf-8')
+  renameSync(tmp, path)
+}
 
 function defaultStats() {
   return {
@@ -135,7 +144,7 @@ function load() {
         if (JSON.stringify(backup.stats) !== before) changed = true
       }
       console.error(`[store] 已从备份恢复 ${backup.providers.length} 个平台`)
-      writeFileSync(CONFIG_PATH, JSON.stringify(backup, null, 2), 'utf-8')
+      atomicWrite(CONFIG_PATH, JSON.stringify(backup, null, 2))
       return backup
     }
   }
@@ -152,7 +161,7 @@ function load() {
 
 function save(state) {
   mkdirSync(DATA_DIR, { recursive: true })
-  writeFileSync(CONFIG_PATH, JSON.stringify(state, null, 2), 'utf-8')
+  atomicWrite(CONFIG_PATH, JSON.stringify(state, null, 2))
 }
 
 let _dirty = false
@@ -172,12 +181,13 @@ function flush() {
   _dirty = false
 
   if (!existsSync(CONFIG_PATH)) {
-    writeFileSync(CONFIG_PATH, JSON.stringify(state, null, 2), 'utf-8')
+    atomicWrite(CONFIG_PATH, JSON.stringify(state, null, 2))
     return
   }
   try {
-    writeFileSync(BACKUP_PATH, JSON.stringify(state, null, 2), 'utf-8')
-    writeFileSync(CONFIG_PATH, JSON.stringify(state, null, 2), 'utf-8')
+    // 先原子写备份再原子写主文件：备份失败不会影响主文件，主文件替换永远是完整的
+    atomicWrite(BACKUP_PATH, JSON.stringify(state, null, 2))
+    atomicWrite(CONFIG_PATH, JSON.stringify(state, null, 2))
   } catch (err) {
     console.error('[store] 写配置失败:', err.message)
   }
@@ -185,8 +195,8 @@ function flush() {
 
 function savePersist(state) {
   try {
-    writeFileSync(BACKUP_PATH, JSON.stringify(state, null, 2), 'utf-8')
-    writeFileSync(CONFIG_PATH, JSON.stringify(state, null, 2), 'utf-8')
+    atomicWrite(BACKUP_PATH, JSON.stringify(state, null, 2))
+    atomicWrite(CONFIG_PATH, JSON.stringify(state, null, 2))
   } catch (err) {
     console.error('[store] 保存配置失败:', err.message)
   }

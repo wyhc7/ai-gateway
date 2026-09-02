@@ -31,7 +31,6 @@ const FALLBACK_AUTHORIZE_URL = `${XAI_ISSUER}/oauth2/authorize`
 
 const DEVICE_GRANT_TYPE = 'urn:ietf:params:oauth:grant-type:device_code'
 const DISCOVERY_TTL_MS = 6 * 60 * 60 * 1000
-const SESSION_TTL_MS = 30 * 60 * 1000
 
 // access_token 实际寿命约 6 小时。默认提前 1 小时续期：
 // 网关类负载可能半小时才碰一次上游，2 分钟的续期窗口很容易被整个错过，

@@ -18,8 +18,10 @@ server/data/
 web/auto-imports.d.ts
 web/components.d.ts
 
-# 本地运维/测试脚本（含生产服务器地址，勿提交）
+# 本地运维/测试脚本（含生产服务器地址、本机路径与密钥，勿提交）
 _deploy.py
 _test_oauth.mjs
 _*.py
 _*.mjs
+start-*.bat
+start-*.sh
