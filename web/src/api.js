@@ -72,7 +72,13 @@ export const api = {
     return resp.blob()
   },
   importProviders: (data) => request('/api/providers/import', { method: 'POST', body: JSON.stringify(data) }),
-  getLogs: (query = '') => request(`/api/logs${query ? `?${query}` : ''}`)
+  getLogs: (query = '') => request(`/api/logs${query ? `?${query}` : ''}`),
+
+  // Grok 订阅账号（OAuth 设备码授权）
+  startGrokDevice: (data) => request('/api/oauth/grok/device/start', { method: 'POST', body: JSON.stringify(data || {}) }),
+  pollGrokDevice: (sessionId) => request(`/api/oauth/grok/device/${sessionId}/poll`, { method: 'POST' }),
+  cancelGrokDevice: (sessionId) => request(`/api/oauth/grok/device/${sessionId}`, { method: 'DELETE' }),
+  refreshGrokAccount: (providerId, keyId) => request(`/api/oauth/grok/accounts/${providerId}/${keyId}/refresh`, { method: 'POST' })
 }
 
 export function notifyError(err, fallback = '操作失败') {

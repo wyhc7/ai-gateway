@@ -1,43 +1,53 @@
 <template>
   <div>
-    <div class="card toolbar-card">
+    <div class="card">
       <div class="toolbar">
         <el-select v-model="providerId" placeholder="选择平台（可选）" clearable class="toolbar-select" style="flex: 0 0 200px" @change="onProviderChange">
           <el-option v-for="p in providers" :key="p.id" :label="p.name" :value="p.id" />
         </el-select>
         <el-select v-model="model" placeholder="选择模型" filterable class="toolbar-select" style="flex: 1 1 260px; min-width: 160px" :loading="loadingModels">
-          <el-option v-for="m in filteredModels" :key="m.key" :label="m.label" :value="m.value">
-            <span style="float: left">{{ m.label }}</span>
-          </el-option>
+          <el-option v-for="m in filteredModels" :key="m.key" :label="m.label" :value="m.value" />
         </el-select>
         <div class="temp-wrap">
           <span class="temp-label">温度</span>
           <el-slider v-model="temperature" class="temp-slider" :min="0" :max="2" :step="0.1" />
-          <span class="temp-val">{{ temperature.toFixed(1) }}</span>
+          <span class="temp-val num">{{ temperature.toFixed(1) }}</span>
         </div>
         <el-button type="primary" :loading="sending" :disabled="!model || !input" @click="send" class="send-btn">
-          <svg style="margin-right: 5px" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13" /><path d="M22 2l-7 20-4-9-9-4z" /></svg>
+          <svg style="margin-right: 5px" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13" /><path d="M22 2l-7 20-4-9-9-4z" /></svg>
           发送
         </el-button>
       </div>
     </div>
 
-    <div class="card" style="margin-top: 16px">
-      <div class="chat-box" ref="chatBox">
-        <div v-for="(m, i) in messages" :key="i" :class="['msg', m.role === 'user' ? 'user' : m.role === 'meta' ? 'meta' : 'assistant']">{{ m.content }}</div>
-        <div v-if="sending" class="msg assistant" style="color: var(--text-muted)">正在生成<span class="typing-dots">...</span></div>
+    <div style="margin-top: 16px">
+      <div class="section-title">对话</div>
+      <div class="chat-log" ref="chatBox">
+        <div v-if="messages.length === 0 && !sending" class="chat-empty">
+          <span class="empty-mark">试</span>
+          <span>选好模型，发一条消息验证转发链路</span>
+        </div>
+        <div v-for="(m, i) in messages" :key="i" :class="['chat-row', m.role]">
+          <div class="chat-gutter">{{ gutter(m.role) }}</div>
+          <div class="chat-body">{{ m.content }}</div>
+        </div>
+        <div v-if="sending" class="chat-row assistant">
+          <div class="chat-gutter">模型</div>
+          <div class="chat-body typing">正在生成<span class="typing-dots"></span></div>
+        </div>
       </div>
+
       <el-input
         v-model="input"
         type="textarea"
         :rows="2"
         placeholder="输入消息，Enter 发送，Shift+Enter 换行"
-        style="margin-top: 14px"
+        style="margin-top: 12px"
         @keydown.enter.exact.prevent="send"
       />
-      <div class="muted" style="margin-top: 6px; display: flex; justify-content: space-between">
-        <span>所有请求通过网关转发，触发故障时自动切换可用 Key</span>
-        <span v-if="model">{{ model }}</span>
+      <div class="chat-foot">
+        <span class="muted">所有请求通过网关转发，触发故障时自动切换可用 Key</span>
+        <span class="mono muted">{{ model || '未选择模型' }}</span>
       </div>
     </div>
   </div>
@@ -46,7 +56,7 @@
 <script setup>
 import { ref, computed, onMounted, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
-import api, { notifyError } from '../api.js'
+import api from '../api.js'
 
 const providers = ref([])
 const providerId = ref(null)
@@ -69,6 +79,12 @@ const filteredModels = computed(() => {
   }))
 })
 
+function gutter(role) {
+  if (role === 'user') return '你'
+  if (role === 'meta') return '系统'
+  return '模型'
+}
+
 async function loadModels() {
   loadingModels.value = true
   try {
@@ -86,7 +102,7 @@ async function loadModels() {
     const data = await resp.json()
     allModels.value = data.data || []
   } catch (e) {
-    notifyError(e, '加载模型失败')
+    ElMessage.error(e?.message || '加载模型失败')
   } finally {
     loadingModels.value = false
   }
@@ -179,12 +195,12 @@ onMounted(async () => {
     const gateway = await api.getGateway()
     gatewayKey.value = gateway.api_key
   } catch (e) {
-    notifyError(e, '加载网关配置失败')
+    ElMessage.error(e?.message || '加载网关配置失败')
   }
   try {
     providers.value = await api.getProviders()
   } catch (e) {
-    notifyError(e, '加载平台失败')
+    ElMessage.error(e?.message || '加载平台失败')
   }
   await loadModels()
 })
@@ -198,55 +214,45 @@ onMounted(async () => {
   align-items: center;
 }
 
-.temp-wrap {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.temp-slider {
-  flex: 1 1 120px;
-  min-width: 100px;
-  max-width: 160px;
-}
-
-.send-btn {
-  margin-left: auto;
-}
-
-@media (max-width: 767px) {
-  .toolbar-select {
-    flex: 1 1 100% !important;
-    min-width: 0;
-  }
-
-  .temp-wrap {
-    flex: 1 1 100%;
-  }
-
-  .temp-slider {
-    flex: 1;
-    max-width: none;
-  }
-
-  .send-btn {
-    margin-left: 0;
-    flex: 1 1 100%;
-  }
-}
+.temp-wrap { display: flex; align-items: center; gap: 10px; }
+.temp-slider { flex: 1 1 120px; min-width: 100px; max-width: 160px; }
+.send-btn { margin-left: auto; }
 
 .temp-label {
-  font-size: 12px;
-  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
   flex-shrink: 0;
 }
 
-.temp-val {
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
-  width: 28px;
+.temp-val { font-size: 12px; color: var(--ink-2); width: 26px; text-align: right; }
+
+.chat-empty { gap: 8px; }
+.empty-mark {
+  width: 34px;
+  height: 34px;
+  border: 1.5px dashed var(--rule-strong);
+  border-radius: var(--r-sm);
+  color: var(--ink-4);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
 }
+
+.chat-foot {
+  margin-top: 8px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.typing { color: var(--ink-4); }
 
 .typing-dots::after {
   content: '';
@@ -258,5 +264,16 @@ onMounted(async () => {
   25% { content: '.'; }
   50% { content: '..'; }
   75% { content: '...'; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typing-dots::after { animation: none; content: '...'; }
+}
+
+@media (max-width: 767px) {
+  .toolbar-select { flex: 1 1 100% !important; min-width: 0; }
+  .temp-wrap { flex: 1 1 100%; }
+  .temp-slider { flex: 1; max-width: none; }
+  .send-btn { margin-left: 0; flex: 1 1 100%; }
 }
 </style>

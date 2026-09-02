@@ -1,9 +1,24 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>AI 中转站</title>
+    <meta name="description" content="多平台 AI 接口统一网关 · 自动故障切换 · 模型聚合" />
+    <title>AI 中转站 · 控制台</title>
+    <script>
+      // 在样式生效前定好主题，避免刷新时闪一下白/黑
+      (function () {
+        try {
+          var v = localStorage.getItem('gw-theme')
+          if (v !== 'light' && v !== 'dark') {
+            v = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+          }
+          var r = document.documentElement
+          r.setAttribute('data-theme', v)
+          r.classList.toggle('dark', v === 'dark')
+        } catch (e) { /* localStorage 不可用时保持默认浅色 */ }
+      })()
+    </script>
   </head>
   <body>
     <div id="app"></div>

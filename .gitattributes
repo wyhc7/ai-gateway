@@ -1,0 +1,16 @@
+# 统一行尾为 LF，避免 Windows 开发环境下 CRLF 进入仓库导致 Linux 部署异常
+* text=auto eol=lf
+
+# 二进制文件不做转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.zip binary
+*.tar binary
+*.gz binary

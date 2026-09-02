@@ -1,26 +1,51 @@
-aW1wb3J0IHsgcmVmIH0gZnJvbSAndnVlJwoKY29uc3QgU1RPUkFHRV9LRVkg
-PSAnZ3ctdGhlbWUnCgpmdW5jdGlvbiBzeXN0ZW1QcmVmZXJzKCkgewogIGlm
-ICh0eXBlb2Ygd2luZG93ID09PSAndW5kZWZpbmVkJyB8fCAhd2luZG93Lm1h
-dGNoTWVkaWEpIHJldHVybiAnbGlnaHQnCiAgcmV0dXJuIHdpbmRvdy5tYXRj
-aE1lZGlhKCcocHJlZmVycy1jb2xvci1zY2hlbWU6IGRhcmspJykubWF0Y2hl
-cyA/ICdkYXJrJyA6ICdsaWdodCcKfQoKZnVuY3Rpb24gcmVhZFN0b3JlZCgp
-IHsKICB0cnkgewogICAgY29uc3QgdiA9IGxvY2FsU3RvcmFnZS5nZXRJdGVt
-KFNUT1JBR0VfS0VZKQogICAgaWYgKHYgPT09ICdsaWdodCcgfHwgdiA9PT0g
-J2RhcmsnKSByZXR1cm4gdgogIH0gY2F0Y2ggewogICAgLyogbG9jYWxTdG9y
-YWdlIOS4jeWPr+eUqOaXtuWbnumAgOWIsOezu+e7n+WBj+WlvSAqLwogIH0K
-ICByZXR1cm4gbnVsbAp9CgpmdW5jdGlvbiBhcHBseShuZXh0KSB7CiAgaWYg
-KHR5cGVvZiBkb2N1bWVudCA9PT0gJ3VuZGVmaW5lZCcpIHJldHVybgogIGNv
-bnN0IHJvb3QgPSBkb2N1bWVudC5kb2N1bWVudEVsZW1lbnQKICByb290LnNl
-dEF0dHJpYnV0ZSgnZGF0YS10aGVtZScsIG5leHQpCiAgcm9vdC5jbGFzc0xp
-c3QudG9nZ2xlKCdkYXJrJywgbmV4dCA9PT0gJ2RhcmsnKQp9Cgpjb25zdCB0
-aGVtZSA9IHJlZignbGlnaHQnKQoKZnVuY3Rpb24gaW5pdFRoZW1lKCkgewog
-IHRoZW1lLnZhbHVlID0gcmVhZFN0b3JlZCgpIHx8IHN5c3RlbVByZWZlcnMo
-KQogIGFwcGx5KHRoZW1lLnZhbHVlKQp9CgpmdW5jdGlvbiBzZXRUaGVtZShu
-ZXh0KSB7CiAgaWYgKG5leHQgIT09ICdsaWdodCcgJiYgbmV4dCAhPT0gJ2Rh
-cmsnKSByZXR1cm4KICB0aGVtZS52YWx1ZSA9IG5leHQKICBhcHBseShuZXh0
-KQogIHRyeSB7CiAgICBsb2NhbFN0b3JhZ2Uuc2V0SXRlbShTVE9SQUdFX0tF
-WSwgbmV4dCkKICB9IGNhdGNoIHsKICAgIC8qIOW/veeVpeWGmeWFpeWksei0
-pSAqLwogIH0KfQoKZnVuY3Rpb24gdG9nZ2xlVGhlbWUoKSB7CiAgc2V0VGhl
-bWUodGhlbWUudmFsdWUgPT09ICdkYXJrJyA/ICdsaWdodCcgOiAnZGFyaycp
-Cn0KCmV4cG9ydCBmdW5jdGlvbiB1c2VUaGVtZSgpIHsKICByZXR1cm4geyB0
-aGVtZSwgaW5pdFRoZW1lLCBzZXRUaGVtZSwgdG9nZ2xlVGhlbWUgfQp9Cg==
+import { ref } from 'vue'
+
+const STORAGE_KEY = 'gw-theme'
+
+function systemPrefers() {
+  if (typeof window === 'undefined' || !window.matchMedia) return 'light'
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
+
+function readStored() {
+  try {
+    const v = localStorage.getItem(STORAGE_KEY)
+    if (v === 'light' || v === 'dark') return v
+  } catch {
+    /* localStorage 不可用时回退到系统偏好 */
+  }
+  return null
+}
+
+function apply(next) {
+  if (typeof document === 'undefined') return
+  const root = document.documentElement
+  root.setAttribute('data-theme', next)
+  root.classList.toggle('dark', next === 'dark')
+}
+
+const theme = ref('light')
+
+function initTheme() {
+  theme.value = readStored() || systemPrefers()
+  apply(theme.value)
+}
+
+function setTheme(next) {
+  if (next !== 'light' && next !== 'dark') return
+  theme.value = next
+  apply(next)
+  try {
+    localStorage.setItem(STORAGE_KEY, next)
+  } catch {
+    /* 忽略写入失败 */
+  }
+}
+
+function toggleTheme() {
+  setTheme(theme.value === 'dark' ? 'light' : 'dark')
+}
+
+export function useTheme() {
+  return { theme, initTheme, setTheme, toggleTheme }
+}

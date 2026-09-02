@@ -1,30 +1,40 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-  content: [
-    "./index.html",
-    "./src/**/*.{vue,js,ts,jsx,tsx}",
-  ],
+  content: ["./index.html", "./src/**/*.{vue,js,ts,jsx,tsx}"],
   theme: {
     extend: {
       colors: {
-        dark: {
-          950: '#0a0a0c',
-          900: '#121215',
-          800: '#1a1a1f',
-          700: '#232329',
-          600: '#2d2d34',
-          500: '#383840',
-          400: '#464650',
-          300: '#565660',
-          200: '#6e6e7a',
-          100: '#8b8b9a',
-          50: '#b4b4c4',
+        paper: 'var(--paper)',
+        surface: 'var(--surface)',
+        ink: {
+          DEFAULT: 'var(--ink)',
+          2: 'var(--ink-2)',
+          3: 'var(--ink-3)',
+          4: 'var(--ink-4)'
+        },
+        rule: {
+          DEFAULT: 'var(--rule)',
+          soft: 'var(--rule-soft)',
+          strong: 'var(--rule-strong)'
+        },
+        accent: {
+          DEFAULT: 'var(--accent)',
+          soft: 'var(--accent-soft)',
+          tint: 'var(--accent-tint)'
         }
       },
       fontFamily: {
-        sans: ['Inter', 'system-ui', 'sans-serif'],
+        sans: [
+          'IBM Plex Sans', 'PingFang SC', 'HarmonyOS Sans SC',
+          'Source Han Sans SC', 'Noto Sans CJK SC', 'Microsoft YaHei',
+          'system-ui', 'sans-serif'
+        ],
+        mono: [
+          'IBM Plex Mono', 'JetBrains Mono', 'SFMono-Regular',
+          'Cascadia Mono', 'Menlo', 'Consolas', 'Liberation Mono', 'monospace'
+        ]
       }
-    },
+    }
   },
-  plugins: [],
+  plugins: []
 }

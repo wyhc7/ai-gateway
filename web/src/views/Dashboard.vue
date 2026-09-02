@@ -1,95 +1,80 @@
 <template>
   <div>
-    <el-row :gutter="16">
-      <el-col :xs="12" :sm="8" :md="3">
-        <div class="stat-card">
-          <div class="stat-icon" style="background: rgba(99,102,241,0.15); color: #a5b4fc">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></svg>
-          </div>
-          <div>
-            <div class="stat-num">{{ fmtNum(status.stats?.totalRequests ?? 0) }}</div>
-            <div class="stat-label">总请求数</div>
-          </div>
-        </div>
-      </el-col>
-      <el-col :xs="12" :sm="8" :md="3">
-        <div class="stat-card">
-          <div class="stat-icon" style="background: rgba(52,211,153,0.15); color: #34d399">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" /></svg>
-          </div>
-          <div>
-            <div class="stat-num">{{ fmtNum(status.stats?.totalSuccess ?? 0) }}</div>
-            <div class="stat-label">成功请求</div>
+    <!-- 实时脉搏：整个页面的主角 -->
+    <div class="card panel-tick hero">
+      <div class="hero-grid">
+        <div class="hero-cell">
+          <div class="label-micro">今日请求</div>
+          <div class="hero-num num">{{ fmtFull(stats.todayRequests) }}</div>
+          <div class="hero-sub mono">
+            成功率 <b>{{ todayRate }}</b> · 失败 <b :class="{ alarm: (stats.todayFailed || 0) > 0 }">{{ fmtFull(stats.todayFailed) }}</b>
           </div>
         </div>
-      </el-col>
-      <el-col :xs="12" :sm="8" :md="3">
-        <div class="stat-card">
-          <div class="stat-icon" style="background: rgba(248,113,113,0.15); color: #f87171">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><path d="M12 9v4M12 17h.01" /></svg>
+
+        <div class="hero-pulse">
+          <div class="hero-pulse-head">
+            <span class="label-micro">实时脉搏 · 最近 {{ PULSE_COUNT }} 次请求</span>
+            <span class="label-micro pulse-legend">
+              <i class="swatch swatch-fail"></i>失败
+              <i class="swatch swatch-ok"></i>成功
+            </span>
           </div>
-          <div>
-            <div class="stat-num">{{ fmtNum(status.stats?.totalFailed ?? 0) }}</div>
-            <div class="stat-label">失败请求</div>
-          </div>
+          <PulseStrip :logs="pulseLogs" :count="PULSE_COUNT" />
         </div>
-      </el-col>
-      <el-col :xs="12" :sm="8" :md="3">
-        <div class="stat-card">
-          <div class="stat-icon" style="background: rgba(251,191,36,0.15); color: #fbbf24">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5" /><path d="M8 3H3v5" /><path d="M21 8v13H3V8" /><path d="M12 16l-3-3 3-3" /><path d="M9 13h6" /></svg>
-          </div>
-          <div>
-            <div class="stat-num">{{ fmtNum(status.stats?.totalFailovers ?? 0) }}</div>
-            <div class="stat-label">自动切换</div>
-          </div>
+
+        <div class="hero-cell hero-cell-right">
+          <div class="label-micro">近 60 秒 · 请求</div>
+          <div class="hero-num num">{{ recentCount }}</div>
+          <div class="hero-sub mono">次请求</div>
         </div>
-      </el-col>
-      <el-col :xs="12" :sm="8" :md="3">
-        <div class="stat-card">
-          <div class="stat-icon" style="background: rgba(139,92,246,0.15); color: #c4b5fd">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></svg>
-          </div>
-          <div>
-            <div class="stat-num">{{ status.overview?.totalProviders ?? 0 }}</div>
-            <div class="stat-label">平台数</div>
-          </div>
+      </div>
+    </div>
+
+    <!-- 指标台账：靠发丝线分格，不靠色块卡片 -->
+    <div class="metric-grid">
+      <div class="metric">
+        <div class="metric-label">总请求数</div>
+        <div class="metric-value num">{{ fmtNum(stats.totalRequests) }}</div>
+        <div class="metric-foot mono">累计</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">成功请求</div>
+        <div class="metric-value num">{{ fmtNum(stats.totalSuccess) }}</div>
+        <div class="metric-foot mono">成功率 {{ overallRate }}</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">失败请求</div>
+        <div class="metric-value num" :class="{ alarm: (stats.totalFailed || 0) > 0 }">{{ fmtNum(stats.totalFailed) }}</div>
+        <div class="metric-foot mono">含上游与网关错误</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">自动切换</div>
+        <div class="metric-value num">{{ fmtNum(stats.totalFailovers) }}</div>
+        <div class="metric-foot mono">Key / 平台故障接管</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">平台</div>
+        <div class="metric-value num">{{ overview.enabledProviders ?? 0 }}<span class="metric-unit">/{{ overview.totalProviders ?? 0 }}</span></div>
+        <div class="metric-foot mono">启用 / 总数</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">模型总数</div>
+        <div class="metric-value num">{{ fmtNum(overview.totalModels) }}</div>
+        <div class="metric-foot mono">去重前聚合</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Key</div>
+        <div class="metric-value num" :class="{ alarm: (overview.cooldownKeys || 0) > 0 }">{{ fmtNum(overview.totalKeys) }}</div>
+        <div class="metric-foot mono">
+          冷却 <b :class="{ alarm: (overview.cooldownKeys || 0) > 0 }">{{ overview.cooldownKeys ?? 0 }}</b>
         </div>
-      </el-col>
-      <el-col :xs="12" :sm="8" :md="3">
-        <div class="stat-card">
-          <div class="stat-icon" style="background: rgba(45,212,191,0.15); color: #5eead4">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" /><path d="M7 7h.01" /></svg>
-          </div>
-          <div>
-            <div class="stat-num">{{ fmtNum(status.stats?.todayRequests ?? 0) }}</div>
-            <div class="stat-label">今日请求</div>
-          </div>
-        </div>
-      </el-col>
-      <el-col :xs="12" :sm="8" :md="3">
-        <div class="stat-card">
-          <div class="stat-icon" style="background: rgba(244,114,182,0.15); color: #f472b6">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12V8H6a2 2 0 0 1-2-2c0-1.1.9-2 2-2h12v4" /><path d="M4 6v12c0 1.1.9 2 2 2h14v-4" /><path d="M18 12a2 2 0 0 0 0 4h4v-4Z" /></svg>
-          </div>
-          <div>
-            <div class="stat-num">{{ fmtNum(status.overview?.todayTokens ?? 0) }}</div>
-            <div class="stat-label">今日 Token</div>
-          </div>
-        </div>
-      </el-col>
-      <el-col :xs="12" :sm="8" :md="3">
-        <div class="stat-card">
-          <div class="stat-icon" style="background: rgba(128,222,234,0.15); color: #80d4ea">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="8" r="4"/><circle cx="18" cy="8" r="4"/><circle cx="14" cy="16" r="4"/><circle cx="10" cy="16" r="4"/><path d="M6 12v4"/><path d="M18 12v4"/></svg>
-          </div>
-          <div>
-            <div class="stat-num">{{ fmtNum(status.overview?.totalTokens ?? 0) }}</div>
-            <div class="stat-label">总计 Token</div>
-          </div>
-        </div>
-      </el-col>
-    </el-row>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Token</div>
+        <div class="metric-value num">{{ fmtNum(overview.todayTokens) }}</div>
+        <div class="metric-foot mono">今日 · 累计 {{ fmtNum(overview.totalTokens) }}</div>
+      </div>
+    </div>
 
     <div class="card" style="margin-top: 18px">
       <div class="section-title">对接方式</div>
@@ -97,7 +82,7 @@
       <div class="conn-grid">
         <div class="conn-item">
           <div class="conn-label">Base URL</div>
-          <div class="conn-value mono ellipsis">{{ baseUrl }}</div>
+          <div class="conn-value mono ellipsis" :title="baseUrl">{{ baseUrl }}</div>
           <button class="copy-mini" @click="copyText(baseUrl)">复制</button>
         </div>
         <div class="conn-item">
@@ -112,104 +97,166 @@
       </div>
     </div>
 
-    <div class="overview-bar">
-      <div class="ov-item">
-        <span class="ov-num">{{ status.overview?.enabledProviders ?? 0 }}</span>
-        <span class="ov-label">启用平台</span>
-      </div>
-      <div class="ov-item">
-        <span class="ov-num">{{ status.overview?.totalModels ?? 0 }}</span>
-        <span class="ov-label">模型总数</span>
-      </div>
-      <div class="ov-item">
-        <span class="ov-num">{{ status.overview?.totalKeys ?? 0 }}</span>
-        <span class="ov-label">Key 总数</span>
-      </div>
-      <div class="ov-item">
-        <span :class="['ov-num', (status.overview?.cooldownKeys ?? 0) > 0 ? 'ov-warn' : '']">{{ status.overview?.cooldownKeys ?? 0 }}</span>
-        <span class="ov-label">冷却中 Key</span>
-      </div>
-      <div class="ov-item">
-        <span class="ov-num">{{ todayRate }}</span>
-        <span class="ov-label">今日成功率</span>
-      </div>
-      <div class="ov-refresh">
-        最后更新 {{ lastUpdated }}
-        <el-button size="small" text type="primary" @click="load">刷新</el-button>
-      </div>
-    </div>
-
-    <div class="card" style="margin-top: 18px">
+    <div style="margin-top: 18px">
       <div class="section-title">平台运行状态</div>
       <div class="table-scroll">
-        <el-table :data="status.providers || []" style="width: 100%" :header-cell-style="{ background: 'transparent' }">
-          <el-table-column prop="name" label="平台" min-width="150">
-            <template #default="{ row }">
-              <span style="font-weight: 500">{{ row.name }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="协议" width="150">
-            <template #default="{ row }">
-              <span class="badge badge-blue">{{ protocolLabel(row.protocol) }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" width="90">
-            <template #default="{ row }">
-              <span :class="['badge', row.enabled ? 'badge-green' : 'badge-gray']">
-                <span class="badge-dot" :class="row.enabled ? 'green' : 'gray'"></span>{{ row.enabled ? '启用' : '停用' }}
-              </span>
-            </template>
-          </el-table-column>
-          <el-table-column prop="keyCount" label="Key" width="70" align="center" />
-          <el-table-column prop="modelCount" label="模型" width="70" align="center" />
-          <el-table-column label="请求" width="130">
-            <template #default="{ row }">
-              <span class="req-count">{{ row.stats?.requests ?? 0 }}</span>
-              <span :class="rateClass(row)">{{ rateOf(row) }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="Token" width="120">
-            <template #default="{ row }">
-              <span class="muted">{{ fmtNum(row.stats?.tokens ?? 0) }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="Key 健康状态" min-width="200">
-            <template #default="{ row }">
-              <div style="display: flex; flex-wrap: wrap; gap: 6px">
-                <span v-for="k in row.keys" :key="k.id" :class="['badge', keyBadge(k)]">
-                  <span class="badge-dot" :class="keyDot(k)"></span>{{ k.name }}
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>平台</th>
+              <th>协议</th>
+              <th>状态</th>
+              <th class="right">Key</th>
+              <th class="right">模型</th>
+              <th class="right">请求</th>
+              <th class="right">Token</th>
+              <th style="width: 152px">Key 健康</th>
+              <th>模型更新</th>
+            </tr>
+          </thead>
+          <tbody>
+            <template v-for="row in providers" :key="row.id">
+              <tr>
+              <td class="cell-strong">{{ row.name }}</td>
+              <td><span class="badge badge-blue">{{ protocolLabel(row.protocol) }}</span></td>
+              <td>
+                <span :class="['badge', row.enabled ? 'badge-green' : 'badge-gray']">
+                  <span class="badge-dot" :class="row.enabled ? 'green' : 'gray'"></span>{{ row.enabled ? '启用' : '停用' }}
                 </span>
-              </div>
+              </td>
+              <td class="right num">{{ row.keyCount ?? (row.keys || []).length }}</td>
+              <td class="right num">{{ row.modelCount ?? (row.models || []).length }}</td>
+              <td class="right">
+                <span class="num cell-strong">{{ fmtNum(row.stats?.requests ?? 0) }}</span>
+                <span :class="rateClass(row)">{{ rateOf(row) }}</span>
+              </td>
+              <td class="right num muted-cell">{{ fmtNum(row.stats?.tokens ?? 0) }}</td>
+              <td>
+                <button
+                  v-if="(keyStatsMap[row.id]?.total ?? 0) > 0"
+                  class="key-summary"
+                  :class="{ alarm: keyStatsMap[row.id].bad > 0, open: expandedKeys === row.id }"
+                  :title="keySummaryTitle(row)"
+                  @click="toggleKeys(row.id)"
+                >
+                  <span class="num">{{ keyStatsMap[row.id].ok }}</span><span class="slash">/</span><span class="num dim">{{ keyStatsMap[row.id].total }}</span>
+                  <span class="key-bar">
+                    <i class="ok" :style="{ flex: keyStatsMap[row.id].ok }"></i>
+                    <i class="bad" :style="{ flex: keyStatsMap[row.id].bad }"></i>
+                  </span>
+                  <svg class="chev-mini" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6" /></svg>
+                </button>
+                <span v-else class="muted-cell">—</span>
+              </td>
+              <td class="muted-cell">{{ row.models_updated_at ? formatTime(row.models_updated_at) : '未拉取' }}</td>
+            </tr>
+            <tr v-if="expandedKeys === row.id" class="key-detail-row">
+              <td colspan="9">
+                <div class="key-detail">
+                  <div class="key-detail-head">
+                    <span class="label-micro">正常 <b class="num">{{ keyStatsMap[row.id].ok }}</b></span>
+                    <span class="label-micro">冷却 <b class="num" :class="{ alarm: keyStatsMap[row.id].cool > 0 }">{{ keyStatsMap[row.id].cool }}</b></span>
+                    <span class="label-micro">停用 <b class="num">{{ keyStatsMap[row.id].off }}</b></span>
+                    <span class="label-micro key-detail-hint">点击汇总可收起</span>
+                  </div>
+                  <div class="key-health">
+                    <span v-for="k in row.keys" :key="k.id" :class="['badge', keyBadge(k)]">
+                      <span class="badge-dot" :class="keyDot(k)"></span>{{ k.name }}
+                    </span>
+                  </div>
+                </div>
+              </td>
+            </tr>
             </template>
-          </el-table-column>
-          <el-table-column label="模型更新" width="150">
-            <template #default="{ row }">
-              <span class="muted">{{ row.models_updated_at ? formatTime(row.models_updated_at) : '未拉取' }}</span>
-            </template>
-          </el-table-column>
-        </el-table>
+            <tr v-if="providers.length === 0">
+              <td colspan="9" class="table-empty">暂无平台，前往「平台管理」添加。</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
-    
+    <div class="foot-bar">
+      <span class="mono">最后更新 {{ lastUpdated || '—' }}</span>
+      <el-button size="small" :loading="loading" @click="load">刷新</el-button>
+    </div>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
-import api, { notifyError } from '../api.js'
+import api from '../api.js'
+import PulseStrip from '../components/PulseStrip.vue'
+
+const PULSE_COUNT = 64
 
 const status = ref({})
 const gatewayKey = ref('')
 const lastUpdated = ref('')
+const loading = ref(false)
+const pulseLogs = ref([])
 
 const baseUrl = `${location.origin}/api/v1`
 
+const stats = computed(() => status.value.stats || {})
+const overview = computed(() => status.value.overview || {})
+const providers = computed(() => status.value.providers || [])
+
+/** 每个平台的 Key 健康汇总：ok 正常 / cool 冷却中 / off 停用 / bad 非正常合计 */
+const keyStatsMap = computed(() => {
+  const map = {}
+  for (const p of providers.value) {
+    const keys = p.keys || []
+    let ok = 0
+    let cool = 0
+    let off = 0
+    for (const k of keys) {
+      if (!k.enabled) off++
+      else if (k.status && k.status.cooldown) cool++
+      else ok++
+    }
+    map[p.id] = { ok, cool, off, bad: cool + off, total: keys.length }
+  }
+  return map
+})
+
+const expandedKeys = ref(null)
+
+function toggleKeys(id) {
+  expandedKeys.value = expandedKeys.value === id ? null : id
+}
+
+function keySummaryTitle(row) {
+  const s = keyStatsMap.value[row.id]
+  if (!s || !s.total) return '未配置 Key'
+  const parts = [`${s.ok} 正常 / ${s.total} 个 Key`]
+  if (s.cool) parts.push(`${s.cool} 冷却中`)
+  if (s.off) parts.push(`${s.off} 已停用`)
+  parts.push(expandedKeys.value === row.id ? '点击收起' : '点击展开')
+  return parts.join(' · ')
+}
+
 const todayRate = computed(() => {
-  const { todayRequests = 0, todaySuccess = 0 } = status.value.stats || {}
-  if (todayRequests === 0) return '—'
+  const { todayRequests = 0, todaySuccess = 0 } = stats.value
+  if (!todayRequests) return '—'
   return `${Math.round((todaySuccess / todayRequests) * 100)}%`
+})
+
+const overallRate = computed(() => {
+  const { totalRequests = 0, totalSuccess = 0 } = stats.value
+  if (!totalRequests) return '—'
+  return `${Math.round((totalSuccess / totalRequests) * 100)}%`
+})
+
+/** 最近 60 秒内的真实代理请求数：只算 type==='chat' 的日志，与管理 API 轮询日志分离，口径对齐今日请求 */
+const recentCount = computed(() => {
+  const cutoff = Date.now() - 60_000
+  return pulseLogs.value.filter((r) => {
+    if (r.type !== 'chat') return false
+    const t = Date.parse(String(r.time || '').replace(' ', 'T'))
+    return Number.isFinite(t) && t >= cutoff
+  }).length
 })
 
 function rateOf(row) {
@@ -225,8 +272,14 @@ function rateClass(row) {
 }
 
 function fmtNum(n) {
+  if (n == null) return '—'
   if (n >= 10000) return `${(n / 10000).toFixed(1)}w`
   return String(n)
+}
+
+function fmtFull(n) {
+  if (n == null) return '—'
+  return Number(n).toLocaleString('en-US')
 }
 
 function keyBadge(k) {
@@ -246,6 +299,7 @@ function formatTime(ts) {
 }
 
 function copyText(text) {
+  if (!text) return
   if (!navigator.clipboard) {
     const ta = document.createElement('textarea')
     ta.value = text
@@ -269,8 +323,8 @@ const PROTOCOL_LABELS = {
   'openai-chat': 'OpenAI Chat',
   'openai-responses': 'OpenAI Responses',
   'anthropic-openai': 'Anthropic（OpenAI 兼容）',
-  'anthropic': 'Anthropic 原生',
-  'custom': '自定义'
+  anthropic: 'Anthropic 原生',
+  custom: '自定义'
 }
 
 function protocolLabel(proto) {
@@ -278,13 +332,23 @@ function protocolLabel(proto) {
 }
 
 async function load() {
+  loading.value = true
   try {
     const [statusData, gatewayData] = await Promise.all([api.getStatus(), api.getGateway()])
     status.value = statusData
     gatewayKey.value = gatewayData.api_key
     lastUpdated.value = new Date().toLocaleTimeString('zh-CN')
   } catch (e) {
-    notifyError(e, '加载状态失败')
+    ElMessage.error(e?.message || '加载状态失败')
+  } finally {
+    loading.value = false
+  }
+  // 脉搏条单独取，失败不影响主面板
+  try {
+    const data = await api.getLogs(`limit=${PULSE_COUNT}`)
+    pulseLogs.value = (data.logs || []).filter((l) => l.type === 'chat')
+  } catch {
+    /* 日志拉不动就维持上一次的采样 */
   }
 }
 
@@ -301,238 +365,252 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.stat-card {
-  background: var(--bg-800);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 18px 16px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
+/* ---------- 实时脉搏 hero ---------- */
+.hero {
+  padding: 18px 20px 16px;
 }
 
-.stat-icon {
-  width: 40px;
-  height: 40px;
-  border-radius: 11px;
+.hero-grid {
+  display: grid;
+  grid-template-columns: 180px 1fr 130px;
+  gap: 20px;
+  align-items: stretch;
+}
+
+.hero-cell {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   justify-content: center;
-  flex-shrink: 0;
+  gap: 2px;
+  padding-right: 20px;
+  border-right: 1px solid var(--rule-soft);
 }
 
-.stat-num {
-  font-size: 23px;
+.hero-cell-right {
+  padding-right: 0;
+  padding-left: 20px;
+  border-right: none;
+  border-left: 1px solid var(--rule-soft);
+  text-align: right;
+}
+
+.hero-num {
+  font-size: 30px;
   font-weight: 700;
-  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+  color: var(--ink);
   letter-spacing: -0.02em;
 }
 
-.stat-label {
-  color: var(--text-muted);
-  font-size: 12px;
-  margin-top: 1px;
+.hero-sub {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.hero-sub b { color: var(--ink); font-weight: 600; }
+
+.hero-pulse { min-width: 0; }
+
+.hero-pulse-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
 }
 
-.overview-bar {
-  display: flex;
+.pulse-legend {
+  display: inline-flex;
   align-items: center;
-  gap: 28px;
-  flex-wrap: wrap;
-  background: var(--bg-800);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 14px 20px;
+  gap: 5px;
+}
+.pulse-legend .swatch {
+  width: 7px;
+  height: 7px;
+  border-radius: 1px;
+  display: inline-block;
+  margin-left: 6px;
+}
+.pulse-legend .swatch-fail { background: var(--accent); }
+.pulse-legend .swatch-ok { background: var(--ink-3); }
+
+/* ---------- 指标台账 ---------- */
+.metric-grid {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  background: var(--rule);
+  border: 1px solid var(--rule);
+  border-radius: var(--r);
+  overflow: hidden;
+}
+
+.metric {
+  background: var(--surface);
+  padding: 13px 16px 12px;
+  transition: background-color 0.15s;
+}
+.metric:hover { background: var(--surface-2); }
+
+.metric-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.metric-value {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1.25;
+  margin-top: 3px;
+  letter-spacing: -0.02em;
+}
+
+.metric-unit {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-4);
+  margin-left: 1px;
+}
+
+.metric-foot {
+  font-size: 10.5px;
+  color: var(--ink-4);
   margin-top: 2px;
 }
+.metric-foot b { color: var(--ink-2); font-weight: 600; }
 
-.ov-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.ov-num {
-  font-size: 18px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-
-.ov-num.ov-warn {
-  color: var(--red);
-}
-
-.ov-label {
-  font-size: 11.5px;
-  color: var(--text-muted);
-}
-
-.ov-refresh {
-  margin-left: auto;
-  color: var(--text-muted);
-  font-size: 12px;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.table-scroll {
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-}
-
-.table-scroll .el-table {
-  min-width: 700px;
-}
-
-.req-count {
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-  margin-right: 6px;
-}
-
-.rate {
-  font-size: 11.5px;
-  color: var(--green);
-}
-
-.rate.rate-fail {
-  color: var(--red);
-}
-
-.rate.muted {
-  color: var(--text-muted);
-}
-
+/* ---------- 对接方式 ---------- */
 .conn-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 12px;
-  margin-bottom: 16px;
 }
 
 .conn-item {
-  background: var(--bg-850);
-  border: 1px solid var(--border-soft);
-  border-radius: 10px;
-  padding: 12px 14px;
+  background: var(--paper-sunk);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--r-sm);
+  padding: 11px 13px;
   min-width: 0;
 }
 
 .conn-label {
-  font-size: 11px;
-  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin-bottom: 6px;
+  color: var(--ink-3);
+  margin-bottom: 5px;
 }
 
-.conn-value {
-  font-size: 13px;
-  color: var(--text-main);
-  word-break: break-all;
-}
-
-.conn-value.ellipsis {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+.conn-value { font-size: 13px; color: var(--ink); word-break: break-all; }
 
 .copy-mini {
   margin-top: 8px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-muted);
-  border-radius: 6px;
-  padding: 3px 10px;
-  font-size: 11.5px;
+  border: 1px solid var(--rule);
+  background: var(--surface);
+  color: var(--ink-3);
+  border-radius: var(--r-xs);
+  padding: 2px 9px;
+  font-size: 11px;
   cursor: pointer;
-  transition: all 0.15s;
+  transition: color 0.14s, border-color 0.14s;
 }
+.copy-mini:hover { color: var(--accent); border-color: var(--accent-line); }
 
-.copy-mini:hover {
-  color: var(--text-main);
-  border-color: #33333d;
+/* ---------- 表格内小零件 ---------- */
+.key-health { display: flex; flex-wrap: wrap; gap: 5px; }
+.rate { font-size: 11px; color: var(--ok); margin-left: 6px; font-family: var(--font-mono); }
+.rate.rate-fail { color: var(--accent); }
+.rate.muted { color: var(--ink-4); }
+.muted-cell { color: var(--ink-3); font-size: 12px; }
+
+/* ---------- Key 健康汇总（点击展开） ---------- */
+.key-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 7px;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-xs);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.14s, background-color 0.14s, color 0.14s;
 }
+.key-summary:hover { border-color: var(--rule-strong); background: var(--surface-2); }
+.key-summary.open { border-color: var(--accent-line); }
+.key-summary.alarm { color: var(--accent); background: var(--accent-tint); border-color: var(--accent-line); }
 
-.mono {
-  font-family: ui-monospace, monospace;
-  font-size: 12.5px;
+.key-summary .slash { color: var(--ink-4); }
+.key-summary .dim { color: var(--ink-4); }
+.key-summary.alarm .slash,
+.key-summary.alarm .dim { color: var(--accent); opacity: 0.65; }
+
+.chev-mini {
+  width: 11px;
+  height: 11px;
+  color: var(--ink-4);
+  flex-shrink: 0;
+  transition: transform 0.18s ease;
 }
+.key-summary.open .chev-mini { transform: rotate(180deg); color: var(--accent); }
 
-.code-tabs {
+/* 正常 / 异常 比例条，按 flex 分配宽度 */
+.key-bar {
+  display: inline-flex;
+  width: 38px;
+  height: 3px;
+  border-radius: 1px;
+  overflow: hidden;
+  background: var(--rule);
+  flex-shrink: 0;
+}
+.key-bar i { display: block; height: 100%; }
+.key-bar .ok { background: var(--ink-3); }
+.key-bar .bad { background: var(--accent); }
+
+.key-detail-row td {
+  background: var(--paper-sunk);
+  padding: 12px 14px;
+}
+.key-detail-row:hover td { background: var(--paper-sunk); }
+
+.key-detail { display: flex; flex-direction: column; gap: 9px; }
+.key-detail-head { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.key-detail-head b { color: var(--ink); font-weight: 600; font-size: 11.5px; }
+.key-detail-hint { margin-left: auto; color: var(--ink-4); }
+
+.foot-bar {
+  margin-top: 14px;
   display: flex;
-  gap: 4px;
-  margin-bottom: 10px;
-  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--ink-4);
 }
 
-.code-tab {
-  border: 1px solid var(--border);
-  background: var(--bg-850);
-  color: var(--text-secondary);
-  border-radius: 8px;
-  padding: 6px 14px;
-  font-size: 12.5px;
-  cursor: pointer;
-  transition: all 0.15s;
+@media (max-width: 1100px) {
+  .metric-grid { grid-template-columns: repeat(3, 1fr); }
 }
 
-.code-tab:hover {
-  color: var(--text-main);
-  border-color: #33333d;
-}
-
-.code-tab.active {
-  background: rgba(99, 102, 241, 0.16);
-  border-color: rgba(99, 102, 241, 0.4);
-  color: #c7c9ff;
-}
-
-.copy-btn {
-  margin-left: auto;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text-muted);
-  border-radius: 8px;
-  padding: 6px 12px;
-  font-size: 12.5px;
-  cursor: pointer;
-  transition: all 0.15s;
-}
-
-.copy-btn:hover {
-  color: var(--text-main);
-  border-color: #33333d;
-}
-
-.code-block-code {
-  margin-bottom: 4px;
+@media (max-width: 900px) {
+  .hero-grid { grid-template-columns: 1fr 1fr; }
+  .hero-pulse { grid-column: 1 / -1; order: 3; padding-top: 4px; border-top: 1px solid var(--rule-soft); }
+  .hero-cell-right { padding-right: 20px; padding-left: 0; border-left: none; border-right: 1px solid var(--rule-soft); }
 }
 
 @media (max-width: 767px) {
-  .conn-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .copy-btn {
-    margin-left: 0;
-  }
-
-  .overview-bar {
-    gap: 18px;
-    padding: 12px 16px;
-  }
-
-  .ov-refresh {
-    margin-left: 0;
-    flex-basis: 100%;
-  }
-
-  .stat-num {
-    font-size: 20px;
-  }
+  .metric-grid { grid-template-columns: repeat(2, 1fr); }
+  .conn-grid { grid-template-columns: 1fr; }
+  .hero { padding: 14px; }
+  .hero-num { font-size: 24px; }
+  .metric-value { font-size: 19px; }
 }
 </style>

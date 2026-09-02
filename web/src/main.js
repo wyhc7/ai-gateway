@@ -8,8 +8,10 @@ import './assets/main.css'
 import './styles.css'
 import App from './App.vue'
 import router from './router.js'
+import { useTheme } from './theme.js'
 
-document.documentElement.classList.add('dark')
+// 主题必须在挂载前定好，否则首帧会闪
+useTheme().initTheme()
 
 const app = createApp(App)
 app.directive('loading', ElLoading.directive)

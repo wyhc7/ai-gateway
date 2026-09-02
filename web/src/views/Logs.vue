@@ -1,19 +1,19 @@
 <template>
   <div>
     <!-- 工具栏 -->
-    <div class="card toolbar-card">
+    <div class="card">
       <div class="toolbar">
-        <el-select v-model="filters.type" placeholder="类型" class="toolbar-item" style="flex: 0 0 120px" @change="loadLogs">
+        <el-select v-model="filters.type" placeholder="类型" class="toolbar-item" style="flex: 0 0 116px" @change="loadLogs">
           <el-option label="全部类型" value="all" />
           <el-option label="对话" value="chat" />
           <el-option label="API" value="api" />
           <el-option label="系统" value="system" />
         </el-select>
-        <el-select v-model="filters.status" placeholder="状态码" clearable class="toolbar-item" style="flex: 0 0 140px" @change="loadLogs">
-          <el-option label="✅ 成功 (2xx)" value="2xx" />
-          <el-option label="⚠️ 客户端错误 (4xx)" value="4xx" />
-          <el-option label="❌ 服务端错误 (5xx)" value="5xx" />
-          <el-option label="🟣 系统 (0)" value="0" />
+        <el-select v-model="filters.status" placeholder="状态码" clearable class="toolbar-item" style="flex: 0 0 150px" @change="loadLogs">
+          <el-option label="成功 (2xx)" value="2xx" />
+          <el-option label="客户端错误 (4xx)" value="4xx" />
+          <el-option label="服务端错误 (5xx)" value="5xx" />
+          <el-option label="系统 (0)" value="0" />
         </el-select>
         <el-input
           v-model="filters.q"
@@ -26,7 +26,7 @@
         >
           <template #suffix><span class="search-hint">Enter</span></template>
         </el-input>
-        <el-select v-model="limit" style="flex: 0 0 100px" @change="loadLogs">
+        <el-select v-model="limit" style="flex: 0 0 104px" @change="loadLogs">
           <el-option :value="50" label="50 条" />
           <el-option :value="100" label="100 条" />
           <el-option :value="200" label="200 条" />
@@ -34,91 +34,119 @@
         </el-select>
         <div class="auto-refresh">
           <span class="muted">自动刷新</span>
-          <el-switch v-model="autoRefresh" @change="onAutoRefreshChange" />
+          <SwitchRail v-model="autoRefresh" small @change="onAutoRefreshChange" />
         </div>
         <el-button type="primary" :loading="loading" @click="loadLogs">
-          <svg style="margin-right: 5px" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6" /><path d="M1 20v-6h6" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg>
+          <svg style="margin-right: 5px" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6" /><path d="M1 20v-6h6" /><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" /></svg>
           刷新
         </el-button>
       </div>
-      <div class="toolbar-stats muted">
-        <span>共 {{ logs.length }} 条记录（最近 {{ limit }} 条）</span>
-        <span v-if="autoRefresh" class="live-dot"><i class="dot"></i>每 10 秒自动刷新</span>
+
+      <div class="toolbar-stats">
+        <span class="stat-chip">
+          <span class="label-micro">命中</span>
+          <b class="num">{{ logs.length }}</b>
+        </span>
+        <span class="stat-chip">
+          <span class="label-micro">失败</span>
+          <b class="num" :class="{ alarm: failCount > 0 }">{{ failCount }}</b>
+        </span>
+        <span class="stat-chip">
+          <span class="label-micro">失败率</span>
+          <b class="num" :class="{ alarm: failRate > 20 }">{{ logs.length ? failRate + '%' : '—' }}</b>
+        </span>
+        <span v-if="autoRefresh" class="live-tag">
+          <i class="dot"></i>每 10 秒自动刷新
+        </span>
       </div>
     </div>
 
-    <!-- 日志表格 -->
-    <div class="card" style="margin-top: 16px; padding: 8px">
-      <el-table :data="logs" style="width: 100%" size="small" :header-cell-style="{ background: 'var(--bg-850)', color: 'var(--text-secondary)', fontWeight: 600 }" empty-text="暂无日志">
-        <el-table-column label="时间" width="160">
-          <template #default="{ row }">
-            <span class="mono">{{ row.time }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="类型" width="80">
-          <template #default="{ row }">
-            <span :class="['badge', typeBadge(row.type)]">{{ typeLabel(row.type) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="状态" width="90">
-          <template #default="{ row }">
-            <span :class="['badge', statusBadge(row.status)]">{{ statusText(row) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="模型 / 路径" min-width="220">
-          <template #default="{ row }">
-            <template v-if="row.type === 'chat'">
-              <div class="mono ellipsis" :title="row.model">{{ row.model || '—' }}</div>
-              <div v-if="row.stream" class="muted" style="font-size: 11px">流式</div>
-            </template>
-            <template v-else-if="row.type === 'api'">
-              <div class="mono ellipsis" :title="`${row.method} ${row.path}`">{{ row.method }} {{ row.path }}</div>
-            </template>
-            <template v-else>
-              <div class="mono ellipsis">系统事件</div>
-            </template>
-          </template>
-        </el-table-column>
-        <el-table-column label="平台" min-width="110">
-          <template #default="{ row }">
-            <span class="ellipsis" :title="row.provider_name">{{ row.provider_name || '—' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="Key" min-width="90">
-          <template #default="{ row }">
-            <span class="mono muted ellipsis" :title="row.key">{{ row.key || '—' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="耗时" width="90" align="right">
-          <template #default="{ row }">
-            <span :class="durationClass(row.duration_ms)">{{ fmtDuration(row.duration_ms) }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="详情 / 错误" min-width="260">
-          <template #default="{ row }">
-            <div v-if="row.error" class="err-text ellipsis" :title="row.error">{{ row.error }}</div>
-            <div v-else-if="row.detail" class="muted ellipsis" :title="row.detail">{{ row.detail }}</div>
-            <div v-else-if="row.ok === false" class="err-text ellipsis">请求失败</div>
-            <span v-else class="muted">—</span>
-          </template>
-        </el-table-column>
-      </el-table>
+    <!-- 日志表 -->
+    <div style="margin-top: 16px">
+      <div class="table-scroll">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th style="width: 152px">时间</th>
+              <th style="width: 72px">类型</th>
+              <th style="width: 84px">状态</th>
+              <th style="min-width: 210px">模型 / 路径</th>
+              <th style="min-width: 104px">平台</th>
+              <th style="min-width: 90px">Key</th>
+              <th class="right" style="width: 84px">耗时</th>
+              <th style="min-width: 240px">详情 / 错误</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(row, i) in pagedLogs" :key="row.id || i">
+              <td class="mono time-cell">{{ row.time }}</td>
+              <td><span :class="['badge', typeBadge(row.type)]">{{ typeLabel(row.type) }}</span></td>
+              <td><span :class="['badge', statusBadge(row.status)]">{{ statusText(row) }}</span></td>
+              <td>
+                <template v-if="row.type === 'chat'">
+                  <div class="mono ellipsis" :title="row.model">{{ row.model || '—' }}</div>
+                  <div v-if="row.stream" class="sub-line">流式</div>
+                </template>
+                <template v-else-if="row.type === 'api'">
+                  <div class="mono ellipsis" :title="`${row.method} ${row.path}`">{{ row.method }} {{ row.path }}</div>
+                </template>
+                <template v-else>
+                  <div class="mono ellipsis">系统事件</div>
+                </template>
+              </td>
+              <td><span class="ellipsis" :title="row.provider_name">{{ row.provider_name || '—' }}</span></td>
+              <td><span class="mono muted-cell ellipsis" :title="row.key">{{ row.key || '—' }}</span></td>
+              <td class="right"><span :class="durationClass(row.duration_ms)">{{ fmtDuration(row.duration_ms) }}</span></td>
+              <td>
+                <div v-if="row.error" class="err-text ellipsis" :title="row.error">{{ row.error }}</div>
+                <div v-else-if="row.detail" class="muted-cell ellipsis" :title="row.detail">{{ row.detail }}</div>
+                <div v-else-if="row.ok === false" class="err-text ellipsis">请求失败</div>
+                <span v-else class="muted-cell">—</span>
+              </td>
+            </tr>
+            <tr v-if="logs.length === 0">
+              <td colspan="8" class="table-empty">暂无日志</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <Pager :total="logs.length" :page="page" :page-size="PAGE_SIZE" @update:page="page = $event" />
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api } from '../api.js'
+import SwitchRail from '../components/SwitchRail.vue'
+import Pager from '../components/Pager.vue'
+
+const PAGE_SIZE = 20
 
 const logs = ref([])
 const loading = ref(false)
 const autoRefresh = ref(true)
 const limit = ref(100)
+const page = ref(1)
 const filters = reactive({ type: 'all', status: '', q: '' })
 
 let timer = null
+
+const pagedLogs = computed(() => {
+  const start = (page.value - 1) * PAGE_SIZE
+  return logs.value.slice(start, start + PAGE_SIZE)
+})
+
+const failCount = computed(
+  () => logs.value.filter((r) => r.error || r.ok === false || Number(r.status) >= 400).length
+)
+
+const failRate = computed(() => {
+  if (!logs.value.length) return 0
+  return Math.round((failCount.value / logs.value.length) * 100)
+})
 
 function typeLabel(t) {
   return { chat: '对话', api: 'API', system: '系统' }[t] || t || '—'
@@ -144,8 +172,7 @@ function statusText(row) {
   if (row.status === 0 || row.status === '0') return 'SYS'
   const s = Number(row.status)
   if (s >= 200 && s < 300) return `${s} ✓`
-  if (s >= 400 && s < 500) return `${s} ✗`
-  if (s >= 500) return `${s} ✗`
+  if (s >= 400) return `${s} ✗`
   return String(row.status || '—')
 }
 
@@ -156,10 +183,10 @@ function fmtDuration(ms) {
 }
 
 function durationClass(ms) {
-  if (ms == null) return 'muted'
+  if (ms == null) return 'muted-cell'
   if (ms > 10000) return 'err-text'
   if (ms > 3000) return 'warn-text'
-  return 'muted'
+  return 'mono muted-cell'
 }
 
 async function loadLogs() {
@@ -171,6 +198,7 @@ async function loadLogs() {
     if (filters.q && filters.q.trim()) params.set('q', filters.q.trim())
     const data = await api.getLogs(params.toString())
     logs.value = data.logs || []
+    page.value = 1
   } catch (e) {
     ElMessage.error(`加载日志失败：${e.message}`)
   } finally {
@@ -213,60 +241,54 @@ onBeforeUnmount(stopTimer)
 }
 
 .toolbar-stats {
-  margin-top: 10px;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--rule-soft);
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 18px;
+  flex-wrap: wrap;
   font-size: 12px;
 }
 
-.live-dot {
+.stat-chip { display: inline-flex; align-items: baseline; gap: 6px; }
+.stat-chip b { font-size: 13px; color: var(--ink); font-weight: 600; }
+
+.live-tag {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  color: var(--green);
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--ok);
 }
-
-.live-dot .dot {
-  width: 7px;
-  height: 7px;
+.live-tag .dot {
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  background: var(--green);
-  box-shadow: 0 0 6px var(--green);
-  animation: pulse 1.6s ease-in-out infinite;
+  background: var(--ok);
+  animation: pulse 1.8s ease-in-out infinite;
 }
 
 @keyframes pulse {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.35; }
+  50% { opacity: 0.3; }
 }
 
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12.5px;
+@media (prefers-reduced-motion: reduce) {
+  .live-tag .dot { animation: none; }
 }
 
-.ellipsis {
-  display: inline-block;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  vertical-align: bottom;
-}
-
-.err-text {
-  color: var(--red);
-  font-size: 12.5px;
-}
-
-.warn-text {
-  color: var(--amber);
-}
+.time-cell { font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
+.sub-line { font-size: 10.5px; color: var(--ink-4); }
+.muted-cell { color: var(--ink-3); font-size: 12px; }
+.err-text { color: var(--accent); font-size: 12px; }
+.warn-text { color: var(--warn); font-size: 12px; }
 
 .search-hint {
-  font-size: 11px;
-  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  color: var(--ink-4);
   user-select: none;
 }
 
@@ -278,13 +300,7 @@ onBeforeUnmount(stopTimer)
 }
 
 @media (max-width: 767px) {
-  .toolbar-item {
-    flex: 1 1 45% !important;
-    min-width: 0;
-  }
-
-  .auto-refresh {
-    margin-left: 0;
-  }
+  .toolbar-item { flex: 1 1 45% !important; min-width: 0; }
+  .auto-refresh { margin-left: 0; }
 }
 </style>
