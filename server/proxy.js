@@ -5,9 +5,23 @@ import { ensureAccessToken as ensureCodexToken } from './codex-oauth.js'
 import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexAccountHeader } from './codex-responses.js'
 import { TEMPLATES } from './templates.js'
 
-// 部分订阅类上游（如 Grok 的 cli-chat-proxy / api.x.ai）没有干净的 GET /models，
-// 拉取失败时回退到模板里内置的默认模型列表，保证平台建完即可用，不用手填。
+// 允许「协议级默认模型」兜底的协议白名单。
+//
+// 判据不是"模板里有没有写 default_models"，而是"这个协议的上游到底有没有 /models 端点"：
+// 只有协议本身指向单一固定服务（同协议 = 同上游 = 同批模型）时，
+// 一份内置列表才对该协议下的所有平台都成立。
+//
+// openai-chat 绝不能进这个名单：它是通用兼容协议，DeepSeek / 通义 / Gemini / Ollama
+// 都挂在这个协议下而模型毫无交集。曾因 chatgpt-web 模板自带 default_models，
+// 导致所有 openai-chat 平台在拉模型失败时被静默兜底成 gpt-5 / gpt-image-2
+// （表现为「拉取成功」但列表完全不对，用户只会以为是自己的 Key 坏了）。
+// 标准协议就该老实报错，不能用别人的模型凑数。
+const PROTOCOLS_WITHOUT_MODELS_ENDPOINT = new Set(['grok-oauth', 'codex-oauth'])
+
+// 订阅类上游（Grok 的 cli-chat-proxy、Codex 的 chatgpt.com/backend-api）
+// 没有干净的 GET /models，拉取失败时回退到模板内置的默认模型列表，保证平台建完即可用。
 export function defaultModelsFor(protocol) {
+  if (!PROTOCOLS_WITHOUT_MODELS_ENDPOINT.has(protocol)) return null
   for (const t of TEMPLATES) {
     if (t.protocol === protocol && Array.isArray(t.default_models) && t.default_models.length) {
       return t.default_models.map((id) => ({ id, owned_by: t.name }))

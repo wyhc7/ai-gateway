@@ -443,6 +443,12 @@ function applyPreset(id) {
   providerForm.value.models_method = t.models_method || ''
   providerForm.value.extra_headers_text = t.extra_headers ? JSON.stringify(t.extra_headers, null, 2) : ''
   if (!providerForm.value.name) providerForm.value.name = t.name
+  // 模板自带的默认模型只用于预填当前这张表单，作为「这一家平台」的初始模型列表。
+  // 千万别让它在协议层面生效：同一协议下各家厂商模型毫无交集，
+  // 曾经正是这样把 ChatGPT 的模型列表套到了 DeepSeek / 通义 / Gemini 平台上。
+  if (!providerForm.value.model_names_text.trim() && Array.isArray(t.default_models) && t.default_models.length) {
+    providerForm.value.model_names_text = t.default_models.join('\n')
+  }
   if (t.auth_type || t.chat_path || t.models_path) advancedOpen.value = ['advanced']
 }
 
