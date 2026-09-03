@@ -6,6 +6,29 @@
 
 A **zero-config, out-of-the-box** self-hosted AI relay gateway. Visual platform management, multi-key automatic failover, automatic model discovery, real dashboard statistics, and token usage tracking.
 
+> ⚠️ **Read this first**: this project supports two very different kinds of upstream — **official API keys** and **consumer subscription accounts** (OAuth / reverse-engineered channels). The latter **may violate the upstream provider's terms of service**. See [Terms & Risk Notice](#terms--risk-notice) before you start.
+
+## Terms & Risk Notice
+
+| Category | Credential source | Examples | ToS risk |
+| -------- | ----------------- | -------- | -------- |
+| **Official API endpoints** | API keys publicly issued by the provider | DeepSeek, Qwen, Gemini, SiliconFlow, OpenRouter, Ollama | None — this is the provider's intended usage |
+| **Subscription account channels** | Session credentials of a consumer subscription | Grok subscription OAuth, Codex subscription OAuth, ChatGPT web (chatgpt2api) | **May violate the provider's terms of service** |
+
+Subscription channels work by driving a **personal subscription** (ChatGPT Plus/Pro, SuperGrok, etc.) as if it were an API. Providers such as OpenAI and xAI generally prohibit:
+
+- sharing account credentials with others
+- using automated means to work around the usage limits and quotas attached to a subscription plan
+
+The usual consequence is **account termination with no refund of subscription fees**. These channels also depend on non-public interfaces, so upstream changes can break them at any time.
+
+**Therefore:**
+
+- The subscription features are intended for **personal study, research and self-use only** — not for team sharing, commercial redistribution, or offering a service to others
+- Read and accept the provider's current terms before using them; the risk is your own
+- If your use case involves multiple users or commercial scenarios, use the provider's official API instead (this project supports that fully)
+- This project is MIT-licensed and accepts no responsibility for account bans, data loss, or any indirect consequences arising from the use of subscription channels
+
 ## Features
 
 - **Multi-platform, multi-key management** — 23 built-in AI platform templates (OpenAI, DeepSeek, Qwen, Gemini, Claude, and more), one-click creation
