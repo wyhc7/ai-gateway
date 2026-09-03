@@ -1,0 +1,18 @@
+#!/bin/sh
+# 推送前运行后端集成测试：别让红灯再进主干。
+#
+# 背景：GitHub 的分支保护只拦 PR 合并，日常直接 push main 完全绕得过
+# （enforce_admins=false，且这是单人仓库，本来也没打算强制走 PR）。
+# 这道本地闸门才是真正兜底的：测试不过，推送直接取消。
+#
+# 应急跳过：git push --no-verify（请在提交说明里写明为什么）
+set -e
+
+echo "[pre-push] 运行后端集成测试..."
+if ! npm test --prefix server; then
+  echo ""
+  echo "[pre-push] ✗ 测试未通过，推送已取消。"
+  echo "[pre-push]   修完再推；确需强制推送用 git push --no-verify，并说明原因。"
+  exit 1
+fi
+echo "[pre-push] ✓ 测试通过，继续推送。"
