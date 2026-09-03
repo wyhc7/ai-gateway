@@ -173,7 +173,13 @@
         <el-form-item label="模型 API 地址" required>
           <el-input v-model="providerForm.base_url" placeholder="https://api.openai.com/v1（填写到版本前缀，不含 /chat/completions 等接口路径）" />
         </el-form-item>
-        <el-form-item :label="editingProvider ? 'API Token（留空则保持不变）' : 'API Token'" :required="!editingProvider">
+        <el-form-item v-if="isOAuthProtocol(providerForm.protocol)" label="订阅账号">
+          <div class="oauth-hint">
+            订阅账号的凭据不走 API Token。平台创建后，在下方列表里点「授权 {{ authLabel(providerForm) }} 账号」
+            走网页授权，或点「导入 Token」粘贴已有凭据。
+          </div>
+        </el-form-item>
+        <el-form-item v-else :label="editingProvider ? 'API Token（留空则保持不变）' : 'API Token'" :required="!editingProvider">
           <el-input v-model="providerForm.api_key" placeholder="请输入 API Token" show-password />
         </el-form-item>
 
@@ -223,7 +229,10 @@
             <svg style="margin-right: 5px" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" /></svg>
             拉取列表
           </el-button>
-          <span class="muted" style="font-size: 12px; line-height: 1.7; padding-top: 4px">输入 API Token 后可拉取可用模型列表选择，选择后填入「模型名称」；<br />拉取失败时按服务商文档手动填写。</span>
+          <span class="muted" style="font-size: 12px; line-height: 1.7; padding-top: 4px">
+            <template v-if="isOAuthProtocol(providerForm.protocol)">绑定订阅账号后可拉取可用模型列表（也可直接使用下方已预置的默认模型）；<br />拉取失败时按上游文档手动填写。</template>
+            <template v-else>输入 API Token 后可拉取可用模型列表选择，选择后填入「模型名称」；<br />拉取失败时按服务商文档手动填写。</template>
+          </span>
         </div>
         <el-form-item label="自定义请求头（可选）">
           <el-input v-model="providerForm.extra_headers_text" type="textarea" :rows="2" placeholder='JSON 格式，如 {"HTTP-Referer": "https://example.com"}' />
@@ -462,6 +471,11 @@ function onProtocolChange() {
     providerForm.value.models_path = ''
     providerForm.value.models_method = ''
   }
+  // 切到订阅类协议时清掉残留的 API Token：这类平台凭据靠授权/导入，
+  // 留着既会在提交时被丢弃，又让用户误以为凭据已经填好了
+  if (isOAuthProtocol(providerForm.value.protocol)) {
+    providerForm.value.api_key = ''
+  }
 }
 
 const keyDialog = ref(false)
@@ -543,7 +557,8 @@ async function saveProvider() {
   if (!providerForm.value.name || !providerForm.value.base_url) {
     return ElMessage.warning('平台名称和模型 API 地址为必填项')
   }
-  if (!editingProvider.value && !providerForm.value.api_key) {
+  // 订阅类平台没有静态 API Token 可言，凭据要创建后走 OAuth 授权或导入，此处不拦
+  if (!editingProvider.value && !providerForm.value.api_key && !isOAuthProtocol(providerForm.value.protocol)) {
     return ElMessage.warning('请输入 API Token')
   }
   let extra = {}
@@ -566,7 +581,9 @@ async function saveProvider() {
     // 始终提交（含空字符串）：空值 = 清空自定义配置、回退到协议默认
     payload[field] = providerForm.value[field] || ''
   }
-  if (!editingProvider.value && providerForm.value.api_key) {
+  // 订阅类平台不提交静态 API Token：否则后端会当普通 Key 存进去，
+  // 平台下冒出一个既非 OAuth 凭据、也调不通的静态 Key
+  if (!editingProvider.value && providerForm.value.api_key && !isOAuthProtocol(providerForm.value.protocol)) {
     payload.api_key = providerForm.value.api_key
   }
   try {
@@ -742,8 +759,14 @@ const refreshingCred = ref(null)
 const authProvider = ref(null)
 let pollTimer = null
 
+// 订阅类协议的凭据来自 OAuth 授权或导入 token，不是创建平台时手填的静态 API Key。
+// 建平台表单、必填校验都要据此区分——否则选了 Grok / Codex 模板仍被拦住要填 API Token。
+function isOAuthProtocol(protocol) {
+  return protocol === 'grok-oauth' || protocol === 'codex-oauth'
+}
+
 function isOAuthProvider(p) {
-  return p?.protocol === 'grok-oauth' || p?.protocol === 'codex-oauth'
+  return isOAuthProtocol(p?.protocol)
 }
 
 function isCodexProvider(p) {
@@ -1024,6 +1047,17 @@ onBeforeUnmount(() => {
   font-size: 12px;
   color: var(--ink-3);
   margin-bottom: 6px;
+}
+
+.oauth-hint {
+  font-size: 12.5px;
+  line-height: 1.75;
+  color: var(--ink-2);
+  background: var(--surface-2);
+  border-left: 2px solid var(--rule-soft);
+  padding: 9px 13px;
+  border-radius: 0 4px 4px 0;
+  width: 100%;
 }
 
 .preview-summary {
