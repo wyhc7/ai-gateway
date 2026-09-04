@@ -1,7 +1,7 @@
 import { state, getProvider, bumpStats, bumpFailover, markResult, bumpTokens, persist, persistImmediate } from './store.js'
 import { addLog } from './logger.js'
-import { ensureAccessToken, XAI_OAUTH_BASE_URL } from './oauth.js'
-import { ensureAccessToken as ensureCodexToken } from './codex-oauth.js'
+import { ensureAccessToken, refreshAccessToken, XAI_OAUTH_BASE_URL } from './oauth.js'
+import { ensureAccessToken as ensureCodexToken, refreshAccessToken as refreshCodexToken } from './codex-oauth.js'
 import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexAccountHeader } from './codex-responses.js'
 import { TEMPLATES } from './templates.js'
 
@@ -348,6 +348,27 @@ export async function resolveKeyToken(key) {
   return key.access_token
 }
 
+// 无条件强制续期 OAuth 凭据（不判断是否临近过期），成功返回 true。
+// 用于上游 401/403 时的「补刷重试」：请求前那次 ensureAccessToken 只在
+// tokenNeedsRefresh 判定为临期时才续期，token 刚过期但尚未触发临期阈值、
+// 或上游侧提前失效时，会出现"拿着看似有效的 token 吃 401"的假性失效。
+// 一次集体过期若不做补刷，整池 Key 会被 401 冷却打残（线上已两次复现）。
+async function forceRefreshToken(key) {
+  if (!key || key.type !== 'oauth') return false
+  try {
+    const refresh = key.provider === 'codex' ? refreshCodexToken : refreshAccessToken
+    // key.token_endpoint 允许凭据自带 token 端点（测试注入 / 特殊部署覆盖），
+    // 没有时走 oauth.js 的 OIDC discovery（有缓存与兜底）
+    const next = await refresh(key, key.token_endpoint)
+    Object.assign(key, next)
+    persistImmediate()
+    return true
+  } catch {
+    // 续期失败（refresh_token 失效/网络抖动）：交给调用方按 Key 失效处理
+    return false
+  }
+}
+
 function usableKeys(provider) {
   const now = Date.now()
   const enabled = provider.keys.filter((k) => k.enabled)
@@ -604,6 +625,9 @@ async function forwardWithFailover(provider, kind, body, res) {
   const startIdx = nextRoundRobin(provider.id, keys)
   const attempts = []
   let started = false
+  // 本轮转发中已强制补刷过凭据的 Key：每个 Key 只补刷一次，
+  // 防止 refresh_token 轮换异常时对上游 token 端点死循环重放
+  const authRetried = new Set()
   // 记录实际使用的 Key 名称，供日志使用（不再通过响应头暴露给客户端）
   let usedKeyName = null
   // 生图不走对话的时间预算：图片生成动辄几十秒甚至数分钟，
@@ -642,6 +666,20 @@ async function forwardWithFailover(provider, kind, body, res) {
       clearTimeout(timer)
       timer = setTimeout(() => controller.abort(), totalTimeoutMs)
       if (RETRYABLE_STATUS.has(resp.status)) {
+        // OAuth 的 401/403 大多是「access_token 过期但未触发临期阈值」的假性失效：
+        // 先强制续期一次，让同一 Key 原地重试；仍失败才按 Key 失效冷却。
+        // 没有这层补刷时，一次集体过期会把整池 Key 打进 10 分钟冷却，
+        // 表现为整平台骤然不可用（线上两次复现）。
+        if ((resp.status === 401 || resp.status === 403) && key.type === 'oauth' && !authRetried.has(key.id)) {
+          authRetried.add(key.id)
+          await resp.body?.cancel()
+          if (await forceRefreshToken(key)) {
+            // 原地重试同一个 Key：循环体会重新 resolveKeyToken，
+            // 此时 tokenNeedsRefresh 已不成立，直接返回刚续期的新 token
+            i -= 1
+            continue
+          }
+        }
         attempts.push(`${key.name || key.id.slice(0, 8)}: HTTP ${resp.status}`)
         applyCooldown(provider, key, resp.status)
         bumpFailover()

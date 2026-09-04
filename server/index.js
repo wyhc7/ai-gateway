@@ -167,8 +167,10 @@ app.use((req, res, next) => {
   res.on('finish', () => {
     const ms = Date.now() - start
     console.log(`${new Date().toISOString().slice(0, 19).replace('T', ' ')} ${res.statusCode} ${req.method} ${req.path} ${ms}ms`)
-    // 记录到运行日志（chat / images 请求由各自的 handler 单独记录更详细的信息，避免重复）
-    if (!req.path.startsWith('/api/v1/chat/completions') && !req.path.startsWith('/api/v1/images/generations')) {
+    // 记录到运行日志（chat / images 请求由各自的 handler 单独记录更详细的信息，避免重复；
+    // /v1/* 是 /api/v1/* 的标准 OpenAI 别名，同样交给 handler 记录）
+    const quietPath = req.path.startsWith('/api') ? req.path.slice(4) : req.path
+    if (!quietPath.startsWith('/v1/chat/completions') && !quietPath.startsWith('/v1/images/generations')) {
       addLog({ type: 'api', method: req.method, path: req.path, status: res.statusCode, duration_ms: ms })
     }
   })
@@ -659,6 +661,13 @@ app.post('/api/v1/chat/completions', api(handleChat))
 app.post('/api/v1/images/generations', api(handleImages))
 
 app.get('/api/v1/models', handleModels)
+
+// OpenAI 标准路径别名：第三方客户端（Cherry Studio / NextChat / OpenWebUI 等）
+// 通常把 base_url 配成 http://host:port/v1，会请求 /v1/* 而非 /api/v1/*。
+// 两组路径指向同一批 handler，行为完全一致。
+app.post('/v1/chat/completions', api(handleChat))
+app.post('/v1/images/generations', api(handleImages))
+app.get('/v1/models', handleModels)
 
 app.get('/api/v1/models/:providerId', (req, res) => {
   const p = getProvider(req.params.providerId)
