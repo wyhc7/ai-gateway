@@ -223,6 +223,7 @@ export function createCodexStreamTransformer(model = '') {
   let created = Math.floor(Date.now() / 1000)
   let finished = false
   let streamedText = ''
+  let lastUsage = null
   const out = []
 
   function emitRole() {
@@ -243,6 +244,8 @@ export function createCodexStreamTransformer(model = '') {
     if (!text && !reasoning) return
     emitRole()
     if (text) streamedText += text
+    // reasoning 同样消耗 token：估算兜底时必须把思考内容计入，否则推理型模型严重低估
+    if (reasoning) streamedText += reasoning
     const delta = {}
     if (text) delta.content = text
     if (reasoning) delta.reasoning_content = reasoning
@@ -260,6 +263,7 @@ export function createCodexStreamTransformer(model = '') {
   function emitFinish(finishReason, usage) {
     if (finished) return
     finished = true
+    if (usage) lastUsage = usage
     emitRole()
     const payload = {
       id,
@@ -373,6 +377,10 @@ export function createCodexStreamTransformer(model = '') {
     // 上游不返回 usage 时，网关按输出长度估算 token，这里把累积的文本交出去
     get streamedText() {
       return streamedText
+    },
+    // 上游返回 usage 时（completed 事件），交给网关优先按真实值统计，而不是退回估算
+    get usage() {
+      return lastUsage
     }
   }
 }

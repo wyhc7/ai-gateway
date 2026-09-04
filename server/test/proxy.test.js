@@ -454,6 +454,110 @@ test('思考内容（reasoning_content）一并计入估算', async (t) => {
   assert.ok(tokenDelta(before) > 0, '思考链同样消耗 token，应计入统计')
 })
 
+test('非流式响应缺少 usage 时按输出长度估算，不静默漏计', async (t) => {
+  const before = state.stats.totalTokens || 0
+  const { server, port } = await startUpstream(({ res }) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ choices: [{ message: { content: '这是一段没有 usage 的非流式回复内容' } }] }))
+  })
+  t.after(() => server.close())
+
+  const provider = makeProvider({ port, keys: [makeKey('k')] })
+  const res = fakeRes()
+  await handleChat({ body: { model: provider.testModel, messages: [{ role: 'user', content: 'hi' }] } }, res)
+
+  assert.equal(res.statusCode, 200)
+  assert.ok(tokenDelta(before) > 0, '非流式上游不返回 usage 时也必须估算，不能静默漏计')
+})
+
+test('非流式 usage 只有 total_tokens=0 时退回 input+output 统计', async (t) => {
+  const before = state.stats.totalTokens || 0
+  const { server, port } = await startUpstream(({ res }) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({
+      choices: [{ message: { content: 'ok' } }],
+      usage: { total_tokens: 0, prompt_tokens: 7, completion_tokens: 9 }
+    }))
+  })
+  t.after(() => server.close())
+
+  const provider = makeProvider({ port, keys: [makeKey('k')] })
+  const res = fakeRes()
+  await handleChat({ body: { model: provider.testModel, messages: [{ role: 'user', content: 'hi' }] } }, res)
+
+  assert.equal(res.statusCode, 200)
+  assert.equal(tokenDelta(before), 16, 'total_tokens 为 0 时应回退到 prompt+completion 统计')
+})
+
+test('流式最后一行无换行也能解析出 usage，不回落估算', async (t) => {
+  const before = state.stats.totalTokens || 0
+  const { server, port } = await startUpstream(({ res }) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    res.write('data: {"choices":[{"delta":{"content":"你好"}}]}\n\n')
+    res.write('data: {"usage":{"total_tokens":137}}') // 故意不带结尾换行
+    res.end()
+  })
+  t.after(() => server.close())
+
+  const provider = makeProvider({ port, keys: [makeKey('k')] })
+  const res = fakeRes()
+  await handleChat({ body: { model: provider.testModel, stream: true, messages: [{ role: 'user', content: 'hi' }] } }, res)
+
+  assert.equal(res.statusCode, 200)
+  assert.equal(tokenDelta(before), 137, '最后一行无换行的 usage 也应被精确统计')
+})
+
+test('estimateTokens 覆盖 CJK 标点与全角字符，不高估', () => {
+  const punct = estimateTokens('你好，世界！')
+  const noPunct = estimateTokens('你好世界')
+  // 标点按 CJK 计，不应让 token 数随标点线性暴涨
+  assert.ok(punct >= noPunct && punct <= noPunct + 2, `标点不应被按 4 字符/token 高估: ${punct} vs ${noPunct}`)
+})
+
+test('Codex 流式保留 completed 事件里的真实 usage，而非退回估算', async (t) => {
+  const before = state.stats.totalTokens || 0
+  const { server, port } = await startUpstream(({ res }) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+    res.write('data: {"type":"response.output_text.delta","delta":"你好"}\n\n')
+    res.write('data: {"type":"response.completed","response":{"id":"resp_x","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}}\n\n')
+    res.end()
+  })
+  t.after(() => server.close())
+
+  // 直接用 codex-oauth 协议：走 Responses 转换器，验证 usage 经 getter 传回网关
+  const uid = crypto.randomUUID().slice(0, 8)
+  const provider = {
+    id: `p-${uid}`,
+    name: 'Codex 测试',
+    base_url: `http://127.0.0.1:${port}`,
+    protocol: 'codex-oauth',
+    enabled: true,
+    models: [{ id: `codex-${uid}`, owned_by: 'Codex 测试' }],
+    keys: [{
+      id: crypto.randomUUID(),
+      name: 'cx',
+      type: 'oauth',
+      provider: 'codex',
+      access_token: 'at-valid',
+      enabled: true,
+      cooldown_until: 0,
+      last_error: null,
+      last_error_at: null,
+      expires_at: Date.now() + 3600000,
+      created_at: Date.now()
+    }],
+    extra_headers: {},
+    created_at: Date.now()
+  }
+  state.providers.push(provider)
+
+  const res = fakeRes()
+  await handleChat({ body: { model: provider.models[0].id, stream: true, messages: [{ role: 'user', content: 'hi' }] } }, res)
+
+  assert.equal(res.statusCode, 200)
+  assert.equal(tokenDelta(before), 30, 'Codex 流式应按 completed 里的 usage 精确统计，而不是字符估算')
+})
+
 test('客户端断开连接不会误判为 Key 故障', async (t) => {
   let release
   const gate = new Promise((r) => { release = r })

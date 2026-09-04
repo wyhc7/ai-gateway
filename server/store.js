@@ -221,16 +221,22 @@ export function persist() {
   scheduleFlush()
 }
 
-export function bumpStats(providerId) {
+// 跨日翻转统一在此处理：四个「今日」计数必须一起归零，
+// 否则会出现「todayTokens 已归零、todayRequests 还带着昨天的值」的错位。
+function rolloverDaily(stats) {
   const today = todayKey()
-  state.stats = ensureStats(state.stats)
-  if (state.stats.todayDate !== today) {
-    state.stats.todayDate = today
-    state.stats.todayRequests = 0
-    state.stats.todaySuccess = 0
-    state.stats.todayFailed = 0
-    state.stats.todayTokens = 0
+  if (stats.todayDate !== today) {
+    stats.todayDate = today
+    stats.todayRequests = 0
+    stats.todaySuccess = 0
+    stats.todayFailed = 0
+    stats.todayTokens = 0
   }
+}
+
+export function bumpStats(providerId) {
+  state.stats = ensureStats(state.stats)
+  rolloverDaily(state.stats)
   state.stats.totalRequests += 1
   state.stats.todayRequests += 1
   if (providerId) {
@@ -267,13 +273,9 @@ export function bumpFailover() {
 export function bumpTokens(providerId, tokenCount) {
   const n = Number(tokenCount) || 0
   if (n <= 0) return
-  const today = todayKey()
   state.stats = ensureStats(state.stats)
+  rolloverDaily(state.stats)
   state.stats.totalTokens += n
-  if (state.stats.todayDate !== today) {
-    state.stats.todayDate = today
-    state.stats.todayTokens = 0
-  }
   state.stats.todayTokens += n
   if (providerId) {
     const p = state.stats.perProvider[providerId] || { requests: 0, success: 0, failed: 0, tokens: 0 }

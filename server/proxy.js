@@ -32,17 +32,22 @@ export function defaultModelsFor(protocol) {
 
 function extractTokenCount(usage) {
   if (!usage) return null
-  let tokenCount = usage.total_tokens ?? usage.totalTokens ?? usage.total
-  if (tokenCount == null && usage.input_tokens != null && usage.output_tokens != null) {
-    tokenCount = usage.input_tokens + usage.output_tokens
+  // 优先取 total；但 total 为 0（或缺失）时不能直接返回 0——
+  // 0 会被当作「已返回 usage」，既不会走估算兜底，也不会真正累加，等于漏计
+  const total = Number(usage.total_tokens ?? usage.totalTokens ?? usage.total)
+  if (Number.isFinite(total) && total > 0) return total
+  const pairs = [
+    [usage.input_tokens, usage.output_tokens],
+    [usage.inputTokens, usage.outputTokens],
+    [usage.prompt_tokens, usage.completion_tokens]
+  ]
+  for (const [a, b] of pairs) {
+    if (a != null && b != null) {
+      const sum = Number(a) + Number(b)
+      if (Number.isFinite(sum) && sum > 0) return sum
+    }
   }
-  if (tokenCount == null && usage.inputTokens != null && usage.outputTokens != null) {
-    tokenCount = usage.inputTokens + usage.outputTokens
-  }
-  if (tokenCount == null && usage.prompt_tokens != null && usage.completion_tokens != null) {
-    tokenCount = usage.prompt_tokens + usage.completion_tokens
-  }
-  return tokenCount != null ? Number(tokenCount) : null
+  return null
 }
 
 // 多数上游的流式响应默认不带 usage，只有显式声明 include_usage 才会在末尾补发。
@@ -74,12 +79,28 @@ export function heartbeatTickInterval(heartbeatIntervalMs) {
 }
 
 // 上游始终不返回 usage 时的兜底估算
-// CJK 约 0.7 token/字，其余按 4 字符/token 粗略折算
+// CJK 约 0.7 token/字，其余按 4 字符/token 粗略折算。
+// 范围补上 CJK 标点（\u3000-\u303F）与全角字符（\uFF00-\uFFEF），
+// 避免标点/全角字符被当 4 字符/token 高估。
 export function estimateTokens(text) {
   if (!text) return 0
-  const cjk = (text.match(/[㐀-䶿一-鿿぀-ヿ가-힯]/g) || []).length
+  const cjk = (text.match(/[㐀-䶿一-鿿぀-ヿ가-힯\u3000-\u303F\uFF00-\uFFEF]/g) || []).length
   const rest = Math.max(text.length - cjk, 0)
   return Math.max(1, Math.round(cjk * 0.7 + rest / 4))
+}
+
+// 从 chat/completions 响应体里提取输出文本（含 reasoning）用于估算。
+// 与流式路径的估算口径保持一致，避免非流式在无 usage 时静默漏计。
+function estimateCompletionTokens(respondText) {
+  if (!respondText) return 0
+  try {
+    const data = JSON.parse(respondText)
+    const msg = data.choices?.[0]?.message
+    if (!msg) return 0
+    return estimateTokens((msg.content || '') + (msg.reasoning_content || ''))
+  } catch {
+    return 0
+  }
 }
 
 // Key 级错误：凭证本身有问题（无效/无权限），需要长时间冷却
@@ -781,7 +802,17 @@ async function forwardWithFailover(provider, kind, body, res) {
           if (transformer) {
             const tail = transformer.flush()
             streamedText = transformer.streamedText
+            // Codex 的 usage 只在 completed 事件里，转换器已把它记下；
+            // 优先按真实值统计，否则会退回字符估算、把推理内容也漏掉
+            if (transformer.usage) lastUsageData = transformer.usage
             if (tail) await writeChunk(tail)
+          } else if (sseBuffer) {
+            // 最后一行若没有结尾换行，会一直留在 rest 里不被解析，
+            // 补一次解析避免丢掉最后一次 usage 或最后几个字
+            const parsed = parseSseUsage(sseBuffer + '\n')
+            sseBuffer = ''
+            if (parsed.lastUsageData) lastUsageData = parsed.lastUsageData
+            if (parsed.deltaText) streamedText += parsed.deltaText
           }
         } catch (err) {
           const isClientAbort =
@@ -819,6 +850,8 @@ async function forwardWithFailover(provider, kind, body, res) {
         if (estimated > 0) bumpTokens(provider.id, estimated)
         return { ok: true, keyName: usedKeyName, tokens: estimated, tokensEstimated: estimated > 0 }
       }
+      let tokens = 0
+      let tokensEstimated = false
       if (resp.body) {
         let text
         try {
@@ -845,9 +878,16 @@ async function forwardWithFailover(provider, kind, body, res) {
           const data = JSON.parse(text)
           const usage = data.usage || (data.choices?.[0]?.usage)
           const tokenCount = extractTokenCount(usage)
-          if (tokenCount != null) {
-            bumpTokens(provider.id, tokenCount)
+          if (tokenCount != null && tokenCount > 0) {
+            tokens = tokenCount
+          } else {
+            // 上游不返回 usage 时，与流式路径一致按输出长度估算（含 reasoning），
+            // 否则非流式请求会被静默漏计
+            const est = estimateCompletionTokens(respondText)
+            tokens = est
+            tokensEstimated = est > 0
           }
+          if (tokens > 0) bumpTokens(provider.id, tokens)
         } catch {
           // 非 JSON body，忽略
         }
@@ -855,7 +895,7 @@ async function forwardWithFailover(provider, kind, body, res) {
         if (!res.writableEnded) res.end()
       }
       markResult(provider.id, true)
-      return { ok: true, keyName: usedKeyName }
+      return { ok: true, keyName: usedKeyName, tokens, tokensEstimated }
     } catch (err) {
       const msg = err.name === 'AbortError' ? '上游请求超时' : `网络错误: ${err.message}`
       if (started) {

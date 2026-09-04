@@ -239,6 +239,29 @@ describe('createCodexStreamTransformer（流式转换）', () => {
     assert.equal(t.streamedText, '一二三四')
   })
 
+  test('reasoning delta 一并计入 streamedText，估算时不漏思考内容', () => {
+    const t = createCodexStreamTransformer('m')
+    t.push('data: {"type":"response.reasoning_summary_text.delta","delta":"思考中"}\n\n')
+    t.push('data: {"type":"response.output_text.delta","delta":"结论"}\n\n')
+    assert.equal(t.streamedText, '思考中结论')
+  })
+
+  test('completed 事件的 usage 通过 getter 暴露，供网关优先按真实值统计', () => {
+    const t = createCodexStreamTransformer('m')
+    t.push('data: {"type":"response.output_text.delta","delta":"hi"}\n\n')
+    t.push(
+      'data: {"type":"response.completed","response":{"id":"resp_x","usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}}\n\n'
+    )
+    assert.deepEqual(t.usage, { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 })
+  })
+
+  test('没有 completed 事件时 usage 为 null，退回估算', () => {
+    const t = createCodexStreamTransformer('m')
+    t.push('data: {"type":"response.output_text.delta","delta":"hi"}\n\n')
+    t.flush()
+    assert.equal(t.usage, null)
+  })
+
   test('response.created 事件设置 id 与 model', () => {
     const t = createCodexStreamTransformer('')
     const out = t.push(
