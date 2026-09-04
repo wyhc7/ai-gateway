@@ -113,6 +113,11 @@ const JSON_TOTAL_TIMEOUT_MS = toMs(process.env.JSON_TOTAL_TIMEOUT_MS, 120000)
 // 上限封顶到流式的 30 分钟。短请求仍受 2 分钟护栏保护，避免挂死的连接久拖不决。
 const JSON_LONG_MS_PER_TOKEN = 40
 
+// 生图（/images/generations）与对话不是同一量级：gpt-image-2 这类模型实测要 30~90 秒，
+// 叠加排队可能更久。沿用对话侧的 2 分钟护栏会在图片快生成完时把连接掐断，
+// 客户端只看到一次毫无信息的 502。单独给 5 分钟预算，并允许环境变量覆盖。
+const IMAGES_TOTAL_TIMEOUT_MS = toMs(process.env.IMAGES_TOTAL_TIMEOUT_MS, 300000)
+
 // 计算一次请求的总时长预算；导出便于测试
 export function jsonTotalTimeout(maxTokens, stream) {
   if (stream) return STREAM_TOTAL_TIMEOUT_MS
@@ -157,20 +162,20 @@ const USAGE_STREAM_HOSTS = [
 export const DEFAULT_PROTOCOL = 'openai-chat'
 
 const PROTOCOLS = {
-  'openai-chat': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/chat/completions', modelsMethod: 'GET' },
-  'openai-responses': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/responses', modelsMethod: 'GET' },
+  'openai-chat': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/chat/completions', imagesPath: '/images/generations', modelsMethod: 'GET' },
+  'openai-responses': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/responses', imagesPath: '/images/generations', modelsMethod: 'GET' },
   // Anthropic 官方的 OpenAI 兼容端点：鉴权仍是 x-api-key，但请求与响应都是 OpenAI 格式，可直接透传
-  'anthropic-openai': { auth: 'anthropic', authHeader: 'x-api-key', authPrefix: '', modelsPath: '/models', chatPath: '/chat/completions', modelsMethod: 'GET' },
+  'anthropic-openai': { auth: 'anthropic', authHeader: 'x-api-key', authPrefix: '', modelsPath: '/models', chatPath: '/chat/completions', imagesPath: '/images/generations', modelsMethod: 'GET' },
   // 原生 Messages 接口：请求体需 max_tokens、system 独立成字段、响应结构也不同，
   // 直接转发 OpenAI 格式必然 400。保留此项仅供自建了转换层的场景使用。
-  'anthropic': { auth: 'anthropic', authHeader: 'x-api-key', authPrefix: '', modelsPath: '/models', chatPath: '/messages', modelsMethod: 'GET' },
+  'anthropic': { auth: 'anthropic', authHeader: 'x-api-key', authPrefix: '', modelsPath: '/models', chatPath: '/messages', imagesPath: '/images/generations', modelsMethod: 'GET' },
   // Grok 订阅账号（OAuth 凭据）：上游是 CLI chat proxy，接口形态仍是 OpenAI 兼容，
   // 与 api.x.ai 的区别只在鉴权来源——一个是订阅，一个是按量 API Key。
-  'grok-oauth': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/chat/completions', modelsMethod: 'GET' },
+  'grok-oauth': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/chat/completions', imagesPath: '/images/generations', modelsMethod: 'GET' },
   // Codex 订阅账号（ChatGPT Plus/Pro 的 OAuth 凭据）：上游是 Responses API，
   // 请求体用 input[]、响应体用 output[]，与 chat/completions 不同，需要转换层。
-  'codex-oauth': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/responses', modelsMethod: 'GET' },
-  'custom': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/chat/completions', modelsMethod: 'GET' }
+  'codex-oauth': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/responses', imagesPath: '/images/generations', modelsMethod: 'GET' },
+  'custom': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/chat/completions', imagesPath: '/images/generations', modelsMethod: 'GET' }
 }
 
 // 走 Responses API 的协议：请求/响应都需要在 chat/completions 与 Responses 之间转换
@@ -190,6 +195,7 @@ export function callPlan(provider) {
     authPrefix: provider.auth_prefix || proto.authPrefix,
     authQueryParam: provider.auth_query_param || 'api_key',
     chatPath: provider.chat_path || proto.chatPath,
+    imagesPath: provider.images_path || proto.imagesPath,
     modelsPath: provider.models_path || proto.modelsPath,
     modelsMethod: String(provider.models_method || proto.modelsMethod).toUpperCase()
   }
@@ -573,14 +579,18 @@ async function forwardWithFailover(provider, kind, body, res) {
     return { ok: false, error: `该平台没有可用的 Key（全部处于冷却状态${hint}）` }
   }
   const plan = callPlan(provider)
-  const path = kind === 'chat' ? plan.chatPath : plan.modelsPath
+  const path = kind === 'chat' ? plan.chatPath : kind === 'images' ? plan.imagesPath : plan.modelsPath
   const startIdx = nextRoundRobin(provider.id, keys)
   const attempts = []
   let started = false
   // 记录实际使用的 Key 名称，供日志使用（不再通过响应头暴露给客户端）
   let usedKeyName = null
-  const totalTimeoutMs = jsonTotalTimeout(body?.max_tokens, body?.stream)
-  let upstreamBody = kind === 'chat' ? serializeUpstreamBody(provider, body) : undefined
+  // 生图不走对话的时间预算：图片生成动辄几十秒甚至数分钟，
+  // 用 token 数推算时长对它毫无意义，直接给独立的固定预算。
+  const totalTimeoutMs = kind === 'images' ? IMAGES_TOTAL_TIMEOUT_MS : jsonTotalTimeout(body?.max_tokens, body?.stream)
+  // 生图的请求体就是客户端原样发来的 OpenAI 生图参数（prompt / size / n 等），
+  // 不需要像对话那样做协议转换（Responses ↔ chat/completions），原样透传即可。
+  let upstreamBody = kind === 'chat' ? serializeUpstreamBody(provider, body) : kind === 'images' ? JSON.stringify(body) : undefined
   for (let i = 0; i < keys.length; i += 1) {
     const key = keys[(startIdx + i) % keys.length]
     // OAuth 账号：发请求前确认 access_token 有效。刷新失败不算请求失败，
@@ -602,7 +612,7 @@ async function forwardWithFailover(provider, kind, body, res) {
       // 而不是让客户端挂到总时长超时（此前为 30 分钟）
       timer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS)
       const resp = await fetch(upstream, {
-        method: kind === 'chat' ? 'POST' : plan.modelsMethod,
+        method: kind === 'chat' || kind === 'images' ? 'POST' : plan.modelsMethod,
         headers: buildHeaders(provider, plan, token, key),
         body: upstreamBody,
         signal: controller.signal
@@ -645,7 +655,7 @@ async function forwardWithFailover(provider, kind, body, res) {
         if (clamped != null) {
           console.warn(`[max_tokens 自适应] 模型 ${body?.model} 上限 ${clamped}，按上游报错范围收敛后重试`)
           // upstreamBody 在循环外已序列化，这里要重新生成，否则重试仍带上旧值
-          upstreamBody = kind === 'chat' ? serializeUpstreamBody(provider, body) : undefined
+          upstreamBody = kind === 'chat' ? serializeUpstreamBody(provider, body) : kind === 'images' ? JSON.stringify(body) : undefined
         }
         attempts.push(`${key.name || key.id.slice(0, 8)}: HTTP 400${clamped != null ? '（max_tokens 收敛后重试）' : '（瞬时重试）'}`)
         bumpFailover()
@@ -812,7 +822,9 @@ async function forwardWithFailover(provider, kind, body, res) {
       if (resp.body) {
         let text
         try {
-          text = await readJsonBody(resp, JSON_TOTAL_TIMEOUT_MS, controller)
+          // 用本次请求的总预算读取响应体：对话的非流式分支两者本就相等，
+          // 而生图必须用自己的 5 分钟预算，否则会被对话的 2 分钟护栏截断。
+          text = await readJsonBody(resp, totalTimeoutMs, controller)
         } catch (err) {
           const msg = err.name === 'AbortError' ? '上游响应超时' : `上游读取失败: ${err.message}`
           attempts.push(`${key.name || key.id.slice(0, 8)}: ${msg}`)
@@ -938,6 +950,44 @@ export async function handleChat(req, res) {
     duration_ms: Date.now() - startTime,
     tokens: result.tokens || undefined,
     tokens_estimated: result.tokensEstimated ? true : undefined,
+    error: result.ok ? undefined : (result.error || '')
+  })
+}
+
+// 生图接口：与 handleChat 同构——按 model 找平台、挑 Key、透传 OpenAI 生图协议。
+// 差异只有三点：走 imagesPath、请求体原样透传、时间预算更长（见 forwardWithFailover）。
+// 之所以单独开一个入口而不是复用 chat，是因为生图的鉴权/冷却/故障切换规则完全一致，
+// 但协议转换（Responses ↔ chat/completions）对它不适用，参数一个字都不该改。
+export async function handleImages(req, res) {
+  const { model, providerIdHint, body } = resolveTarget(req.body)
+  const provider = matchProvider(model, providerIdHint)
+  bumpStats(provider?.id)
+  const startTime = Date.now()
+  const baseLog = {
+    type: 'images',
+    method: 'POST',
+    path: '/api/v1/images/generations',
+    model,
+    provider_id: provider?.id || null,
+    provider_name: provider?.name || null
+  }
+  if (!provider) {
+    markResult(null, false)
+    addLog({ ...baseLog, status: 404, error: `未找到提供模型 "${model}" 的平台` })
+    return respondJson(res, 404, { error: { message: `未找到提供模型 "${model}" 的平台，请先在平台管理中刷新模型列表`, type: 'model_not_found' } })
+  }
+  if (!provider.base_url) {
+    markResult(provider.id, false)
+    addLog({ ...baseLog, status: 400, error: '平台缺少 Base URL' })
+    return respondJson(res, 400, { error: { message: '平台缺少 Base URL', type: 'bad_config' } })
+  }
+  const result = await forwardWithFailover(provider, 'images', body, res)
+  addLog({
+    ...baseLog,
+    status: res.statusCode || (result.ok ? 200 : 502),
+    ok: result.ok,
+    key: result.keyName || undefined,
+    duration_ms: Date.now() - startTime,
     error: result.ok ? undefined : (result.error || '')
   })
 }

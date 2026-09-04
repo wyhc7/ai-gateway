@@ -4,7 +4,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import crypto from 'node:crypto'
 import { state, persist, persistImmediate, getProvider, genId, todayKey, getAdminKey } from './store.js'
-import { handleChat, handleModels, refreshModels, previewModels, defaultModelsFor, DEFAULT_PROTOCOL } from './proxy.js'
+import { handleChat, handleImages, handleModels, refreshModels, previewModels, defaultModelsFor, DEFAULT_PROTOCOL } from './proxy.js'
 import { TEMPLATES } from './templates.js'
 import { addLog, getLogs, initLogger } from './logger.js'
 import {
@@ -167,8 +167,8 @@ app.use((req, res, next) => {
   res.on('finish', () => {
     const ms = Date.now() - start
     console.log(`${new Date().toISOString().slice(0, 19).replace('T', ' ')} ${res.statusCode} ${req.method} ${req.path} ${ms}ms`)
-    // 记录到运行日志（chat 请求由 handleChat 单独记录更详细的信息，避免重复）
-    if (!req.path.startsWith('/api/v1/chat/completions')) {
+    // 记录到运行日志（chat / images 请求由各自的 handler 单独记录更详细的信息，避免重复）
+    if (!req.path.startsWith('/api/v1/chat/completions') && !req.path.startsWith('/api/v1/images/generations')) {
       addLog({ type: 'api', method: req.method, path: req.path, status: res.statusCode, duration_ms: ms })
     }
   })
@@ -653,6 +653,10 @@ app.get('/api/oauth/codex/defaults', (req, res) => {
 })
 
 app.post('/api/v1/chat/completions', api(handleChat))
+
+// 生图（OpenAI /images/generations 兼容）：走与对话相同的平台匹配、Key 轮询与故障切换，
+// 请求体原样透传给上游（chatgpt2api 等自建生图服务可直接挂在网关后面统一调度）。
+app.post('/api/v1/images/generations', api(handleImages))
 
 app.get('/api/v1/models', handleModels)
 
