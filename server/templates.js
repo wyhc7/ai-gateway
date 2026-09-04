@@ -12,7 +12,10 @@ export const TEMPLATES = [
   // Grok 订阅账号：凭据来自 OAuth 授权（SuperGrok / X Premium 订阅）或直接粘贴 token。
   // 两个上游任选：cli-chat-proxy.grok.com 是订阅专用，api.x.ai 是官方 API 端点（token 可能两者通用）。
   // 上游通常没有干净的 /models，default_models 作为拉取失败的兜底。
-  { id: 'grok-oauth', name: 'Grok 订阅账号（OAuth）', group: 'OAuth 订阅', protocol: 'grok-oauth', base_url: 'https://cli-chat-proxy.grok.com/v1', default_models: ['grok-4', 'grok-4-fast', 'grok-4-reasoning', 'grok-4-reasoning-fast', 'grok-3', 'grok-3-fast', 'grok-3-mini-fast', 'grok-3-reasoner', 'grok-3-reasoner-fast', 'grok-2', 'grok-2-fast'] },
+  // 注意：cli-chat-proxy 订阅通道实测只提供 grok-4.6，请求其他模型一律 402
+  // personal-team-blocked:spending-limit —— 默认列表必须只写 grok-4.6，
+  // 否则「刷新模型失败 → 兜底覆盖」会把手工设置冲成一批必然失败的模型名。
+  { id: 'grok-oauth', name: 'Grok 订阅账号（OAuth）', group: 'OAuth 订阅', protocol: 'grok-oauth', base_url: 'https://cli-chat-proxy.grok.com/v1', default_models: ['grok-4.6'] },
   { id: 'grok-oauth-api', name: 'Grok 订阅账号（api.x.ai 直连）', group: 'OAuth 订阅', protocol: 'grok-oauth', base_url: 'https://api.x.ai/v1', default_models: ['grok-4', 'grok-4-fast', 'grok-4-reasoning', 'grok-4-reasoning-fast', 'grok-3', 'grok-3-fast', 'grok-3-mini-fast', 'grok-3-reasoner', 'grok-3-reasoner-fast', 'grok-2', 'grok-2-fast'] },
   // Codex 订阅账号（ChatGPT Plus / Pro / Business 附带）：走设备码 OAuth 授权，
   // 上游是 chatgpt.com/backend-api/codex 的 Responses API，网关自动做协议转换。

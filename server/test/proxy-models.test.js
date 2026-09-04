@@ -33,6 +33,15 @@ describe('defaultModelsFor', () => {
     assert.ok(models.every((m) => m.id && m.owned_by))
   })
 
+  test('回归：cli-chat-proxy 订阅通道兜底必须是 grok-4.6（订阅号唯一可用模型）', () => {
+    // cli-chat-proxy 订阅通道实测只有 grok-4.6，请求其他模型一律 402。
+    // 若兜底列表写成 grok-4/3/2 系列，「刷新模型失败 → 兜底覆盖」会把
+    // 手工设置的模型冲成一批必然失败的模型名，表现为平台全部请求报
+    // 「未找到提供模型 grok-4.6 的平台」。
+    const grok = defaultModelsFor('grok-oauth')
+    assert.deepEqual(grok.map((m) => m.id), ['grok-4.6'])
+  })
+
   test('openai-chat 等无默认模型的协议返回 null', () => {
     assert.equal(defaultModelsFor('openai-chat'), null)
   })
