@@ -182,6 +182,9 @@ WorkingDirectory=$WORK_DIR
 Environment=NODE_ENV=production
 Environment=PORT=3001
 Environment=DATA_DIR=$DATA_DIR
+# 部署时自动建好内置的免凭据免费通道（OpenCode Zen），省掉手工添加平台这一步。
+# 不想要就删掉这行；在管理界面删掉该平台后也不会被重建。
+Environment=ZEN_AUTOSEED=1
 ExecStart=$NODE_BIN $WORK_DIR/server/index.js
 Restart=on-failure
 RestartSec=3

@@ -11,8 +11,9 @@ services:
       - DATA_DIR=/data
       # 管理界面登录密钥（不设置则自动生成，见容器日志或 /data/config.json）
       # - ADMIN_KEY=change-me
-      # 启动时自动建好内置的免凭据免费通道（OpenCode Zen），已存在则跳过
-      # - ZEN_AUTOSEED=1
+      # 自动建好内置的免凭据免费通道（OpenCode Zen），省掉手工添加平台这一步；
+      # 在管理界面删掉该平台后不会被重建。不需要就删掉这行
+      - ZEN_AUTOSEED=1
     volumes:
       # 容器以非 root（node 用户 uid 1000）运行，宿主机目录需对其可写，如：chown -R 1000:1000 data
       - ./data:/data

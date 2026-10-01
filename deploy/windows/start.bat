@@ -45,6 +45,8 @@ echo   管理界面: http://localhost:3001
 echo   API 端点: http://localhost:3001/api/v1
 echo   按 Ctrl+C 停止
 echo.
+rem 自动建好内置的免凭据免费通道（OpenCode Zen），省掉手工添加平台这一步
+set "ZEN_AUTOSEED=1"
 call node server\index.js
 
 goto :eof

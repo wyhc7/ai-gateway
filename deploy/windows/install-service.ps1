@@ -51,7 +51,7 @@ Pop-Location
 Write-Host "==> 注册服务 $ServiceName (端口 $Port)"
 & $Nssm install $ServiceName $node $serverIndex
 & $Nssm set $ServiceName AppDirectory $AppDir
-& $Nssm set $ServiceName AppEnvironmentExtra "NODE_ENV=production`nPORT=$Port`nDATA_DIR=$dataDir"
+& $Nssm set $ServiceName AppEnvironmentExtra "NODE_ENV=production`nPORT=$Port`nDATA_DIR=$dataDir`nZEN_AUTOSEED=1"
 & $Nssm set $ServiceName Start SERVICE_AUTO_START
 & $Nssm set $ServiceName AppExit Default Restart
 & $Nssm set $ServiceName AppRestartDelay 3000

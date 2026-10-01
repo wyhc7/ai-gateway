@@ -48,6 +48,7 @@ cd server && node index.js
 | `WEB_DIST` | `web/dist` | 前端构建产物目录 |
 | `ADMIN_KEY` | 自动生成 | 管理界面登录密钥，见下文 |
 | `HTTPS_PROXY` / `HTTP_PROXY` | 未设置 | 设置后 Node 全局 fetch 走代理（受限网络访问上游必备，含 Grok/Codex 的 auth 域） |
+| `ZEN_AUTOSEED` | 未设置 | 设为 `1` 时启动自动创建内置免凭据免费通道（OpenCode Zen）；各部署脚本已默认开启 |
 
 ### 管理密钥
 
@@ -181,8 +182,9 @@ Google 官方 OpenAI 兼容端点，选 `Google Gemini` 模板，填 [AI Studio 
 
 在「平台管理」选预设模板 **OpenCode Zen 免费通道** 保存即可用，模型列表已预置 8 个实测可用的免费模型。
 
-若要在部署时就把这个平台建好，启动时加环境变量 `ZEN_AUTOSEED=1`
-（平台已存在则跳过，不会覆盖你的改动）。
+**一键部署脚本（Docker / Linux / macOS / Windows）默认已带上 `ZEN_AUTOSEED=1`**，
+装完打开管理界面就有这个平台，不需要手工添加。手工启动时加同名环境变量也能启用；
+设成 `0` 或不设置则不自动创建，在管理界面删掉它之后也不会被重建。
 
 <details>
 <summary>它是怎么做到免凭据的</summary>

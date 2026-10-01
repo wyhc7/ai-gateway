@@ -374,6 +374,9 @@ app.put('/api/providers/:id', (req, res) => {
 app.delete('/api/providers/:id', (req, res) => {
   const idx = state.providers.findIndex((p) => p.id === req.params.id)
   if (idx < 0) return res.status(404).json({ error: { message: '平台不存在' } })
+  // 删掉内置免费通道要留痕，否则 ZEN_AUTOSEED 会在下次重启时把它重建出来，
+  // 用户会以为删除没生效
+  if (state.providers[idx].protocol === 'zen-free') state.zen_seed_dismissed = true
   state.providers.splice(idx, 1)
   persistImmediate()
   res.json({ ok: true })
@@ -767,6 +770,8 @@ function seedZenProvider() {
   const flag = String(process.env.ZEN_AUTOSEED || '').toLowerCase()
   if (!['1', 'true', 'yes', 'on'].includes(flag)) return
   if (state.providers.some((p) => p.protocol === 'zen-free')) return
+  // 用户主动删过这个平台：说明他不要它，别在每次重启时又给塞回来
+  if (state.zen_seed_dismissed) return
   const tpl = TEMPLATES.find((t) => t.protocol === 'zen-free')
   if (!tpl) return
   state.providers.push({

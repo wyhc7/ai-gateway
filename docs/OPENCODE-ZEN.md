@@ -10,14 +10,20 @@
 平台管理 → 添加平台 → 预设模板选 **OpenCode Zen 免费通道** → 保存。
 名称与地址已预填，模型列表已预置 8 个可用模型，**无需填写任何凭据**。
 
-**方式二：环境变量自动初始化**
+**方式二：环境变量自动初始化（一键部署脚本默认已开启）**
 
 ```bash
 ZEN_AUTOSEED=1 node server/index.js
 ```
 
-启动时若不存在该平台则自动创建（已存在则跳过，不会覆盖你的改动）。
-Docker 部署在 `docker-compose.yml` 的 `environment` 里加 `- ZEN_AUTOSEED=1`。
+启动时若不存在该平台则自动创建；设成 `0` 或不设置则不自动创建。
+
+各部署脚本（`docker-compose.yml`、`deploy/linux/*`、`deploy/macos/*`、
+`deploy/windows/*`）都已经写好这个变量：**部署完打开管理界面就能看到这个平台**，
+不需要手工添加。
+
+在管理界面删掉它会写入 `zen_seed_dismissed` 标记，之后重启不会再被重建 ——
+删除是一次性动作，不会自己复活。
 
 **方式三：接口**
 
