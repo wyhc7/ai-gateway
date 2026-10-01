@@ -37,6 +37,10 @@ export const TEMPLATES = [
   // 凭据在 chatgpt2api 侧以 access_token 导入（手机已登录号可绕过 device-code 的手机号验证），
   // 网关只做统一调度与负载均衡。chatgpt2api 默认 API 端口 3000，部署改端口时同步改 base_url。
   { id: 'chatgpt-web', name: 'ChatGPT 网页/手机版（chatgpt2api）', group: '本地中转', protocol: 'openai-chat', base_url: 'http://127.0.0.1:3000/v1', default_models: ['gpt-5', 'gpt-5-mini', 'gpt-5-1', 'gpt-5-2', 'gpt-5-3', 'gpt-5-3-mini', 'gpt-image-2'] },
+  // OpenCode Zen 免费通道：免密钥（凭据就是字符串 public），无需任何外部进程，
+  // 协议整形在 server/zen-lane.js 内完成（弱化工具名、强制流式、补客户端指纹头）。
+  // 上游 /models 会把付费模型一并列出，因此模型列表以白名单为准，不能靠拉取决定。
+  { id: 'opencode-zen', name: 'OpenCode Zen 免费通道', group: '免费通道', protocol: 'zen-free', base_url: 'https://opencode.ai/zen/v1', default_models: ['nemotron-3-ultra-free', 'nemotron-3.5-lightning-free', 'longcat-2.5-preview-free', 'mimo-v2.6-flash-free', 'mimo-v2.5-free', 'ling-3.0-flash-fin-free', 'big-pickle', 'space-bunny-free'] },
   // 走官方 OpenAI 兼容端点：鉴权仍是 x-api-key，请求体无需转换即可透传。
   // 直接用原生 /v1/messages 会因缺少 max_tokens、响应结构不同而必然 400。
   { id: 'anthropic', name: 'Anthropic Claude', group: 'Anthropic 格式', protocol: 'anthropic-openai', base_url: 'https://api.anthropic.com/v1' },

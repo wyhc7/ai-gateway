@@ -160,6 +160,7 @@
                 <el-option label="OpenAI Responses" value="openai-responses" />
                 <el-option label="Anthropic（OpenAI 兼容端点）" value="anthropic-openai" />
                 <el-option label="Anthropic 原生 Messages（需转换层）" value="anthropic" />
+                <el-option label="OpenCode Zen 免费通道（免凭据）" value="zen-free" />
                 <el-option label="自定义调用方案" value="custom" />
               </el-select>
             </el-form-item>
@@ -177,6 +178,11 @@
           <div class="oauth-hint">
             订阅账号的凭据不走 API Token。平台创建后，在下方列表里点「授权 {{ authLabel(providerForm) }} 账号」
             走网页授权，或点「导入 Token」粘贴已有凭据。
+          </div>
+        </el-form-item>
+        <el-form-item v-else-if="isCredentiallessProtocol(providerForm.protocol)" label="凭据">
+          <div class="oauth-hint">
+            该通道免凭据：上游按请求头与请求体指纹放行，平台创建后即可直接使用，无需填写 API Token。
           </div>
         </el-form-item>
         <el-form-item v-else :label="editingProvider ? 'API Token（留空则保持不变）' : 'API Token'" :required="!editingProvider">
@@ -763,6 +769,12 @@ let pollTimer = null
 // 建平台表单、必填校验都要据此区分——否则选了 Grok / Codex 模板仍被拦住要填 API Token。
 function isOAuthProtocol(protocol) {
   return protocol === 'grok-oauth' || protocol === 'codex-oauth'
+}
+
+// 免凭据通道（OpenCode Zen 免费档）：创建平台时不需要 API Token，
+// 也不能把空 Token 当普通 Key 提交，否则平台下会挂一个永远调不通的静态 Key。
+function isCredentiallessProtocol(protocol) {
+  return protocol === 'zen-free'
 }
 
 function isOAuthProvider(p) {

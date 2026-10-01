@@ -760,6 +760,32 @@ if (existsSync(join(WEB_DIST, 'index.html'))) {
   console.log(`[gateway] 生产模式已加载管理界面: ${WEB_DIST}`)
 }
 
+// 可选：启动时把内置的免凭据免费通道建好，让「部署完就能用」不留手工步骤。
+// 默认不开 —— 它会往已有部署里凭空多出一个平台，属于让人意外的副作用，
+// 因此只认显式的 ZEN_AUTOSEED=1，并且已存在同协议平台时直接跳过，绝不覆盖用户配置。
+function seedZenProvider() {
+  const flag = String(process.env.ZEN_AUTOSEED || '').toLowerCase()
+  if (!['1', 'true', 'yes', 'on'].includes(flag)) return
+  if (state.providers.some((p) => p.protocol === 'zen-free')) return
+  const tpl = TEMPLATES.find((t) => t.protocol === 'zen-free')
+  if (!tpl) return
+  state.providers.push({
+    id: genId(),
+    name: tpl.name,
+    base_url: tpl.base_url,
+    protocol: tpl.protocol,
+    enabled: true,
+    models: (tpl.default_models || []).map((id) => ({ id, owned_by: tpl.name })),
+    keys: [],
+    extra_headers: {},
+    created_at: Date.now()
+  })
+  persistImmediate()
+  console.log(`[gateway] ZEN_AUTOSEED：已创建「${tpl.name}」（免凭据通道，无需配置 Key）`)
+}
+
+seedZenProvider()
+
 app.listen(PORT, '0.0.0.0', () => {
   initLogger()
   console.log(`[gateway] AI 中转站后端已启动: http://0.0.0.0:${PORT}`)
