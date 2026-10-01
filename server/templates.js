@@ -30,12 +30,6 @@ export const TEMPLATES = [
   { id: 'stepfun', name: '阶跃星辰', group: 'OpenAI 兼容', protocol: 'openai-chat', base_url: 'https://api.stepfun.com/v1' },
   { id: 'spark', name: '讯飞星火', group: 'OpenAI 兼容', protocol: 'openai-chat', base_url: 'https://spark-api-open.xf-yun.com/v1' },
   { id: 'nvidia', name: 'NVIDIA NIM', group: 'OpenAI 兼容', protocol: 'openai-chat', base_url: 'https://integrate.api.nvidia.com/v1' },
-  // OpenCode Zen：OpenCode 团队的模型聚合网关，/zen/v1/models 匿名可读（实测 84 个模型）。
-  // 它按模型分端点，本协议只覆盖走 /chat/completions 的 OpenAI 兼容那部分：
-  // DeepSeek、Kimi、GLM、MiniMax、Qwen3.8 Max，以及 10 个 free 模型。
-  // GPT/Grok/Muse 走 /responses、Claude 走 /messages、Gemini 走 /models/{id}、Jev 走
-  // /systemone，这些需另行适配（一个平台只能配一个协议），别指望刷新出来的 84 个全能用。
-  { id: 'opencode-zen', name: 'OpenCode Zen', group: 'OpenAI 兼容', protocol: 'openai-chat', base_url: 'https://opencode.ai/zen/v1' },
   { id: 'ollama', name: 'Ollama 本地', group: '本地部署', protocol: 'openai-chat', base_url: 'http://localhost:11434/v1' },
   { id: 'lmstudio', name: 'LM Studio 本地', group: '本地部署', protocol: 'openai-chat', base_url: 'http://localhost:1234/v1' },
   { id: 'vllm', name: 'vLLM 本地', group: '本地部署', protocol: 'openai-chat', base_url: 'http://localhost:8000/v1' },
