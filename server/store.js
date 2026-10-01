@@ -36,6 +36,9 @@ function defaultStats() {
 const DEFAULT_STATE = () => ({
   providers: [],
   gateway_api_key: `gk-${crypto.randomUUID()}`,
+  // 用户主动删掉了内置的免凭据免费通道 → 不再自动重建（见 index.js 的 ZEN_AUTOSEED）。
+  // 有这一位，部署脚本才能放心默认开启自动创建：删掉是一次性动作，重启不会复活。
+  zen_seed_dismissed: false,
   // 管理端密钥：保护 /api/* 管理接口（可用环境变量 ADMIN_KEY 覆盖）
   admin_api_key: process.env.ADMIN_KEY || `ak-${crypto.randomUUID()}`,
   stats: defaultStats(),

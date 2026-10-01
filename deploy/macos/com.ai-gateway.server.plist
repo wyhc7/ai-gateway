@@ -26,6 +26,9 @@
     <string>@PORT@</string>
     <key>DATA_DIR</key>
     <string>@APP_DIR@/data</string>
+    <!-- 部署时自动建好内置的免凭据免费通道（OpenCode Zen） -->
+    <key>ZEN_AUTOSEED</key>
+    <string>1</string>
   </dict>
 
   <key>RunAtLoad</key>

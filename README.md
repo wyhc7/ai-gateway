@@ -11,6 +11,7 @@
 ## 功能
 
 - **25+ 平台模板** — OpenAI 兼容厂商（DeepSeek、通义千问、Gemini、硅基流动、OpenRouter 等）、Grok 订阅 OAuth、Codex 订阅 OAuth、网页版 ChatGPT（chatgpt2api）一键盘点
+- **内置免凭据免费通道** — OpenCode Zen 免费档开箱即用：不需要 API Key，也不需要额外部署任何服务，选个模板就能用（见 [docs/OPENCODE-ZEN.md](docs/OPENCODE-ZEN.md)）
 - **自动故障切换** — Key 不可用时自动轮换到下一个 Key，请求不中断
 - **分级冷却与半开探测** — 区分「Key 失效」（401/403，长冷却）与「上游抖动」（5xx/限流，短冷却且限制同时冷却数量）；冷却过半后自动放行探测请求，上游恢复即刻可用
 - **模型自动拉取** — 输入 API Key 后一键拉取平台可用模型列表
@@ -47,6 +48,7 @@ cd server && node index.js
 | `WEB_DIST` | `web/dist` | 前端构建产物目录 |
 | `ADMIN_KEY` | 自动生成 | 管理界面登录密钥，见下文 |
 | `HTTPS_PROXY` / `HTTP_PROXY` | 未设置 | 设置后 Node 全局 fetch 走代理（受限网络访问上游必备，含 Grok/Codex 的 auth 域） |
+| `ZEN_AUTOSEED` | 未设置 | 设为 `1` 时启动自动创建内置免凭据免费通道（OpenCode Zen）；各部署脚本已默认开启 |
 
 ### 管理密钥
 
@@ -172,6 +174,32 @@ Google 官方 OpenAI 兼容端点，选 `Google Gemini` 模板，填 [AI Studio 
 走 `chatgpt.com/backend-api/conversation` 私有协议，需经 [chatgpt2api](https://github.com/basketikun/chatgpt2api) 反向代理转成 OpenAI 兼容端点，再用 `ChatGPT 网页/手机版（chatgpt2api）` 模板接入。**直接粘贴 ChatGPT access_token 即可，绕过 device-code 的手机号验证**。一键部署脚本见 [scripts/deploy-chatgpt2api.bat](scripts/deploy-chatgpt2api.bat)，详细见 [docs/CHATGPT2API-ONBOARDING.md](docs/CHATGPT2API-ONBOARDING.md)。
 
 > 注意：Codex 与网页版 ChatGPT 的上游（auth.openai.com / chatgpt.com）对出口区域敏感，服务器需能让流量走 OpenAI 支持区域（美/日/新/韩），否则会被封。配合下方「出网代理」使用。
+
+## 内置免凭据免费通道（OpenCode Zen）
+
+项目内置了一条**免凭据**免费通道：不需要 API Key，也不需要额外部署任何服务
+（对比 chatgpt2api 那类通道要单独起一个进程 —— 这条的协议整形全部写在网关内部）。
+
+在「平台管理」选预设模板 **OpenCode Zen 免费通道** 保存即可用，模型列表已预置 8 个实测可用的免费模型。
+
+**一键部署脚本（Docker / Linux / macOS / Windows）默认已带上 `ZEN_AUTOSEED=1`**，
+装完打开管理界面就有这个平台，不需要手工添加。手工启动时加同名环境变量也能启用；
+设成 `0` 或不设置则不自动创建，在管理界面删掉它之后也不会被重建。
+
+<details>
+<summary>它是怎么做到免凭据的</summary>
+
+该通道的上游按**请求特征**放行：固定的公共凭据 `public`、`opencode/<版本>` 的 UA
+（版本 ≥ 1.18.0）、四个 `x-opencode-*` 指纹头、指定格式的会话 ID，
+以及请求体里必须声明 `bash` / `glob` / `grep` / `read` 四个工具并启用流式。
+
+网关在转发前把普通 OpenAI 请求整形出这些特征，在响应侧再还原回去
+（工具名回写、非流式请求由网关聚合 SSE）。详见 [docs/OPENCODE-ZEN.md](docs/OPENCODE-ZEN.md)。
+
+这条通道与订阅账号通道性质相同 —— 都是把消费级额度挪作 API 用，存在条款与封禁风险，
+仅限个人自用，请勿对外提供服务。
+
+</details>
 
 ## 出网代理（受限网络必读）
 
