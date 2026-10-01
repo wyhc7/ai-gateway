@@ -104,6 +104,8 @@ cat > "$HOME/bin/start-ai-gateway" <<EOF
 #!/data/data/com.termux/files/usr/bin/bash
 export PORT=$PORT
 export DATA_DIR=$DATA_DIR
+# 自动建好内置的免凭据免费通道（OpenCode Zen），省掉手工添加平台这一步
+export ZEN_AUTOSEED=1
 exec node "$APP_DIR/server/index.js"
 EOF
 chmod +x "$HOME/bin/start-ai-gateway"
