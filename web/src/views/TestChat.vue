@@ -29,7 +29,15 @@
         </div>
         <div v-for="(m, i) in messages" :key="i" :class="['chat-row', m.role]">
           <div class="chat-gutter">{{ gutter(m.role) }}</div>
-          <div class="chat-body">{{ m.content }}</div>
+          <div class="chat-body">
+            <!-- 思考模型先吐 reasoning_content：思考期间也得让用户看到动静，
+                 否则正文要等思考结束才出现，看起来就是"首字极慢" -->
+            <details v-if="m.role === 'assistant' && m.reasoning" class="reasoning" :open="!m.content">
+              <summary>{{ m.content ? '思考过程' : '思考中' }}</summary>
+              <div class="reasoning-text">{{ m.reasoning }}</div>
+            </details>
+            <span v-if="m.content">{{ m.content }}</span>
+          </div>
         </div>
         <div v-if="sending" class="chat-row assistant">
           <div class="chat-gutter">模型</div>
@@ -163,14 +171,17 @@ async function send() {
         if (data === '[DONE]') continue
         try {
           const json = JSON.parse(data)
-          const delta = json.choices?.[0]?.delta?.content || ''
-          if (delta) {
-            const last = messages.value[messages.value.length - 1]
-            if (last?.role === 'assistant') {
-              last.content += delta
-            } else {
-              messages.value.push({ role: 'assistant', content: delta })
+          const delta = json.choices?.[0]?.delta || {}
+          const content = delta.content || ''
+          const reasoning = delta.reasoning_content || ''
+          if (content || reasoning) {
+            let last = messages.value[messages.value.length - 1]
+            if (last?.role !== 'assistant') {
+              messages.value.push({ role: 'assistant', content: '', reasoning: '' })
+              last = messages.value[messages.value.length - 1]
             }
+            if (content) last.content += content
+            if (reasoning) last.reasoning = (last.reasoning || '') + reasoning
             scrollBottom()
           }
         } catch { /* ignore partial */ }
@@ -264,6 +275,30 @@ onMounted(async () => {
   25% { content: '.'; }
   50% { content: '..'; }
   75% { content: '...'; }
+}
+
+.reasoning { margin-bottom: 6px; }
+
+.reasoning summary {
+  cursor: pointer;
+  user-select: none;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+}
+
+.reasoning summary:hover { color: var(--ink-3); }
+
+.reasoning-text {
+  margin-top: 5px;
+  padding-left: 8px;
+  border-left: 2px solid var(--rule-strong);
+  white-space: pre-wrap;
+  line-height: 1.6;
+  font-size: 12.5px;
+  color: var(--ink-4);
 }
 
 @media (prefers-reduced-motion: reduce) {
