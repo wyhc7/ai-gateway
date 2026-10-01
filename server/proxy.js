@@ -126,13 +126,20 @@ function toMs(value, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback
 }
 
-const CONNECT_TIMEOUT_MS = toMs(process.env.CONNECT_TIMEOUT_MS, 30000)
+// 连接与等待响应头的超时。此前为 30 秒，但实测 NVIDIA NIM 的推理请求要排队
+// 近 40 秒才吐响应头（同一请求直连 200 / 39760ms），30 秒就 abort 会让所有 Key
+// 排着队超时、最终 502——而再等 10 秒其实就成功了。放到 80 秒覆盖这类慢排队。
+// 非推理接口（/models 等）仍是几十毫秒，不受影响。
+// 导出便于测试锁住下面的约束
+export const CONNECT_TIMEOUT_MS = toMs(process.env.CONNECT_TIMEOUT_MS, 80000)
 const STREAM_TOTAL_TIMEOUT_MS = toMs(process.env.STREAM_TOTAL_TIMEOUT_MS, 1800000)
 const JSON_TOTAL_TIMEOUT_MS = toMs(process.env.JSON_TOTAL_TIMEOUT_MS, 120000)
 // 等待响应头阶段的全程预算。单次尝试只受 CONNECT_TIMEOUT_MS 约束，Key 轮换会把
-// 这 30 秒逐个累加：几十个 Key 都拿不到响应头时，客户端要挂几十分钟才等来一个 502
+// 这段时间逐个累加：几十个 Key 都拿不到响应头时，客户端要挂几十分钟才等来一个 502
 // （线上出现过切换 88 次、耗时 44 分钟的空转）。封顶后在可预期时间内明确失败。
-const PRE_HEADER_TIMEOUT_MS = toMs(process.env.PRE_HEADER_TIMEOUT_MS, 120000)
+// 预算必须容得下至少两次完整尝试（2 × 80s = 160s），否则慢上游永远轮不到第二个 Key。
+// 预算必须容得下至少两次完整尝试（2 × 80s = 160s），否则慢上游永远轮不到第二个 Key。
+export const PRE_HEADER_TIMEOUT_MS = toMs(process.env.PRE_HEADER_TIMEOUT_MS, 200000)
 // 上游 400 指向 temperature 的特征：OpenAI 风格错误体的 param 字段，
 // 或厂商自己的措辞（商汤 kimi-k3：only 1 is allowed for this model）。
 const TEMPERATURE_REJECTED_RE = /"param"\s*:\s*"temperature"|temperature\s+(?:value\s+)?invalid|only\s+1\s+is\s+allowed/i

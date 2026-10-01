@@ -12,7 +12,7 @@ const dataDir = mkdtempSync(join(tmpdir(), 'ai-gateway-test-'))
 process.env.DATA_DIR = dataDir
 
 const { state } = await import('../store.js')
-const { handleChat, withUsageOption, estimateTokens, shouldSendHeartbeat, heartbeatTickInterval, jsonTotalTimeout } = await import('../proxy.js')
+const { handleChat, withUsageOption, estimateTokens, shouldSendHeartbeat, heartbeatTickInterval, jsonTotalTimeout, CONNECT_TIMEOUT_MS, PRE_HEADER_TIMEOUT_MS } = await import('../proxy.js')
 
 after(() => {
   rmSync(dataDir, { recursive: true, force: true })
@@ -685,6 +685,14 @@ test('非流式长任务按 max_tokens 扩充时长预算，短请求仍受 2 �
   assert.equal(jsonTotalTimeout(16384, false), 655360, '16384 tokens 约给 10.9 分钟（40ms/token）')
   assert.equal(jsonTotalTimeout(1000000, false), 1800000, '极大值封顶到 30 分钟')
   assert.equal(jsonTotalTimeout(999999, true), 1800000, '流式固定 30 分钟预算')
+})
+
+test('等响应头预算容得下至少两次尝试，慢上游才轮得到第二个 Key', () => {
+  // 线上实测：NVIDIA NIM 的推理请求要排队近 40 秒才吐响应头（直连 200 / 39760ms），
+  // 单次超时若短于这个值，所有 Key 会排着队超时、最终 502——而再等一会其实就成功了。
+  assert.ok(CONNECT_TIMEOUT_MS >= 30000, `单次等响应头应留足 30 秒以上（当前 ${CONNECT_TIMEOUT_MS}ms）`)
+  assert.ok(PRE_HEADER_TIMEOUT_MS >= 2 * CONNECT_TIMEOUT_MS,
+    `全程预算 ${PRE_HEADER_TIMEOUT_MS}ms 应 ≥ 2 × 单次 ${CONNECT_TIMEOUT_MS}ms，否则第一个 Key 超时后轮不到第二个`)
 })
 
 test('冷却后的 Key 在冷却结束后恢复可用', async (t) => {
