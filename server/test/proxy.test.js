@@ -207,6 +207,56 @@ test('持续 400 时最多重试一次，并把上游 400 透传给客户端', a
   assert.equal(res.json().error.message, 'bad request body', '上游错误体应透传')
 })
 
+test('上游拒绝 temperature 时剥掉该字段重试，客户端不必迁就模型改参数', async (t) => {
+  // 商汤 kimi-k3：temperature 只允许 1，面板默认发 0.7 会被直接 400 拒掉。
+  let calls = 0
+  const seenTemps = []
+  const { server, port } = await startUpstream(({ res, body }) => {
+    calls++
+    seenTemps.push(body.temperature)
+    if (calls === 1) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        error: { message: 'field Temperature invalid, only 1 is allowed for this model', type: 'invalid_request_error', param: 'temperature', code: '3' }
+      }))
+      return
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }))
+  })
+  t.after(() => server.close())
+
+  const provider = makeProvider({ port, keys: [makeKey('k1'), makeKey('k2')] })
+  const res = fakeRes()
+  await handleChat({ body: { model: provider.testModel, temperature: 0.7, messages: [{ role: 'user', content: 'hi' }] } }, res)
+
+  assert.equal(calls, 2, '剥离后应重试一次')
+  assert.equal(seenTemps[0], 0.7, '首次请求应原样带上客户端的温度')
+  assert.equal(seenTemps[1], undefined, '重试请求不应再带 temperature')
+  assert.equal(res.statusCode, 200, '剥离后应正常返回')
+  assert.equal(res.json().choices[0].message.content, 'ok')
+  assert.ok(provider.keys.every((k) => !k.cooldown_until), '400 不应给 Key 施加冷却')
+})
+
+test('客户端断开后停止切换 Key，不再空转等待', async (t) => {
+  let calls = 0
+  let res = null
+  const { server, port } = await startUpstream(({ res: upstreamRes }) => {
+    calls++
+    upstreamRes.writeHead(401, { 'Content-Type': 'application/json' })
+    upstreamRes.end(JSON.stringify({ error: { message: 'bad key' } }))
+    // 第一次尝试期间客户端断开（关页面 / 中止请求）
+    if (calls === 1 && res) res.emit('close')
+  })
+  t.after(() => server.close())
+
+  const provider = makeProvider({ port, keys: [makeKey('k1'), makeKey('k2'), makeKey('k3')] })
+  res = fakeRes()
+  await handleChat({ body: { model: provider.testModel, messages: [{ role: 'user', content: 'hi' }] } }, res)
+
+  assert.equal(calls, 1, '客户端断开后不应继续尝试剩余 Key')
+})
+
 test('max_tokens 超出上游上限时收敛到 65536，而不是让上游 400', async (t) => {
   let received = null
   const { server, port } = await startUpstream(({ res, body }) => {

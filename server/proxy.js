@@ -129,6 +129,13 @@ function toMs(value, fallback) {
 const CONNECT_TIMEOUT_MS = toMs(process.env.CONNECT_TIMEOUT_MS, 30000)
 const STREAM_TOTAL_TIMEOUT_MS = toMs(process.env.STREAM_TOTAL_TIMEOUT_MS, 1800000)
 const JSON_TOTAL_TIMEOUT_MS = toMs(process.env.JSON_TOTAL_TIMEOUT_MS, 120000)
+// 等待响应头阶段的全程预算。单次尝试只受 CONNECT_TIMEOUT_MS 约束，Key 轮换会把
+// 这 30 秒逐个累加：几十个 Key 都拿不到响应头时，客户端要挂几十分钟才等来一个 502
+// （线上出现过切换 88 次、耗时 44 分钟的空转）。封顶后在可预期时间内明确失败。
+const PRE_HEADER_TIMEOUT_MS = toMs(process.env.PRE_HEADER_TIMEOUT_MS, 120000)
+// 上游 400 指向 temperature 的特征：OpenAI 风格错误体的 param 字段，
+// 或厂商自己的措辞（商汤 kimi-k3：only 1 is allowed for this model）。
+const TEMPERATURE_REJECTED_RE = /"param"\s*:\s*"temperature"|temperature\s+(?:value\s+)?invalid|only\s+1\s+is\s+allowed/i
 // 非流式长任务（大 max_tokens）的时间预算：固定 2 分钟护栏会掐断真正想写长文的请求。
 // 按每个 token 预留 40ms（约 25 tok/s，flash 模型保守下限）推算生成时长，
 // 上限封顶到流式的 30 分钟。短请求仍受 2 分钟护栏保护，避免挂死的连接久拖不决。
@@ -633,10 +640,24 @@ async function forwardWithFailover(provider, kind, body, res) {
   // 生图不走对话的时间预算：图片生成动辄几十秒甚至数分钟，
   // 用 token 数推算时长对它毫无意义，直接给独立的固定预算。
   const totalTimeoutMs = kind === 'images' ? IMAGES_TOTAL_TIMEOUT_MS : jsonTotalTimeout(body?.max_tokens, body?.stream)
+  // 等响应头的全程截止：单次尝试的 30 秒只是每次的上限，累计不得超过这个预算。
+  const preHeaderDeadline = Date.now() + Math.min(totalTimeoutMs, PRE_HEADER_TIMEOUT_MS)
+  // 客户端已断开（关页面、中止请求）就停止切换 Key。否则每个 Key 还要白等
+  // CONNECT_TIMEOUT_MS，几十个 Key 空转几十分钟，上游也跟着白挨打。
+  let clientGone = false
+  if (typeof res.on === 'function') res.on('close', () => { clientGone = true })
   // 生图的请求体就是客户端原样发来的 OpenAI 生图参数（prompt / size / n 等），
   // 不需要像对话那样做协议转换（Responses ↔ chat/completions），原样透传即可。
   let upstreamBody = kind === 'chat' ? serializeUpstreamBody(provider, body) : kind === 'images' ? JSON.stringify(body) : undefined
   for (let i = 0; i < keys.length; i += 1) {
+    if (clientGone) {
+      attempts.push('客户端已断开，停止切换 Key')
+      break
+    }
+    if (Date.now() > preHeaderDeadline) {
+      attempts.push(`等待响应头超过 ${Math.round(Math.min(totalTimeoutMs, PRE_HEADER_TIMEOUT_MS) / 1000)} 秒（已尝试 ${i} 个 Key）`)
+      break
+    }
     const key = keys[(startIdx + i) % keys.length]
     // OAuth 账号：发请求前确认 access_token 有效。刷新失败不算请求失败，
     // 冷却这个账号后换下一个——用户看到的是正常切换，而不是一次凭空的报错。
@@ -698,6 +719,7 @@ async function forwardWithFailover(provider, kind, body, res) {
       // （"should be in [1, N]"），按该范围重新收敛 max_tokens 后再重试一次。
       if (resp.status === 400 && attempts.length < 1) {
         let clamped = null
+        let droppedTemperature = false
         try {
           let readTimer
           const text = await Promise.race([
@@ -710,13 +732,28 @@ async function forwardWithFailover(provider, kind, body, res) {
             clamped = Math.min(Math.max(Math.floor(cur), +m[1]), +m[2])
             if (clamped !== cur) body.max_tokens = clamped
           }
+          // 有的模型只接受 temperature=1（商汤 kimi-k3 直接 400 拒掉其他取值，
+          // 而测试面板默认发 0.7）。剥掉该字段再试一次——省略时上游用自身默认值，
+          // 实测 kimi-k3 放行。客户端无感知，不必为了迁就单个模型改自己的参数。
+          if (body && typeof body.temperature !== 'undefined' && TEMPERATURE_REJECTED_RE.test(text || '')) {
+            delete body.temperature
+            droppedTemperature = true
+          }
         } catch { /* 读不到错误体则按普通瞬时 400 重试 */ }
         if (clamped != null) {
           console.warn(`[max_tokens 自适应] 模型 ${body?.model} 上限 ${clamped}，按上游报错范围收敛后重试`)
+        }
+        if (droppedTemperature) {
+          console.warn(`[temperature 自适应] 模型 ${body?.model} 上游不接受该参数，剥离后重试`)
+        }
+        if (clamped != null || droppedTemperature) {
           // upstreamBody 在循环外已序列化，这里要重新生成，否则重试仍带上旧值
           upstreamBody = kind === 'chat' ? serializeUpstreamBody(provider, body) : kind === 'images' ? JSON.stringify(body) : undefined
         }
-        attempts.push(`${key.name || key.id.slice(0, 8)}: HTTP 400${clamped != null ? '（max_tokens 收敛后重试）' : '（瞬时重试）'}`)
+        const retryReason = clamped != null
+          ? '（max_tokens 收敛后重试）'
+          : droppedTemperature ? '（剥离 temperature 后重试）' : '（瞬时重试）'
+        attempts.push(`${key.name || key.id.slice(0, 8)}: HTTP 400${retryReason}`)
         bumpFailover()
         continue
       }
