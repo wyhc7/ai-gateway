@@ -87,6 +87,29 @@ curl http://localhost:3001/api/v1/chat/completions \
 - **反代他人服务存在条款风险**：这条通道本质上是把 OpenCode 客户端的免费额度
   挪作他用。请自行评估上游条款与封禁风险，仅限个人自用，勿对外提供服务
 
+## 与「Zen 付费模型」的关系
+
+Zen 上游不是一条端点，而是按模型分流：
+
+| 端点 | 模型 |
+| ---- | ---- |
+| `/chat/completions` | DeepSeek / Kimi / GLM / MiniMax / Qwen3.8 Max，以及全部 free 模型 |
+| `/responses` | GPT / Grok / Muse Spark |
+| `/messages` | Claude |
+| `/models/{id}` | Gemini |
+| `/systemone` | Jev |
+
+**本通道只覆盖免费档**，并且固定使用公共凭据 `public`。
+
+想用 Zen 的付费模型（DeepSeek / Kimi / GLM 这些），必须有真实的 Zen API Key。
+那种情况下**不要**选本协议：另建一个「OpenAI 兼容」平台，地址同样填
+`https://opencode.ai/zen/v1`，协议选 `openai-chat`，填入你的 Key。
+付费档不校验工具四件套、也不强制流式，走普通 openai-chat 才是对的 ——
+把免费档的整形逻辑套到付费模型上只会画蛇添足。
+
+一个平台只能配一个协议，所以表里其它端点（responses / messages / systemone）
+需要各自建平台或另行适配。别指望 `/models` 列出来的模型全都可用。
+
 ## 这是反代吗
 
 是。但它与项目里其它"逆向通道"（Grok/Codex 订阅、chatgpt2api）有一个关键区别：
