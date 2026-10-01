@@ -374,6 +374,9 @@ app.put('/api/providers/:id', (req, res) => {
 app.delete('/api/providers/:id', (req, res) => {
   const idx = state.providers.findIndex((p) => p.id === req.params.id)
   if (idx < 0) return res.status(404).json({ error: { message: '平台不存在' } })
+  // 删掉内置免费通道要留痕，否则 ZEN_AUTOSEED 会在下次重启时把它重建出来，
+  // 用户会以为删除没生效
+  if (state.providers[idx].protocol === 'zen-free') state.zen_seed_dismissed = true
   state.providers.splice(idx, 1)
   persistImmediate()
   res.json({ ok: true })
@@ -759,6 +762,34 @@ if (existsSync(join(WEB_DIST, 'index.html'))) {
   })
   console.log(`[gateway] 生产模式已加载管理界面: ${WEB_DIST}`)
 }
+
+// 可选：启动时把内置的免凭据免费通道建好，让「部署完就能用」不留手工步骤。
+// 默认不开 —— 它会往已有部署里凭空多出一个平台，属于让人意外的副作用，
+// 因此只认显式的 ZEN_AUTOSEED=1，并且已存在同协议平台时直接跳过，绝不覆盖用户配置。
+function seedZenProvider() {
+  const flag = String(process.env.ZEN_AUTOSEED || '').toLowerCase()
+  if (!['1', 'true', 'yes', 'on'].includes(flag)) return
+  if (state.providers.some((p) => p.protocol === 'zen-free')) return
+  // 用户主动删过这个平台：说明他不要它，别在每次重启时又给塞回来
+  if (state.zen_seed_dismissed) return
+  const tpl = TEMPLATES.find((t) => t.protocol === 'zen-free')
+  if (!tpl) return
+  state.providers.push({
+    id: genId(),
+    name: tpl.name,
+    base_url: tpl.base_url,
+    protocol: tpl.protocol,
+    enabled: true,
+    models: (tpl.default_models || []).map((id) => ({ id, owned_by: tpl.name })),
+    keys: [],
+    extra_headers: {},
+    created_at: Date.now()
+  })
+  persistImmediate()
+  console.log(`[gateway] ZEN_AUTOSEED：已创建「${tpl.name}」（免凭据通道，无需配置 Key）`)
+}
+
+seedZenProvider()
 
 app.listen(PORT, '0.0.0.0', () => {
   initLogger()

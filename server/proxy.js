@@ -4,6 +4,15 @@ import { ensureAccessToken, refreshAccessToken, XAI_OAUTH_BASE_URL } from './oau
 import { ensureAccessToken as ensureCodexToken, refreshAccessToken as refreshCodexToken } from './codex-oauth.js'
 import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexAccountHeader } from './codex-responses.js'
 import { TEMPLATES } from './templates.js'
+import {
+  isZenProtocol,
+  buildZenHeaders,
+  shapeZenBody,
+  createZenStreamTransformer,
+  aggregateZenSse,
+  zenToolNameMap,
+  ZEN_FREE_MODELS
+} from './zen-lane.js'
 
 // 允许「协议级默认模型」兜底的协议白名单。
 //
@@ -18,10 +27,18 @@ import { TEMPLATES } from './templates.js'
 // 标准协议就该老实报错，不能用别人的模型凑数。
 const PROTOCOLS_WITHOUT_MODELS_ENDPOINT = new Set(['grok-oauth', 'codex-oauth'])
 
+// 上游有 /models、但那份列表不可信的协议。
+//
+// OpenCode Zen 免费档正是如此：/models 会把付费模型一并列出，而付费模型用公共凭据
+// 调用一律 401。可用模型清单只能由白名单决定，不能由上游列表决定。
+// 判据是"列表不可信"而不是"没有列表"，所以单独一个集合，不要合并到上面那个。
+const PROTOCOLS_WITH_CURATED_MODELS = new Set(['zen-free'])
+
 // 订阅类上游（Grok 的 cli-chat-proxy、Codex 的 chatgpt.com/backend-api）
-// 没有干净的 GET /models，拉取失败时回退到模板内置的默认模型列表，保证平台建完即可用。
+// 没有干净的 GET /models；免费通道的 /models 不可信。两者都在拉取不可用时
+// 回退到模板内置的默认模型列表，保证平台建完即可用。
 export function defaultModelsFor(protocol) {
-  if (!PROTOCOLS_WITHOUT_MODELS_ENDPOINT.has(protocol)) return null
+  if (!PROTOCOLS_WITHOUT_MODELS_ENDPOINT.has(protocol) && !PROTOCOLS_WITH_CURATED_MODELS.has(protocol)) return null
   for (const t of TEMPLATES) {
     if (t.protocol === protocol && Array.isArray(t.default_models) && t.default_models.length) {
       return t.default_models.map((id) => ({ id, owned_by: t.name }))
@@ -210,12 +227,22 @@ const PROTOCOLS = {
   // Codex 订阅账号（ChatGPT Plus/Pro 的 OAuth 凭据）：上游是 Responses API，
   // 请求体用 input[]、响应体用 output[]，与 chat/completions 不同，需要转换层。
   'codex-oauth': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/responses', imagesPath: '/images/generations', modelsMethod: 'GET' },
+  // OpenCode Zen 免费通道：上游只认固定的公共凭据（Bearer public）加一整套
+  // OpenCode 客户端指纹头，用户没有任何可配置的 Key —— 目前唯一的免凭据协议。
+  // 接口形态仍是 OpenAI 兼容，请求/响应整形见 zen-lane.js。
+  'zen-free': { auth: 'none', keyless: true, modelsPath: '/models', chatPath: '/chat/completions', imagesPath: '/images/generations', modelsMethod: 'GET' },
   'custom': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/chat/completions', imagesPath: '/images/generations', modelsMethod: 'GET' }
 }
 
 // 走 Responses API 的协议：请求/响应都需要在 chat/completions 与 Responses 之间转换
 export function isResponsesProtocol(protocol) {
   return protocol === 'codex-oauth'
+}
+
+// 免凭据协议：平台下不需要任何 Key。转发时用一个虚拟 Key 占位，
+// 让「选 Key → 冷却 → 故障切换」这套机制原样复用，不必在主流程里到处开分支。
+export function isKeylessProtocol(protocol) {
+  return protocolInfo(protocol).keyless === true
 }
 
 export function protocolInfo(protocol) {
@@ -272,6 +299,9 @@ export function autoHeaders(provider) {
 function authHeaders(plan, apiKey) {
   if (plan.auth === 'anthropic') return { 'x-api-key': apiKey }
   if (plan.auth === 'query') return {}
+  // 免凭据协议不携带任何用户凭据：它的鉴权头是固定常量，
+  // 由 buildHeaders 的协议分支直接写死（没有真实 Key，也不该编一个出来）
+  if (plan.auth === 'none') return {}
   const headerName = plan.authHeader || 'Authorization'
   return { [headerName]: `${plan.authPrefix || ''}${apiKey}` }
 }
@@ -280,7 +310,20 @@ function queryAuth(plan, apiKey) {
   return plan.auth === 'query' ? { [plan.authQueryParam || 'api_key']: apiKey } : null
 }
 
+// 免凭据通道的完整指纹头。上游的准入判定全部落在这些头上（见 zen-lane.js 顶部），
+// 少任何一个都是 403 FreeTierError，所以整组一起给，不做增量合并。
+function zenHeaders(provider) {
+  return {
+    'Content-Type': 'application/json',
+    ...buildZenHeaders(),
+    // 平台级 extra_headers 放最后：允许用户覆盖 UA 版本之类的指纹
+    // （上游的版本门槛会变，硬编码写死迟早要改），默认值则一定是实测可用的那组
+    ...(provider?.extra_headers || {})
+  }
+}
+
 function buildHeaders(provider, plan, apiKey, key = null) {
+  if (isZenProtocol(provider.protocol)) return zenHeaders(provider)
   const headers = { 'Content-Type': 'application/json', ...autoHeaders(provider) }
   // Codex 上游要求每个账号带上自己的 ChatGPT-Account-Id，值随 Key 变化，
   // 因此不能放进平台级的 extra_headers，只能在选定 Key 之后按 Key 注入
@@ -297,17 +340,25 @@ function buildHeaders(provider, plan, apiKey, key = null) {
   return headers
 }
 
-// 发给上游的请求体。走 Responses 的协议（Codex）需要把 chat/completions
-// 结构转成 input[]/instructions，其余协议原样透传。
+// 发给上游的请求体。三种改法互斥：
+// - Codex：chat/completions 结构 → input[]/instructions
+// - 免费通道：强制流式 + 补齐四件套工具 + 工具名小写化
+// - 其余：原样透传
 // 抽成函数是因为 400 重试时要按可能被收敛过的 max_tokens 重新序列化。
 function serializeUpstreamBody(provider, body) {
+  if (isZenProtocol(provider.protocol)) {
+    return JSON.stringify(shapeZenBody(body))
+  }
   const payload = withUsageOption(provider, body)
   return JSON.stringify(
     isResponsesProtocol(provider.protocol) ? toCodexRequest(payload) : payload
   )
 }
 
-function mergeAuthAndCustomHeaders(extraHeaders, plan, apiKey) {
+function mergeAuthAndCustomHeaders(extraHeaders, plan, apiKey, protocol) {
+  // 免凭据通道的预览请求也必须带完整指纹头，否则上游一律 403，
+  // 在界面上表现成「拉取模型失败」——用户会以为自己配错了地址
+  if (isZenProtocol(protocol)) return zenHeaders({ extra_headers: extraHeaders })
   const headers = { 'Content-Type': 'application/json' }
   for (const [k, v] of Object.entries(extraHeaders || {})) {
     if (k && v) headers[k] = v
@@ -383,7 +434,20 @@ async function forceRefreshToken(key) {
   }
 }
 
+// 免凭据通道的占位 Key。上游凭据是公开常量，平台下不需要用户配置任何 Key，
+// 但转发主流程处处依赖「先拿到一个 Key」，所以给它一个虚拟的，
+// 而不是在选 Key、故障切换、日志这些地方到处开分支。
+const ANONYMOUS_KEY = Object.freeze({
+  id: '__anonymous__',
+  name: '免费通道（免凭据）',
+  api_key: 'public',
+  enabled: true,
+  type: 'anonymous',
+  cooldown_until: 0
+})
+
 function usableKeys(provider) {
+  if (isKeylessProtocol(provider.protocol)) return [ANONYMOUS_KEY]
   const now = Date.now()
   const enabled = provider.keys.filter((k) => k.enabled)
   const fresh = enabled.filter((k) => !k.cooldown_until || k.cooldown_until <= now)
@@ -402,6 +466,9 @@ function usableKeys(provider) {
 }
 
 function applyCooldown(provider, key, status) {
+  // 免凭据通道只有一个共享的占位 Key，给它打冷却等于把整个平台冻住，
+  // 而这类请求失败多是上游抖动、几秒后即恢复。健康度交给 markResult 记录。
+  if (key?.type === 'anonymous') return
   const now = Date.now()
   let ms = COOLDOWN_MS[status] || COOLDOWN_MS.network
 
@@ -450,10 +517,27 @@ export async function refreshModels(providerId) {
       if (resp.ok) {
         const data = await resp.json()
         const models = (data.data || []).map((m) => ({ id: m.id, owned_by: m.owned_by || m.display_name || provider.name }))
-        provider.models = models
+        // 免费通道：上游列表混着付费模型（公共凭据调用必 401），只保留白名单内的。
+        // 用户手工加进来的非白名单模型若上游仍在列，一并保留——刷新不该冲掉人的配置。
+        // 白名单一个都没匹配上，说明上游改了免费档阵容，整份退回白名单并标注来源。
+        let usable = models
+        let curatedOnly = false
+        if (isZenProtocol(provider.protocol)) {
+          const curated = new Set(ZEN_FREE_MODELS)
+          const live = models.filter((m) => curated.has(m.id))
+          if (live.length) {
+            const manual = provider.models.filter((m) => !curated.has(m.id) && models.some((x) => x.id === m.id))
+            usable = [...live, ...manual]
+          } else {
+            usable = ZEN_FREE_MODELS.map((id) => ({ id, owned_by: provider.name }))
+            curatedOnly = true
+          }
+        }
+        provider.models = usable
         provider.models_updated_at = Date.now()
+        if (curatedOnly) provider.models_source = 'default'
         persistImmediate()
-        return { ok: true, count: models.length, provider }
+        return { ok: true, count: usable.length, provider }
       }
       lastError = `HTTP ${resp.status}${previewHint(resp.status)}`
       await resp.body?.cancel()
@@ -512,10 +596,14 @@ export async function previewModels({ base_url, protocol, api_key, extra_headers
       models_method: p.models_method
     }
   }
-  if (!target.base_url || !target.api_key) return { ok: false, error: '请先填写 API 地址与 API Token' }
+  // 免凭据通道没有 API Token 可填，不能在这里把它拦下来
+  if (!target.base_url) return { ok: false, error: '请先填写 API 地址' }
+  if (!target.api_key && !isKeylessProtocol(target.protocol)) {
+    return { ok: false, error: '请先填写 API 地址与 API Token' }
+  }
   const plan = callPlan(target)
   const url = joinUrl(target.base_url, plan.modelsPath, queryAuth(plan, target.api_key))
-  const headers = mergeAuthAndCustomHeaders(target.extra_headers, plan, target.api_key)
+  const headers = mergeAuthAndCustomHeaders(target.extra_headers, plan, target.api_key, target.protocol)
   const controller = new AbortController()
   let timer = null
   try {
@@ -531,7 +619,14 @@ export async function previewModels({ base_url, protocol, api_key, extra_headers
       return { ok: false, error: `拉取失败：HTTP ${resp.status}${hint}` }
     }
     const data = await resp.json()
-    const models = (data.data || []).map((m) => ({ id: m.id, owned_by: m.owned_by || m.display_name || '' }))
+    let models = (data.data || []).map((m) => ({ id: m.id, owned_by: m.owned_by || m.display_name || '' }))
+    // 免费通道：上游列表里混着付费模型（公共凭据调用必 401），只保留白名单内的；
+    // 若一个都没匹配上（上游改了免费档阵容），整份换成白名单，别让用户去选付费模型
+    if (isZenProtocol(target.protocol)) {
+      const curated = new Set(ZEN_FREE_MODELS)
+      const live = models.filter((m) => curated.has(m.id))
+      models = live.length ? live : ZEN_FREE_MODELS.map((id) => ({ id, owned_by: 'OpenCode Zen', free: true }))
+    }
     return { ok: true, models }
   } catch (err) {
     if (timer) clearTimeout(timer)
@@ -781,6 +876,30 @@ async function forwardWithFailover(provider, kind, body, res) {
       const safeContentType = safeHeaderValue(contentType)
       if (safeContentType) res.setHeader('Content-Type', safeContentType)
       const isStream = resp.body && contentType.toLowerCase().includes('text/event-stream')
+      // 免费通道只接受流式请求，因此客户端要非流式时由网关把 SSE 聚合成一次性 JSON。
+      // 直接把上游的 text/event-stream 甩给非流式客户端，对方必然解析失败。
+      if (isStream && isZenProtocol(provider.protocol) && kind === 'chat' && body?.stream !== true) {
+        try {
+          const rawSse = await readJsonBody(resp, totalTimeoutMs, controller)
+          const payload = aggregateZenSse(rawSse, body?.model || '', body)
+          const reported = extractTokenCount(payload.usage)
+          const text = typeof payload.choices[0]?.message?.content === 'string' ? payload.choices[0].message.content : ''
+          const tokens = reported != null && reported > 0 ? reported : estimateTokens(text)
+          res.status(200)
+          res.setHeader('Content-Type', 'application/json')
+          res.end(JSON.stringify(payload))
+          markResult(provider.id, true)
+          if (tokens > 0) bumpTokens(provider.id, tokens)
+          return { ok: true, keyName: usedKeyName, tokens, tokensEstimated: !(reported != null && reported > 0) }
+        } catch (err) {
+          // 此刻还没向客户端写入任何字节，换出口重试是无损的
+          const msg = err.name === 'AbortError' ? '上游响应超时' : `上游读取失败: ${err.message}`
+          attempts.push(`${key.name || key.id.slice(0, 8)}: ${msg}`)
+          applyCooldown(provider, key, 'network')
+          bumpFailover()
+          continue
+        }
+      }
       if (isStream) {
         // 关掉中间层的响应缓冲：Nginx 的 proxy_buffering 默认开启，会把流式响应攒在
         // 缓冲区里——短回答能整体送达，长回答则被延迟甚至截断，表现就是"只有长回答会断"。
@@ -799,10 +918,14 @@ async function forwardWithFailover(provider, kind, body, res) {
         let lastHeartbeat = Date.now()
         // Codex 上游发的是 response.* 事件流，客户端看不懂，必须逐事件转成
         // chat.completion.chunk。非 Responses 协议不走转换，保持原样零开销透传。
+        // 免费通道只在「确实改过工具名」时才逐事件重写，否则走原样透传路径：
+        // 这是热路径，没必要为每个请求都套一层 JSON 解析。
         const transformer =
           isResponsesProtocol(provider.protocol) && kind === 'chat'
             ? createCodexStreamTransformer(body?.model || '')
-            : null
+            : isZenProtocol(provider.protocol) && kind === 'chat' && zenToolNameMap(body?.tools).size > 0
+              ? createZenStreamTransformer(body?.model || '', body)
+              : null
 
         const onClientClose = () => {
           clientClosed = true
