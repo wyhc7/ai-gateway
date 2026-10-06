@@ -67,6 +67,7 @@
         <div class="metric-value num" :class="{ alarm: (overview.cooldownKeys || 0) > 0 }">{{ fmtNum(overview.totalKeys) }}</div>
         <div class="metric-foot mono">
           冷却 <b :class="{ alarm: (overview.cooldownKeys || 0) > 0 }">{{ overview.cooldownKeys ?? 0 }}</b>
+          · <RouterLink to="/keys">访问密钥 {{ overview.activeAccessKeys ?? 0 }}</RouterLink>
         </div>
       </div>
       <div class="metric">
@@ -86,7 +87,7 @@
           <button class="copy-mini" @click="copyText(baseUrl)">复制</button>
         </div>
         <div class="conn-item">
-          <div class="conn-label">API Key</div>
+          <div class="conn-label">主密钥（不受模型限制）</div>
           <div class="conn-value mono ellipsis" :title="gatewayKey">{{ gatewayKey || '加载中…' }}</div>
           <button class="copy-mini" @click="copyText(gatewayKey)">复制</button>
         </div>
@@ -468,6 +469,14 @@ onBeforeUnmount(() => {
   margin-top: 3px;
   letter-spacing: -0.02em;
 }
+
+/* 指标脚注里的跳转（访问密钥 → 管理页）：保持脚注的轻量感，悬停才给强调色 */
+.metric-foot a {
+  color: var(--ink-3);
+  text-decoration: none;
+  border-bottom: 1px solid var(--rule-strong);
+}
+.metric-foot a:hover { color: var(--accent); border-color: var(--accent); }
 
 .metric-unit {
   font-size: 13px;

@@ -5,6 +5,18 @@ import { fileURLToPath } from 'node:url'
 import crypto from 'node:crypto'
 import { state, persist, persistImmediate, getProvider, genId, todayKey, getAdminKey } from './store.js'
 import { handleChat, handleImages, handleModels, refreshModels, previewModels, defaultModelsFor, DEFAULT_PROTOCOL } from './proxy.js'
+import {
+  createApiKey,
+  updateApiKey,
+  deleteApiKey,
+  rotateApiKey,
+  resetApiKeyUsage,
+  getApiKey,
+  serializeApiKey,
+  resolveAuth,
+  modelPool,
+  filterModelsForAuth
+} from './api-keys.js'
 import { TEMPLATES } from './templates.js'
 import { addLog, getLogs, initLogger } from './logger.js'
 import {
@@ -223,11 +235,37 @@ function api(fn) {
   }
 }
 
+// 从请求里取出调用方的令牌。支持三种常见带法，覆盖不同客户端：
+//   Authorization: Bearer <Key>   —— OpenAI 系客户端的标准做法
+//   x-api-key: <Key>              —— Anthropic 系客户端
+//   ?api_key=<Key>                —— 少数把 Key 拼进 URL 的老客户端
+function extractGatewayToken(req) {
+  const auth = String(req.headers.authorization || '')
+  if (/^Bearer\s+/i.test(auth)) return auth.replace(/^Bearer\s+/i, '').trim()
+  const headerKey = req.headers['x-api-key']
+  if (headerKey) return String(headerKey).trim()
+  const q = req.query?.api_key
+  if (q) return String(q).trim()
+  // Authorization 里塞了裸 Key（不带 Bearer 前缀）的客户端也存在，一并兼容
+  if (auth.trim()) return auth.trim()
+  return ''
+}
+
+// 网关调用鉴权。
+//
+// /api/v1/* 与 /v1/* 是同一批 handler 的两组路径别名（第三方客户端常把 base_url
+// 配成 http://host:port/v1），鉴权与模型权限必须对两组路径同时生效——只守一组
+// 等于给了个绕过的后门：拿受限 Key 改个前缀就能随便用模型。
+//
+// 通过后把调用方身份挂在 req.apiAuth 上，供下游按 Key 的模型白名单放行与过滤。
 app.use((req, res, next) => {
-  if (!req.path.startsWith('/api/v1/')) return next()
-  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
-  if (token && safeEqual(token, state.gateway_api_key)) return next()
-  return res.status(401).json({ error: { message: '无效的 API Key，请在「仪表盘 → 对接方式」获取网关 API Key' } })
+  if (!req.path.startsWith('/api/v1/') && !req.path.startsWith('/v1/')) return next()
+  const result = resolveAuth(extractGatewayToken(req))
+  if (!result.ok) {
+    return res.status(result.status || 401).json({ error: { message: result.message, type: 'invalid_api_key' } })
+  }
+  req.apiAuth = result.auth
+  next()
 })
 
 // 管理端鉴权：除 /api/v1/*（网关调用，走网关 Key）与 /api/health（健康检查）外，
@@ -249,6 +287,7 @@ app.get('/api/gateway', (req, res) => {
 app.get('/api/status', (req, res) => {
   const now = Date.now()
   const keys = state.providers.flatMap((p) => p.keys)
+  const apiKeys = state.api_keys || []
   res.json({
     gateway_api_key: state.gateway_api_key,
     stats: state.stats,
@@ -259,7 +298,9 @@ app.get('/api/status', (req, res) => {
       cooldownKeys: keys.filter((k) => k.enabled && k.cooldown_until && k.cooldown_until > now).length,
       totalModels: state.providers.reduce((n, p) => n + p.models.length, 0),
       totalTokens: state.stats.totalTokens || 0,
-      todayTokens: state.stats.todayTokens || 0
+      todayTokens: state.stats.todayTokens || 0,
+      accessKeys: apiKeys.length,
+      activeAccessKeys: apiKeys.filter((k) => k.enabled && !(Number(k.expires_at) > 0 && now >= Number(k.expires_at))).length
     },
     providers: state.providers.map((p) => ({
       id: p.id,
@@ -657,6 +698,65 @@ app.get('/api/oauth/codex/defaults', (req, res) => {
   res.json({ base_url: CODEX_API_BASE_URL, protocol: 'codex-oauth', verification_uri: CODEX_VERIFICATION_URI })
 })
 
+// ---------------------------------------------------------------------------
+// 客户端访问密钥管理
+//
+// 与「平台 Key」完全是两码事，不要混淆：
+//   平台 Key（/api/providers/:id/keys）—— 网关往上访问平台时用的上游凭据。
+//   访问密钥（本组接口）           —— 网关往下发给客户端用的钥匙，本文件管的就是它。
+// 每个访问密钥可以限定「只能用哪些模型」，转发时按白名单放行。
+// 明文只在创建与轮换的响应里出现一次，列表接口一律只回前缀片段。
+// ---------------------------------------------------------------------------
+app.get('/api/keys', (req, res) => {
+  const keys = (state.api_keys || []).map(serializeApiKey)
+  res.json({
+    keys,
+    // 管理界面选模型用的候选池（所有启用平台的模型并集）
+    available_models: modelPool(),
+    // 主密钥仍然有效且不受任何限制，界面上要与受限 Key 区分展示
+    owner_key: state.gateway_api_key,
+    base_url: `${req.protocol}://${req.get('host')}`
+  })
+})
+
+app.post('/api/keys', (req, res) => {
+  const { name, allowed_models, denied_models, enabled, expires_at, note } = req.body || {}
+  const { key, token } = createApiKey({ name, allowed_models, denied_models, enabled, expires_at, note })
+  addLog({ type: 'apikey', method: 'POST', path: '/api/keys', status: 201, detail: `已创建访问密钥「${key.name}」（${key.model_scope === 'all' ? '全部模型' : `${key.allowed_models.length} 条模型规则`}）` })
+  // token 是明文，仅此一次；前端必须提示用户立刻保存
+  res.status(201).json({ key, token })
+})
+
+app.put('/api/keys/:id', (req, res) => {
+  const key = updateApiKey(req.params.id, req.body || {})
+  if (!key) return res.status(404).json({ error: { message: '访问密钥不存在' } })
+  addLog({ type: 'apikey', method: 'PUT', path: `/api/keys/${req.params.id}`, status: 200, detail: `已更新访问密钥「${key.name}」` })
+  res.json({ key })
+})
+
+app.delete('/api/keys/:id', (req, res) => {
+  const existing = getApiKey(req.params.id)
+  if (!existing) return res.status(404).json({ error: { message: '访问密钥不存在' } })
+  deleteApiKey(req.params.id)
+  addLog({ type: 'apikey', method: 'DELETE', path: `/api/keys/${req.params.id}`, status: 200, detail: `已删除访问密钥「${existing.name}」` })
+  res.json({ ok: true })
+})
+
+// 轮换：换一把新钥匙，名称/权限/用量保留。用户误把 Key 贴进聊天记录时用这个补救，
+// 不必删了重建再重新配一遍模型白名单。
+app.post('/api/keys/:id/rotate', (req, res) => {
+  const out = rotateApiKey(req.params.id)
+  if (!out) return res.status(404).json({ error: { message: '访问密钥不存在' } })
+  addLog({ type: 'apikey', method: 'POST', path: `/api/keys/${req.params.id}/rotate`, status: 200, detail: `已轮换访问密钥「${out.key.name}」` })
+  res.json(out)
+})
+
+app.post('/api/keys/:id/reset-usage', (req, res) => {
+  const key = resetApiKeyUsage(req.params.id)
+  if (!key) return res.status(404).json({ error: { message: '访问密钥不存在' } })
+  res.json({ key })
+})
+
 app.post('/api/v1/chat/completions', api(handleChat))
 
 // 生图（OpenAI /images/generations 兼容）：走与对话相同的平台匹配、Key 轮询与故障切换，
@@ -675,7 +775,8 @@ app.get('/v1/models', handleModels)
 app.get('/api/v1/models/:providerId', (req, res) => {
   const p = getProvider(req.params.providerId)
   if (!p) return res.status(404).json({ error: { message: '平台不存在' } })
-  res.json({ object: 'list', data: p.models })
+  // 与 /v1/models 口径一致：受限 Key 只看得到自己被放行的模型
+  res.json({ object: 'list', data: filterModelsForAuth(p.models, req.apiAuth) })
 })
 
 app.get('/api/providers/export', (req, res) => {
