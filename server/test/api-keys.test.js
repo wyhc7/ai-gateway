@@ -304,6 +304,22 @@ describe('请求层：模型权限真正生效', () => {
     assert.equal(called, 0, '被拒绝的请求不应触达上游')
   })
 
+  test('403 文案形如 API Key「名字」无权使用模型，且不留多余空格', async () => {
+    const { token } = ak.createApiKey({ name: '给小王', allowed_models: ['cheap-model'] })
+    const { auth } = ak.resolveAuth(token)
+    globalThis.fetch = async () => { throw new Error('不该走到上游') }
+    const res = mockRes()
+    await proxy.handleChat({ body: { model: 'gpt-4o', messages: [] }, apiAuth: auth }, res)
+    const message = JSON.parse(res.body).error.message
+    // 允许列表用的是「」而不是全角括号：括号后接中文得补一个空格才不挤，
+    // 一旦有人改回括号，这条断言会立刻失败
+    assert.match(message, /^API Key「给小王」无权使用模型 "gpt-4o"。/)
+    assert.ok(!/）\s/.test(message), `全角括号后出现了多余空格: ${message}`)
+    // 报错要把这把 Key 的实际授权范围说清楚，否则用户不知道该改成什么
+    assert.match(message, /仅被授权：cheap-model/)
+    assert.match(message, /访问密钥/)
+  })
+
   test('provider:xxx/model 前缀写法绕不过白名单', async () => {
     // resolveTarget 会把 provider:p1/gpt-4o 拆成 model=gpt-4o，
     // 校验必须发生在拆分之后，否则这道前缀就是个免费的绕过口子
