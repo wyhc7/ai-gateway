@@ -40,6 +40,12 @@
             </svg>
             <span class="nav-text">平台管理</span>
           </RouterLink>
+          <RouterLink to="/keys" @click="onNav" title="访问密钥">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="7.5" cy="15.5" r="4" /><path d="M10.5 12.5L20 3M17 6l3 3M14 9l2.5 2.5" />
+            </svg>
+            <span class="nav-text">访问密钥</span>
+          </RouterLink>
           <RouterLink to="/test" @click="onNav" title="对话测试">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />

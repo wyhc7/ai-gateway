@@ -36,6 +36,9 @@ function defaultStats() {
 const DEFAULT_STATE = () => ({
   providers: [],
   gateway_api_key: `gk-${crypto.randomUUID()}`,
+  // 发给客户端的访问密钥：每把可单独限定可用的模型、停用、设到期时间。
+  // 只存 SHA-256 摘要，明文只在创建/轮换时返回一次（见 api-keys.js）。
+  api_keys: [],
   // 用户主动删掉了内置的免凭据免费通道 → 不再自动重建（见 index.js 的 ZEN_AUTOSEED）。
   // 有这一位，部署脚本才能放心默认开启自动创建：删掉是一次性动作，重启不会复活。
   zen_seed_dismissed: false,
@@ -85,6 +88,38 @@ function ensureStats(stats) {
   return merged
 }
 
+// 客户端 Key 的落盘结构补齐：老配置没有这个字段，字段缺失的旧记录也要能补全。
+// 返回 [规范化后的数组, 是否发生了变化]，变化了才落盘，避免每次启动都白写一遍。
+function ensureApiKeys(keys) {
+  if (!Array.isArray(keys)) return [[], true]
+  let changed = false
+  const out = []
+  for (const k of keys) {
+    if (!k || typeof k !== 'object' || !k.key_hash) { changed = true; continue }
+    const next = {
+      id: k.id || crypto.randomUUID(),
+      name: String(k.name || '未命名 Key'),
+      key_hash: String(k.key_hash),
+      key_preview: String(k.key_preview || '******'),
+      enabled: k.enabled === undefined ? true : Boolean(k.enabled),
+      allowed_models: Array.isArray(k.allowed_models) ? k.allowed_models.filter((r) => typeof r === 'string' && r.trim()) : [],
+      denied_models: Array.isArray(k.denied_models) ? k.denied_models.filter((r) => typeof r === 'string' && r.trim()) : [],
+      expires_at: Number(k.expires_at) || 0,
+      note: String(k.note || ''),
+      created_at: Number(k.created_at) || Date.now(),
+      last_used_at: Number(k.last_used_at) || 0,
+      usage: {
+        requests: Number(k.usage?.requests) || 0,
+        failed: Number(k.usage?.failed) || 0,
+        tokens: Number(k.usage?.tokens) || 0
+      }
+    }
+    if (JSON.stringify(next) !== JSON.stringify(k)) changed = true
+    out.push(next)
+  }
+  return [out, changed]
+}
+
 function tryParseJSON(text, path) {
   try {
     return JSON.parse(text)
@@ -121,6 +156,9 @@ function load() {
       primary.stats = ensureStats(primary.stats)
       if (JSON.stringify(primary.stats) !== before) changed = true
     }
+    const [apiKeys, keysChanged] = ensureApiKeys(primary.api_keys)
+    primary.api_keys = apiKeys
+    if (keysChanged) changed = true
     if (changed) scheduleFlush()
     return primary
   }
@@ -146,6 +184,9 @@ function load() {
         backup.stats = ensureStats(backup.stats)
         if (JSON.stringify(backup.stats) !== before) changed = true
       }
+      const [apiKeys, keysChanged] = ensureApiKeys(backup.api_keys)
+      backup.api_keys = apiKeys
+      if (keysChanged) changed = true
       console.error(`[store] 已从备份恢复 ${backup.providers.length} 个平台`)
       atomicWrite(CONFIG_PATH, JSON.stringify(backup, null, 2))
       return backup

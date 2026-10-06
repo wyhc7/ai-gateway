@@ -1,5 +1,6 @@
 import { state, getProvider, bumpStats, bumpFailover, markResult, bumpTokens, persist, persistImmediate } from './store.js'
 import { addLog } from './logger.js'
+import { modelAllowed, filterModelsForAuth, recordUsage } from './api-keys.js'
 import { ensureAccessToken, refreshAccessToken, XAI_OAUTH_BASE_URL } from './oauth.js'
 import { ensureAccessToken as ensureCodexToken, refreshAccessToken as refreshCodexToken } from './codex-oauth.js'
 import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexAccountHeader } from './codex-responses.js'
@@ -1161,12 +1162,52 @@ function sanitizeMaxTokens(body) {
   }
 }
 
+// 调用方 Key 的模型权限校验。
+//
+// 必须在「匹配平台」之前做：受限 Key 若先去匹配平台，被禁模型与不存在的模型
+// 会分别返回 403 / 404，等于免费提供了一个「这个模型在网关里存不存在」的探测器。
+// 统一在入口拦掉，顺便让报错信息直接告诉用户自己那把 Key 被授权了什么。
+function modelAccessDenial(auth, model) {
+  const check = modelAllowed(auth, model)
+  if (check.allowed) return null
+  const who = auth?.name ? `当前 API Key（${auth.name}）` : '当前 API Key'
+  if (check.code === 'model_denied') {
+    return { type: 'model_denied', message: `${who} 已被明确禁止使用模型 "${model}"` }
+  }
+  const scope = (auth?.allowed_models || []).slice(0, 8).join('、')
+  const more = (auth?.allowed_models || []).length > 8 ? ' 等' : ''
+  return {
+    type: 'model_forbidden',
+    message: `${who} 无权使用模型 "${model}"。该 Key 仅被授权：${scope}${more}（如需放开请在「访问密钥」里调整，模型名支持 * 通配）`
+  }
+}
+
 export async function handleChat(req, res) {
   const { model, providerIdHint, body } = resolveTarget(req.body)
   sanitizeMaxTokens(body)
+  const startTime = Date.now()
+  const clientKey = req.apiAuth?.name
+  const denial = modelAccessDenial(req.apiAuth, model)
+  if (denial) {
+    markResult(null, false)
+    recordUsage(req.apiAuth, { ok: false })
+    addLog({
+      type: 'chat',
+      method: 'POST',
+      path: '/api/v1/chat/completions',
+      model,
+      provider_id: null,
+      provider_name: null,
+      stream: Boolean(body?.stream),
+      client_key: clientKey,
+      status: 403,
+      ok: false,
+      error: denial.message
+    })
+    return respondJson(res, 403, { error: { message: denial.message, type: denial.type } })
+  }
   const provider = matchProvider(model, providerIdHint)
   bumpStats(provider?.id)
-  const startTime = Date.now()
   const baseLog = {
     type: 'chat',
     method: 'POST',
@@ -1174,19 +1215,23 @@ export async function handleChat(req, res) {
     model,
     provider_id: provider?.id || null,
     provider_name: provider?.name || null,
+    client_key: clientKey,
     stream: Boolean(body?.stream)
   }
   if (!provider) {
     markResult(null, false)
+    recordUsage(req.apiAuth, { ok: false })
     addLog({ ...baseLog, status: 404, error: `未找到提供模型 "${model}" 的平台` })
     return respondJson(res, 404, { error: { message: `未找到提供模型 "${model}" 的平台，请先在平台管理中刷新模型列表`, type: 'model_not_found' } })
   }
   if (!provider.base_url) {
     markResult(provider.id, false)
+    recordUsage(req.apiAuth, { ok: false })
     addLog({ ...baseLog, status: 400, error: '平台缺少 Base URL' })
     return respondJson(res, 400, { error: { message: '平台缺少 Base URL', type: 'bad_config' } })
   }
   const result = await forwardWithFailover(provider, 'chat', body, res)
+  recordUsage(req.apiAuth, { tokens: result.tokens, ok: result.ok })
   addLog({
     ...baseLog,
     status: res.statusCode || (result.ok ? 200 : 502),
@@ -1205,28 +1250,51 @@ export async function handleChat(req, res) {
 // 但协议转换（Responses ↔ chat/completions）对它不适用，参数一个字都不该改。
 export async function handleImages(req, res) {
   const { model, providerIdHint, body } = resolveTarget(req.body)
+  const startTime = Date.now()
+  const clientKey = req.apiAuth?.name
+  const denial = modelAccessDenial(req.apiAuth, model)
+  if (denial) {
+    markResult(null, false)
+    recordUsage(req.apiAuth, { ok: false })
+    addLog({
+      type: 'images',
+      method: 'POST',
+      path: '/api/v1/images/generations',
+      model,
+      provider_id: null,
+      provider_name: null,
+      client_key: clientKey,
+      status: 403,
+      ok: false,
+      error: denial.message
+    })
+    return respondJson(res, 403, { error: { message: denial.message, type: denial.type } })
+  }
   const provider = matchProvider(model, providerIdHint)
   bumpStats(provider?.id)
-  const startTime = Date.now()
   const baseLog = {
     type: 'images',
     method: 'POST',
     path: '/api/v1/images/generations',
     model,
     provider_id: provider?.id || null,
-    provider_name: provider?.name || null
+    provider_name: provider?.name || null,
+    client_key: clientKey
   }
   if (!provider) {
     markResult(null, false)
+    recordUsage(req.apiAuth, { ok: false })
     addLog({ ...baseLog, status: 404, error: `未找到提供模型 "${model}" 的平台` })
     return respondJson(res, 404, { error: { message: `未找到提供模型 "${model}" 的平台，请先在平台管理中刷新模型列表`, type: 'model_not_found' } })
   }
   if (!provider.base_url) {
     markResult(provider.id, false)
+    recordUsage(req.apiAuth, { ok: false })
     addLog({ ...baseLog, status: 400, error: '平台缺少 Base URL' })
     return respondJson(res, 400, { error: { message: '平台缺少 Base URL', type: 'bad_config' } })
   }
   const result = await forwardWithFailover(provider, 'images', body, res)
+  recordUsage(req.apiAuth, { tokens: result.tokens, ok: result.ok })
   addLog({
     ...baseLog,
     status: res.statusCode || (result.ok ? 200 : 502),
@@ -1237,6 +1305,10 @@ export async function handleImages(req, res) {
   })
 }
 
+// 模型聚合列表。
+// 必须按调用方的 Key 权限裁剪：这份列表是客户端挑选模型的唯一依据，
+// 若把没授权的模型也列出来，用户只会得到一串必然 403 的名字，
+// 而且从调用方视角根本看不出是权限问题还是平台问题。
 export function handleModels(req, res) {
   const list = []
   const seen = new Set()
@@ -1244,6 +1316,7 @@ export function handleModels(req, res) {
     if (!p.enabled) continue
     for (const m of p.models) {
       if (seen.has(m.id)) continue
+      if (!modelAllowed(req?.apiAuth, m.id).allowed) continue
       seen.add(m.id)
       list.push({ id: m.id, object: 'model', owned_by: m.owned_by || p.name, provider: p.id, provider_name: p.name })
     }

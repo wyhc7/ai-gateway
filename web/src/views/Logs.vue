@@ -6,6 +6,8 @@
         <el-select v-model="filters.type" placeholder="类型" class="toolbar-item" style="flex: 0 0 116px" @change="loadLogs">
           <el-option label="全部类型" value="all" />
           <el-option label="对话" value="chat" />
+          <el-option label="生图" value="images" />
+          <el-option label="访问密钥" value="apikey" />
           <el-option label="API" value="api" />
           <el-option label="系统" value="system" />
         </el-select>

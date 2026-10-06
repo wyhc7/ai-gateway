@@ -74,6 +74,14 @@ export const api = {
   importProviders: (data) => request('/api/providers/import', { method: 'POST', body: JSON.stringify(data) }),
   getLogs: (query = '') => request(`/api/logs${query ? `?${query}` : ''}`),
 
+  // 访问密钥（发给客户端的 Key，可限定可用模型）
+  getApiKeys: () => request('/api/keys'),
+  createApiKey: (data) => request('/api/keys', { method: 'POST', body: JSON.stringify(data) }),
+  updateApiKey: (id, data) => request(`/api/keys/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteApiKey: (id) => request(`/api/keys/${id}`, { method: 'DELETE' }),
+  rotateApiKey: (id) => request(`/api/keys/${id}/rotate`, { method: 'POST' }),
+  resetApiKeyUsage: (id) => request(`/api/keys/${id}/reset-usage`, { method: 'POST' }),
+
   // Grok 订阅账号（OAuth 设备码授权）
   startGrokDevice: (data) => request('/api/oauth/grok/device/start', { method: 'POST', body: JSON.stringify(data || {}) }),
   pollGrokDevice: (sessionId) => request(`/api/oauth/grok/device/${sessionId}/poll`, { method: 'POST' }),

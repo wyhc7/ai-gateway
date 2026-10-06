@@ -132,7 +132,7 @@ export function getLogs({ limit = 100, type, status, q } = {}) {
   if (q && String(q).trim()) {
     const needle = String(q).trim().toLowerCase()
     list = list.filter((l) =>
-      [l.model, l.provider_name, l.key, l.error, l.path, l.detail]
+      [l.model, l.provider_name, l.key, l.client_key, l.error, l.path, l.detail]
         .some((v) => v != null && String(v).toLowerCase().includes(needle))
     )
   }

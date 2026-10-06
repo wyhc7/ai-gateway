@@ -35,6 +35,7 @@ The usual consequence is **account termination with no refund of subscription fe
 - **Automatic failover** — rotates to the next key automatically when a platform key becomes unavailable, requests are never interrupted
 - **Tiered cooldown with half-open probing** — distinguishes key-level failures (401/403, long cooldown) from upstream hiccups (5xx/rate limits, short cooldown with a cap on how many keys cool down at once); once a cooldown is half over, one probe request is let through so recovery is immediate
 - **Automatic model discovery** — fetch a platform's available model list with one click after entering an API key
+- **Access keys with per-key model scoping** — issue a separate key to each caller and restrict which models it may use (`gpt-*` wildcards supported), with enable/disable, expiry, rotation, and per-key usage counters (see [Access keys](#4-access-keys-per-caller-permissions))
 - **Token accounting** — prefers the upstream `usage` field; falls back to estimating from output length (reasoning included) when upstream omits it, so counts are never silently missed
 - **Dashboard statistics** — request volume, success rate, token usage (daily/total), key health status, auto-refresh every 10 seconds
 - **Fully OpenAI API compatible** — works with any OpenAI SDK / client seamlessly, no code changes required
@@ -180,6 +181,25 @@ print(resp.choices[0].message.content)
 
 The gateway API key can be copied from "Dashboard → Integration".
 
+### 4. Access keys (per-caller permissions)
+
+Don't hand out the master key. Create a separate access key for each caller under "Access Keys" and scope which models it may use:
+
+| Capability | Notes |
+| ---- | ---- |
+| Allow / deny rules | Exact names (`gpt-4o`), wildcards (`gpt-*`, `*-free`, `claude-*-latest`) or `*`. Leave the allow list empty to permit everything |
+| Deny list | Takes precedence over the allow list — useful for "open up a family, block the expensive one" |
+| Disable / expiry | A disabled key gets a 403 immediately; expiry timestamps are enforced |
+| Per-key usage | Request, failure, and token counters per key; request logs record which key made the call |
+| Rotation | Issues a new secret while keeping scope and counters; the old one dies instantly |
+
+A scoped caller only sees its own models in `/v1/models`, and using a model outside its scope returns an explicit 403 (`"type": "model_forbidden"`).
+
+Two deliberate trade-offs:
+
+- **The plaintext secret is shown only once**, at creation or rotation — the server stores just a SHA-256 digest. Lost keys must be rotated, never recovered, so a leaked `config.json` does not also leak usable client keys.
+- **Auth covers both `/api/v1/*` and `/v1/*`** (the latter is what many third-party clients use). Older versions only guarded `/api/v1/*`, which let a scoped key bypass its restrictions by changing the path prefix — if an old client of yours uses `/v1` without a key, add one after upgrading.
+
 ## Public Network Access
 
 See the public access tutorial in [DEPLOYMENT.md](docs/DEPLOYMENT.md):
@@ -195,6 +215,7 @@ See the public access tutorial in [DEPLOYMENT.md](docs/DEPLOYMENT.md):
 server/        — Node.js backend (Express)
   index.js     — API routes + auth
   proxy.js     — model matching, failover, forwarding
+  api-keys.js  — access keys: model rule matching, auth resolution, usage counters
   store.js     — config persistence and statistics
   templates.js — 23 platform templates
   test/        — integration tests
@@ -208,9 +229,14 @@ docs/          — deployment docs
 ```bash
 # Run the backend integration tests (Node's built-in test runner, no extra dependencies)
 npm test --prefix server
+
+# End-to-end smoke test for access keys (real process + mock upstream, over HTTP; manual)
+node scripts/smoke-api-keys.mjs
 ```
 
 Tests spin up a local mock upstream and cover the core paths: failover, streaming passthrough, token accounting, and model allowlist enforcement.
+`test/api-keys.test.js` additionally covers access-key rule matching, digest-only storage (asserting the plaintext never hits disk),
+the disable/expiry/rotation lifecycle, and that a scoped key hitting a forbidden model gets a 403 without ever reaching the upstream.
 CI runs them on every push, and additionally re-checks every week that the one-click install URLs in the README and deploy scripts are still reachable —
 a broken link there never turns the build red, but it does break the very first thing a new user tries.
 
