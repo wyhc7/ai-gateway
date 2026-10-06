@@ -1170,15 +1170,17 @@ function sanitizeMaxTokens(body) {
 function modelAccessDenial(auth, model) {
   const check = modelAllowed(auth, model)
   if (check.allowed) return null
-  const who = auth?.name ? `当前 API Key（${auth.name}）` : '当前 API Key'
+  // 用「」而不是全角括号：括号后面接中文时必须留个空格才不挤，而「」不需要，
+  // 报错文案才能连读。Key 的名字由创建者自定，这里只是把它嵌进去。
+  const who = auth?.name ? `API Key「${auth.name}」` : '该 API Key'
   if (check.code === 'model_denied') {
-    return { type: 'model_denied', message: `${who} 已被明确禁止使用模型 "${model}"` }
+    return { type: 'model_denied', message: `${who}已被明确禁止使用模型 "${model}"` }
   }
   const scope = (auth?.allowed_models || []).slice(0, 8).join('、')
   const more = (auth?.allowed_models || []).length > 8 ? ' 等' : ''
   return {
     type: 'model_forbidden',
-    message: `${who} 无权使用模型 "${model}"。该 Key 仅被授权：${scope}${more}（如需放开请在「访问密钥」里调整，模型名支持 * 通配）`
+    message: `${who}无权使用模型 "${model}"。该 Key 仅被授权：${scope}${more}（如需放开请在「访问密钥」里调整，模型名支持 * 通配）`
   }
 }
 

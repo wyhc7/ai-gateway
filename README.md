@@ -261,7 +261,7 @@ print(resp.choices[0].message.content)
 调用方拿到的 `/v1/models` 只会列出自己被授权的模型，调用越权模型会得到明确的 403：
 
 ```json
-{ "error": { "type": "model_forbidden", "message": "当前 API Key（给小王）无权使用模型 \"gpt-4o\"。该 Key 仅被授权：*-free（如需放开请在「访问密钥」里调整，模型名支持 * 通配）" } }
+{ "error": { "type": "model_forbidden", "message": "API Key「给小王」无权使用模型 \"gpt-4o\"。该 Key 仅被授权：*-free（如需放开请在「访问密钥」里调整，模型名支持 * 通配）" } }
 ```
 
 两点设计取舍，用之前请知悉：
