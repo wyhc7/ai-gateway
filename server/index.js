@@ -428,7 +428,9 @@ app.post('/api/providers/:id/models/refresh', api(async (req, res) => {
   if (!result.ok) {
     return res.status(400).json({ error: { message: result.error } })
   }
-  res.json({ ok: true, count: result.count, provider: serializeProvider(result.provider) })
+  // 整份展开而不是逐字段列举：refreshModels 以后新增的字段（比如免费通道实测
+  // 收编的 discovered）不该因为这里忘了同步而被静默丢掉——路由只负责序列化 provider
+  res.json({ ...result, provider: serializeProvider(result.provider) })
 }))
 
 app.post('/api/providers/:id/keys', (req, res) => {
