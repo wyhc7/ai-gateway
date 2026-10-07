@@ -36,6 +36,38 @@ export const ZEN_FREE_MODELS = [
   'space-bunny-free'
 ]
 
+// ---- 免费档自发现 ----
+//
+// 白名单是「种子」，不是终点：上游是限时免费，会不断上新型号。而 /models 只返回
+// id/object/created/owned_by，没有任何「是否免费」标记，付费档用公共凭据一律 401，
+// 所以哪些能用无法从列表读出来，只能实测。下面这组常量与判定函数供 proxy.js 的
+// 探测流程使用；本文件本身仍然不碰网络。
+
+// 免费档的命名规律是 -free 后缀（exo-free、ling-3.1-flash-free）。
+// 少数不带后缀的例外（big-pickle）已经在白名单里，不需要靠探测发现。
+const ZEN_FREE_SUFFIX_RE = /[-_.]free$/i
+
+export function isZenFreeCandidate(id) {
+  return typeof id === 'string' && ZEN_FREE_SUFFIX_RE.test(id.trim())
+}
+
+// 「公共凭据用不了」的结论缓存多久。上游今天 403 的型号明天可能就放开，
+// 缓存太死会让用户点了刷新也看不到；完全不缓存则每次刷新都在白测同一批。
+export const ZEN_PROBE_TTL_MS = 12 * 60 * 60 * 1000
+
+// 一次刷新的探测上限、并发与单次超时。上限与超时是配套的：并发 3 × 最多 8 个 ×
+// 12 秒，最坏情况约 32 秒，仍在前端能忍受的范围内；正常情况每个 1~3 秒。
+export const ZEN_MAX_PROBES = 8
+export const ZEN_PROBE_CONCURRENCY = 3
+export const ZEN_PROBE_TIMEOUT_MS = 12000
+
+// 4xx 是「这个型号用公共凭据就是不行」：付费档 401、地区限制 403、上游未开放 400，
+// 记下来别反复重试。429 与 5xx / 超时 / 网络错误属于上游抖动，不能当除名依据——
+// 实测 jev-1.13-free 长期 500，一次抖动就除名会让一个好型号消失很久。
+export function isDefinitiveZenRejection(status) {
+  return status >= 400 && status < 500 && status !== 429
+}
+
 const BASE62 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
 
 export function isZenProtocol(protocol) {

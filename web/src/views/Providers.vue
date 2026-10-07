@@ -678,7 +678,11 @@ async function refreshModels(p) {
   refreshingId.value = p.id
   try {
     const result = await api.refreshModels(p.id)
-    ElMessage.success(`已获取 ${result.count} 个模型`)
+    // 免费通道的刷新会顺带实测收编上游新上的免费型号，新捞到的单独报一下
+    const found = result.discovered?.length
+    ElMessage.success(
+      found ? `已获取 ${result.count} 个模型，新收编 ${found} 个：${result.discovered.join('、')}` : `已获取 ${result.count} 个模型`
+    )
     await load()
   } catch (e) {
     ElMessage.error(e?.message || '刷新模型失败')

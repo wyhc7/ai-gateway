@@ -66,13 +66,30 @@ curl http://localhost:3001/api/v1/chat/completions \
 
 ## 可用模型
 
-`nemotron-3-ultra-free`（综合最好）、`nemotron-3.5-lightning-free`、
-`longcat-2.5-preview-free`、`mimo-v2.6-flash-free`、`mimo-v2.5-free`、
-`ling-3.0-flash-fin-free`、`big-pickle`、`space-bunny-free`
+开箱可用的种子列表：`nemotron-3-ultra-free`（综合最好）、
+`nemotron-3.5-lightning-free`、`longcat-2.5-preview-free`、`mimo-v2.6-flash-free`、
+`mimo-v2.5-free`、`ling-3.0-flash-fin-free`、`big-pickle`、`space-bunny-free`
 
-上游的 `/models` 会把付费模型一并列出，而那些模型用公共凭据调用一律 401，
-所以本通道的模型列表以白名单为准（`ZEN_FREE_MODELS`），不靠拉取决定。
-「拉取模型」按钮会取上游实时列表与白名单的交集，并保留你手工添加的模型。
+上游的 `/models` 会把付费模型一并列出（实测 88 个里大部分是付费档），而那些模型用
+公共凭据调用一律 401。列表本身**不标注免费与否**（每项只有 `id`/`object`/`created`/
+`owned_by`），所以「哪些能用」没法从列表读出来，只能真发一次请求实测。
+
+因此模型列表由三部分组成：
+
+- **种子白名单**（`ZEN_FREE_MODELS`）：人工确认过可用的一份清单，保证全新安装开箱即用
+- **实测收编**：`/models` 里**名字以 `-free` 结尾、且还没见过**的型号，点「刷新模型」
+  时各发一个最小请求（`max_tokens: 1`，拿到状态码即断开）实测。200 的收编进列表并标记
+  `free`；4xx 的记入 `zen_probe_cache`，12 小时内不再重测；5xx / 429 / 超时视为上游抖动，
+  **不记档**，下次刷新重试。并发 3、单次上限 8 个、超时 12 秒
+- **手工添加**：你手动填进模型列表的型号，只要上游还列着，刷新就不会把它冲掉
+
+**所以上游新上免费型号时，点一次「刷新模型」就能拿到，不必等网关更新白名单。**
+白名单由此退化成「种子 + 已确认可用项」，不再是唯一的准入名单。
+
+判定为不可用的结论有 12 小时 TTL：上游今天 403 的型号明天放开了，也会被重新测出来。
+
+用「刷新模型」时留意一点：探测本身会消耗免费额度（每次一个 `max_tokens: 1` 的请求），
+且刷新耗时随候选数增加，最坏约 30 秒。
 
 ## 限制与注意事项
 
@@ -130,6 +147,6 @@ Zen 上游不是一条端点，而是按模型分流：
 | ---- | ---- |
 | 403 `FreeTierError` | 指纹头或工具四件套没送到（改了 `extra_headers` 覆盖掉关键头？） |
 | 426 `UpgradeRequired` | UA 里的版本号低于上游当前门槛，改 `extra_headers.user-agent` 提版本 |
-| 401 | 选了付费模型，改用白名单内的免费模型 |
+| 401 | 选了付费模型，改用列表内的免费模型（名字像免费档但没被收编，说明实测没通过） |
 | 403 `RegionError` | 该模型按出口地区放行，需配合 `HTTPS_PROXY` 换出口 |
 | 非流式请求变慢 | 正常：上游只支持流式，网关要先聚合完整段再返回 |
