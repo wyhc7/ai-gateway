@@ -12,7 +12,13 @@ import {
   createZenStreamTransformer,
   aggregateZenSse,
   zenToolNameMap,
-  ZEN_FREE_MODELS
+  ZEN_FREE_MODELS,
+  isZenFreeCandidate,
+  isDefinitiveZenRejection,
+  ZEN_PROBE_TTL_MS,
+  ZEN_MAX_PROBES,
+  ZEN_PROBE_CONCURRENCY,
+  ZEN_PROBE_TIMEOUT_MS
 } from './zen-lane.js'
 
 // 允许「协议级默认模型」兜底的协议白名单。
@@ -488,6 +494,92 @@ function applyCooldown(provider, key, status) {
   persist()
 }
 
+// 探测单个候选型号：拿公共凭据真发一个最小请求，只看状态码。
+//
+// 为什么必须实测：上游 /models 不标注免费与否，付费档和免费档在列表里长得一模一样，
+// 区别只在「用公共凭据调用会不会被拒」。所以「能不能用」的唯一可信判据就是真发一次。
+async function probeZenModel(provider, modelId) {
+  const plan = callPlan(provider)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), ZEN_PROBE_TIMEOUT_MS)
+  try {
+    const resp = await fetch(joinUrl(provider.base_url, plan.chatPath), {
+      method: 'POST',
+      headers: buildHeaders(provider, plan, 'public', usableKeys(provider)[0] || null),
+      body: JSON.stringify(shapeZenBody({
+        model: modelId,
+        messages: [{ role: 'user', content: 'ping' }],
+        stream: true,
+        max_tokens: 1
+      })),
+      signal: controller.signal
+    })
+    // 拿到状态码就够了，立刻断开：探测本身不该为了读正文去消耗免费额度
+    await resp.body?.cancel()
+    return { ok: resp.ok, status: resp.status }
+  } catch (err) {
+    return { ok: false, status: 0, error: err.name === 'AbortError' ? '探测超时' : err.message }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// 在上游清单里挑出「还没见过、名字像免费档」的型号，逐个实测，通过的收编。
+//
+// 这样上游新上免费型号时，用户点一次「刷新模型」就能拿到，不必等网关更新白名单——
+// 白名单由此退化成「种子 + 已确认可用项」，不再是唯一的准入名单。
+// 返回的 cache 由调用方写回平台，用来避免每次刷新都重测同一批已知不可用的型号。
+export async function discoverZenFreeModels(provider, upstreamModels) {
+  const curated = new Set(ZEN_FREE_MODELS)
+  const known = new Set((provider.models || []).map((m) => m.id))
+  const now = Date.now()
+  const cache = (provider.zen_probe_cache && typeof provider.zen_probe_cache === 'object')
+    ? { ...provider.zen_probe_cache }
+    : {}
+
+  // 上游已不再列出的型号，缓存留着没有意义，顺手清掉，避免这份缓存无限增长
+  const upstreamIds = new Set(upstreamModels.map((m) => m?.id))
+  for (const id of Object.keys(cache)) {
+    if (!upstreamIds.has(id)) delete cache[id]
+  }
+
+  const candidates = []
+  for (const m of upstreamModels) {
+    if (!m?.id || curated.has(m.id) || known.has(m.id)) continue
+    if (!isZenFreeCandidate(m.id)) continue
+    const rejected = cache[m.id]
+    // 已判定用不了的，TTL 内不再重测；到点后放行重测，因为上游可能已经放开
+    if (rejected && rejected.ok === false && now - Number(rejected.at || 0) < ZEN_PROBE_TTL_MS) continue
+    candidates.push(m.id)
+    if (candidates.length >= ZEN_MAX_PROBES) break
+  }
+
+  const adopted = []
+  let cursor = 0
+  const worker = async () => {
+    while (cursor < candidates.length) {
+      const id = candidates[cursor]
+      cursor += 1
+      const r = await probeZenModel(provider, id)
+      if (r.ok) {
+        cache[id] = { ok: true, at: Date.now() }
+        adopted.push(id)
+      } else if (isDefinitiveZenRejection(r.status)) {
+        cache[id] = { ok: false, at: Date.now(), status: r.status }
+      } else {
+        // 抖动不记档，下次刷新重试——否则上游一次 500 就能让一个好型号长期消失
+        delete cache[id]
+      }
+    }
+  }
+  await Promise.all(
+    Array.from({ length: Math.min(ZEN_PROBE_CONCURRENCY, candidates.length) }, worker)
+  )
+
+  adopted.sort() // 顺序稳定，便于对比与测试
+  return { adopted, probed: candidates.length, cache }
+}
+
 export async function refreshModels(providerId) {
   const provider = getProvider(providerId)
   if (!provider) return { ok: false, error: '平台不存在' }
@@ -518,17 +610,31 @@ export async function refreshModels(providerId) {
       if (resp.ok) {
         const data = await resp.json()
         const models = (data.data || []).map((m) => ({ id: m.id, owned_by: m.owned_by || m.display_name || provider.name }))
-        // 免费通道：上游列表混着付费模型（公共凭据调用必 401），只保留白名单内的。
+        // 免费通道：上游列表混着付费模型（公共凭据调用必 401），白名单只负责
+        // 兜住已知可用项；名字像免费档的新型号在下面实测收编，因此新模型不必等发版。
         // 用户手工加进来的非白名单模型若上游仍在列，一并保留——刷新不该冲掉人的配置。
-        // 白名单一个都没匹配上，说明上游改了免费档阵容，整份退回白名单并标注来源。
+        // 既没有白名单命中、探测也没捞到任何型号，才整份退回白名单并标注来源。
         let usable = models
         let curatedOnly = false
+        // 本轮新收编的型号，回给前端好让「刷新」这类动作有可见的结果
+        let discoveredIds = []
         if (isZenProtocol(provider.protocol)) {
           const curated = new Set(ZEN_FREE_MODELS)
           const live = models.filter((m) => curated.has(m.id))
-          if (live.length) {
+          const { adopted, probed, cache } = await discoverZenFreeModels(provider, models)
+          provider.zen_probe_cache = cache
+          discoveredIds = adopted
+          if (probed) {
+            addLog({
+              type: 'system',
+              detail: `免费通道探测了 ${probed} 个新候选型号，收编 ${adopted.length} 个` +
+                (adopted.length ? `：${adopted.join('、')}` : '')
+            })
+          }
+          const discovered = adopted.map((id) => ({ id, owned_by: provider.name, free: true }))
+          if (live.length || discovered.length) {
             const manual = provider.models.filter((m) => !curated.has(m.id) && models.some((x) => x.id === m.id))
-            usable = [...live, ...manual]
+            usable = [...live, ...manual, ...discovered]
           } else {
             usable = ZEN_FREE_MODELS.map((id) => ({ id, owned_by: provider.name }))
             curatedOnly = true
@@ -538,7 +644,7 @@ export async function refreshModels(providerId) {
         provider.models_updated_at = Date.now()
         if (curatedOnly) provider.models_source = 'default'
         persistImmediate()
-        return { ok: true, count: usable.length, provider }
+        return { ok: true, count: usable.length, discovered: discoveredIds, provider }
       }
       lastError = `HTTP ${resp.status}${previewHint(resp.status)}`
       await resp.body?.cancel()

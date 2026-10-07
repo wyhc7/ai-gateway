@@ -10,7 +10,7 @@ const dataDir = mkdtempSync(join(tmpdir(), 'ai-gateway-zen-test-'))
 process.env.DATA_DIR = dataDir
 
 const { state } = await import('../store.js')
-const { handleChat } = await import('../proxy.js')
+const { handleChat, refreshModels } = await import('../proxy.js')
 const {
   shapeZenBody,
   zenToolNameMap,
@@ -18,6 +18,10 @@ const {
   createZenStreamTransformer,
   aggregateZenSse,
   isZenProtocol,
+  isZenFreeCandidate,
+  isDefinitiveZenRejection,
+  ZEN_PROBE_TTL_MS,
+  ZEN_MAX_PROBES,
   ZEN_FREE_MODELS
 } = await import('../zen-lane.js')
 
@@ -306,3 +310,176 @@ test('白名单里的模型都能查到平台归属', () => {
   assert.ok(isZenProtocol('zen-free'))
   assert.ok(!isZenProtocol('openai-chat'))
 })
+
+// ---- 免费档自发现：上游新上的型号，点一次刷新就能拿到 ----
+
+test('isZenFreeCandidate 只认 -free 后缀', () => {
+  for (const id of ['exo-free', 'ling-3.1-flash-free', 'muse-spark-1.3-contributor-free', 'a_free', 'x.free']) {
+    assert.equal(isZenFreeCandidate(id), true, id)
+  }
+  // big-pickle 虽然免费但名字不含后缀，它靠白名单兜住，不靠探测发现
+  for (const id of ['claude-fable-5', 'big-pickle', 'free-tier', 'freeform', 'gpt-5.3-codex-spark', '', null]) {
+    assert.equal(isZenFreeCandidate(id), false, String(id))
+  }
+})
+
+test('isDefinitiveZenRejection 区分「用不了」与「上游抖动」', () => {
+  assert.equal(isDefinitiveZenRejection(400), true) // 上游未开放
+  assert.equal(isDefinitiveZenRejection(401), true) // 付费档
+  assert.equal(isDefinitiveZenRejection(403), true) // 地区限制
+  assert.equal(isDefinitiveZenRejection(429), false) // 限流，要重试
+  assert.equal(isDefinitiveZenRejection(500), false)
+  assert.equal(isDefinitiveZenRejection(0), false) // 超时 / 网络错误
+})
+
+// 探测流程的测试用真实本地上游：只有真发一次请求，才能验出「实测」这件事本身
+function makeZenProvider(port, extra = {}) {
+  return {
+    id: 'zen-discover',
+    name: 'OpenCode Zen 免费通道',
+    base_url: `http://127.0.0.1:${port}/v1`,
+    protocol: 'zen-free',
+    enabled: true,
+    models: [],
+    keys: [],
+    extra_headers: {},
+    ...extra
+  }
+}
+
+async function withProvider(provider, run) {
+  state.providers.push(provider)
+  try {
+    await run()
+  } finally {
+    state.providers = state.providers.filter((p) => p !== provider)
+  }
+}
+
+// 上游 /models 与 /chat/completions 的最小仿真：probeStatus 决定每个型号探测时回什么
+function startZenUpstream(modelIds, probeStatus) {
+  const probed = []
+  return startUpstream(({ req, res, body }) => {
+    if (req.method === 'GET' && req.url.startsWith('/v1/models')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ data: modelIds.map((id) => ({ id, object: 'model', owned_by: 'opencode' })) }))
+      return
+    }
+    probed.push(body.model)
+    const status = probeStatus[body.model] ?? 403
+    res.writeHead(status, { 'Content-Type': status === 200 ? 'text/event-stream' : 'application/json' })
+    res.end(status === 200 ? 'data: [DONE]\n\n' : JSON.stringify({ error: { message: 'FreeTierError' } }))
+  }).then((r) => ({ ...r, probed }))
+}
+
+test('刷新时实测收编上游新上的免费型号，被判死的记入缓存', async () => {
+  const { server, port, probed } = await startZenUpstream(
+    // 白名单内的 + 两个新候选 + 一个名字不像免费的付费档
+    ['nemotron-3-ultra-free', 'exo-free', 'muse-spark-1.3-free', 'claude-fable-5'],
+    { 'exo-free': 200, 'muse-spark-1.3-free': 403 }
+  )
+  const provider = makeZenProvider(port)
+
+  await withProvider(provider, async () => {
+    const r = await refreshModels(provider.id)
+    assert.equal(r.ok, true)
+    // 新收编的型号要回给前端，「刷新」这类动作才有可见的结果
+    assert.deepEqual(r.discovered, ['exo-free'])
+
+    const ids = provider.models.map((m) => m.id)
+    assert.ok(ids.includes('nemotron-3-ultra-free'), '白名单内的保留')
+    assert.ok(ids.includes('exo-free'), '实测通过的收编')
+    assert.ok(!ids.includes('muse-spark-1.3-free'), '403 的不收编')
+    assert.ok(!ids.includes('claude-fable-5'), '付费档不在地表里，绝不探测')
+
+    // 只探测「名字像免费档且还没见过」的候选
+    assert.deepEqual(probed.sort(), ['exo-free', 'muse-spark-1.3-free'])
+    // 外来的型号标记 free，便于前端区分
+    assert.equal(provider.models.find((m) => m.id === 'exo-free').free, true)
+
+    // 被判死的记档，放行的也记档
+    assert.equal(provider.zen_probe_cache['exo-free'].ok, true)
+    assert.equal(provider.zen_probe_cache['muse-spark-1.3-free'].ok, false)
+    assert.equal(provider.zen_probe_cache['muse-spark-1.3-free'].status, 403)
+
+    // 再刷新一次：两个都已经有结论，不该再打上游
+    const before = probed.length
+    await refreshModels(provider.id)
+    assert.equal(probed.length, before, '有结论的型号不重复探测')
+    assert.ok(provider.models.map((m) => m.id).includes('exo-free'), '已收编的型号不会被刷新冲掉')
+  })
+
+  server.close()
+})
+
+test('上游 5xx / 超时不算除名依据，下次刷新重试', async () => {
+  const { server, port, probed } = await startZenUpstream(
+    ['flaky-free'],
+    { 'flaky-free': 500 }
+  )
+  const provider = makeZenProvider(port)
+
+  await withProvider(provider, async () => {
+    await refreshModels(provider.id)
+    assert.equal(probed.length, 1)
+    // 抖动不记档，否则上游一次 500 就能让一个好型号长期消失
+    assert.equal(provider.zen_probe_cache['flaky-free'], undefined)
+
+    await refreshModels(provider.id)
+    assert.equal(probed.length, 2, '下次刷新重试')
+  })
+
+  server.close()
+})
+
+test('缓存过期后重测：上游今天 403 的型号明天放开了也能收编', async () => {
+  const { server, port, probed } = await startZenUpstream(
+    ['late-free'],
+    { 'late-free': 200 }
+  )
+  const provider = makeZenProvider(port, {
+    // 模拟 12 小时前判过死缓
+    zen_probe_cache: { 'late-free': { ok: false, at: Date.now() - ZEN_PROBE_TTL_MS - 1000, status: 403 } }
+  })
+
+  await withProvider(provider, async () => {
+    await refreshModels(provider.id)
+    assert.deepEqual(probed, ['late-free'], '过了 TTL 就该重测')
+    assert.ok(provider.models.map((m) => m.id).includes('late-free'))
+  })
+
+  server.close()
+})
+
+test('TTL 内的死缓不重测，避免每次刷新都在白测同一批', async () => {
+  const { server, port, probed } = await startZenUpstream(
+    ['gated-free'],
+    { 'gated-free': 200 }
+  )
+  const provider = makeZenProvider(port, {
+    zen_probe_cache: { 'gated-free': { ok: false, at: Date.now() - 1000, status: 403 } }
+  })
+
+  await withProvider(provider, async () => {
+    await refreshModels(provider.id)
+    assert.equal(probed.length, 0, 'TTL 内不重测')
+    // 但也不能因为探测被跳过就把型号弄丢：白名单该兜的还兜着
+    assert.ok(provider.models.map((m) => m.id).includes('nemotron-3-ultra-free'))
+  })
+
+  server.close()
+})
+
+test('候选数受上限约束，上游一次放出几十个也不会把刷新拖死', async () => {
+  const many = Array.from({ length: ZEN_MAX_PROBES + 5 }, (_, i) => `bulk-${i}-free`)
+  const { server, port, probed } = await startZenUpstream(many, {})
+  const provider = makeZenProvider(port)
+
+  await withProvider(provider, async () => {
+    await refreshModels(provider.id)
+    assert.ok(probed.length <= ZEN_MAX_PROBES, `实测 ${probed.length} 次，不得超过 ${ZEN_MAX_PROBES}`)
+  })
+
+  server.close()
+})
+
