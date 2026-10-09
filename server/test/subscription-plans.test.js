@@ -159,8 +159,9 @@ test('订阅方案走自己的接口，模板接口里不再有订阅', { timeou
     const createdBody = await created.json()
     assert.equal(created.status, 201, `按订阅方案建平台失败：${JSON.stringify(createdBody)}`)
     assert.equal(createdBody.protocol, 'codex-oauth')
-    // 没填模型时后端要用 defaultModelsFor 预填兜底——这条会把上面那个搬家漏改直接打红
-    assert.ok(createdBody.models.length > 0, '订阅平台建完必须自带兜底模型，否则刚建好就是废的')
+    // 不预填：空着提交就该空着，后端不能背着用户把默认列表塞回去。
+    // 兜底（defaultModelsFor）在刷新失败时才生效，那条由 proxy-models.test.js 钉住。
+    assert.equal(createdBody.models.length, 0, '创建时不应预填模型')
   } finally {
     child.kill()
   }

@@ -260,7 +260,8 @@
             拉取列表
           </el-button>
           <span class="muted" style="font-size: 12px; line-height: 1.7; padding-top: 4px">
-            <template v-if="isOAuthProtocol(providerForm.protocol)">绑定订阅账号后可拉取可用模型列表（也可直接使用下方已预置的默认模型）；<br />拉取失败时按上游文档手动填写。</template>
+            <template v-if="isOAuthProtocol(providerForm.protocol)">绑定订阅账号后可点「拉取列表」；订阅上游通常没有干净的 /models，<br />拉不到就按上游文档手动填写，或建完点平台列表里的「刷新」。</template>
+            <template v-else-if="isCredentiallessProtocol(providerForm.protocol)">该通道免凭据，直接点「拉取列表」即可获取可用模型（模型名称不预填，留空也行）；<br />拉取失败时按上游文档手动填写，建完后平台列表里的「刷新」同样管用。</template>
             <template v-else>输入 API Token 后可拉取可用模型列表选择，选择后填入「模型名称」；<br />拉取失败时按服务商文档手动填写。</template>
           </span>
         </div>
@@ -304,10 +305,11 @@
             v-model="subForm.model_names_text"
             type="textarea"
             :rows="4"
-            placeholder="每行一个模型；留空则由服务端按所选接入点预填默认列表"
+            placeholder="每行一个模型；默认不预填，留空即可"
           />
           <span class="muted" style="display: block; margin-top: 6px; font-size: 12px; line-height: 1.7">
-            订阅类上游通常没有干净的 /models。这里预填的是实测可用的默认列表，之后刷新模型失败时网关也会回退到它。
+            默认模型不预填——订阅上游的可用型号随版本演进，写死一份容易与实际对不上。
+            留空建完后点平台列表里的「刷新」，拉取失败时网关会回退到内置默认列表兜底。
           </span>
         </el-form-item>
       </el-form>
@@ -528,7 +530,11 @@ function applyPreset(id) {
   // 模板自带的默认模型只用于预填当前这张表单，作为「这一家平台」的初始模型列表。
   // 千万别让它在协议层面生效：同一协议下各家厂商模型毫无交集，
   // 曾经正是这样把 ChatGPT 的模型列表套到了 DeepSeek / 通义 / Gemini 平台上。
-  if (!providerForm.value.model_names_text.trim() && Array.isArray(t.default_models) && t.default_models.length) {
+  //
+  // 免费通道（OpenCode Zen）例外，不预填：它的可用型号由上游 /models 与白名单决定，
+  // 写死一份既会随上游演进过期，也会盖过用户自己要填的。留空让他填，或建完点「刷新」。
+  const freeLane = t.protocol === 'zen-free'
+  if (!freeLane && !providerForm.value.model_names_text.trim() && Array.isArray(t.default_models) && t.default_models.length) {
     providerForm.value.model_names_text = t.default_models.join('\n')
   }
   if (t.auth_type || t.chat_path || t.models_path) advancedOpen.value = ['advanced']
@@ -855,15 +861,16 @@ async function openSubscriptionDialog() {
   applyPlan()
 }
 
-// 换接入点时跟着刷新地址与模型清单。名称只在为空、或还停在某个方案自带的名字上
-// 时才覆盖，免得把用户自己敲的名字抹掉。
+// 换接入点时只跟着刷新接入地址。名称只在为空、或还停在某个方案自带的名字上时
+// 才覆盖，免得把用户自己敲的名字抹掉。
+// 模型清单故意不碰：默认模型随上游版本变，预填一份很容易与实际可用型号对不上，
+// 而用户在里面写过东西时更不能覆盖。留空由他自己填，或建完点「刷新」让网关兜底。
 function applyPlan() {
   const plan = subscriptionPlans.value.find((p) => p.id === subForm.value.plan_id)
   if (!plan) return
   const stillPlanName = subscriptionPlans.value.some((p) => p.name === subForm.value.name)
   if (!subForm.value.name || stillPlanName) subForm.value.name = plan.name
   subForm.value.base_url = plan.base_url
-  subForm.value.model_names_text = (plan.default_models || []).join('\n')
 }
 
 async function createSubscription() {
