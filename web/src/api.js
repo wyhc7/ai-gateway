@@ -48,7 +48,6 @@ export const api = {
   getStatus: () => request('/api/status'),
   getGateway: () => request('/api/gateway'),
   getTemplates: () => request('/api/templates'),
-  getSubscriptionPlans: () => request('/api/subscriptions/plans'),
   getProviders: () => request('/api/providers'),
   createProvider: (data) => request('/api/providers', { method: 'POST', body: JSON.stringify(data) }),
   updateProvider: (id, data) => request(`/api/providers/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
