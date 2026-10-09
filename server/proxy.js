@@ -5,6 +5,7 @@ import { ensureAccessToken, refreshAccessToken, XAI_OAUTH_BASE_URL } from './oau
 import { ensureAccessToken as ensureCodexToken, refreshAccessToken as refreshCodexToken } from './codex-oauth.js'
 import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexAccountHeader } from './codex-responses.js'
 import { TEMPLATES } from './templates.js'
+import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
 import {
   isZenProtocol,
   buildZenHeaders,
@@ -42,15 +43,15 @@ const PROTOCOLS_WITHOUT_MODELS_ENDPOINT = new Set(['grok-oauth', 'codex-oauth'])
 // 判据是"列表不可信"而不是"没有列表"，所以单独一个集合，不要合并到上面那个。
 const PROTOCOLS_WITH_CURATED_MODELS = new Set(['zen-free'])
 
-// 订阅类上游（Grok 的 cli-chat-proxy、Codex 的 chatgpt.com/backend-api）没有干净的
-// GET /models；免费通道的 /models 不可信。两者都靠下面这份内置列表兜底。
+// 订阅类上游（Grok 的 cli-chat-proxy、Codex 的 chatgpt.com/backend-api）
+// 没有干净的 GET /models；免费通道的 /models 不可信。两者都在拉取不可用时
+// 回退到模板内置的默认模型列表，保证平台建完即可用。
 //
-// 订阅接入方案已经整体下线，TEMPLATES 里不再有 grok-oauth / codex-oauth 条目，
-// 因此这两个协议现在查不到兜底、返回 null——这是预期，不是漏改。
-// 只有 zen-free 还命中（它仍在 TEMPLATES 里）。
+// 订阅方案已经从 templates.js 独立出去（subscription-plans.js），所以两处都要查：
+// 只查模板的话，grok-oauth / codex-oauth 会查不到兜底列表，订阅平台刚建好就是废的。
 export function defaultModelsFor(protocol) {
   if (!PROTOCOLS_WITHOUT_MODELS_ENDPOINT.has(protocol) && !PROTOCOLS_WITH_CURATED_MODELS.has(protocol)) return null
-  for (const t of TEMPLATES) {
+  for (const t of [...TEMPLATES, ...SUBSCRIPTION_PLANS]) {
     if (t.protocol === protocol && Array.isArray(t.default_models) && t.default_models.length) {
       return t.default_models.map((id) => ({ id, owned_by: t.name }))
     }
