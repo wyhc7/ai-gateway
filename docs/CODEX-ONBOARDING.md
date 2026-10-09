@@ -11,7 +11,7 @@
 | 环节 | 状态 | 说明 |
 |---|---|---|
 | 网关代码（codex-oauth.js / codex-responses.js / UI） | ✅ | commit b8c0ba7 已部署生产 |
-| 模板 `codex-oauth` | ✅ | chatgpt.com/backend-api/codex，默认模型 gpt-5.3-codex-spark ~ gpt-5.6-luna |
+| 模板 / 预设 `codex-oauth` | ⚠️ 已下线 | 订阅接入方案（预设）整体删除，UI「添加订阅」入口暂无实现；仍可直接 `POST /api/providers` 建 `codex-oauth` 平台，见 §3。预设回来前，拉取模型失败**没有兜底名单**，会如实报错 |
 | 出网代理支持 | ✅ | commit c43acda：设 `HTTPS_PROXY` 即全局接管（含 auth.openai.com / chatgpt.com） |
 | mock 上游全链路 | ✅ | 见 §5 复现方法 |
 | 真实设备码申请 | ✅ | Clash 走支持区域节点即可通 |
