@@ -7,9 +7,9 @@
 import { test, describe, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
@@ -56,7 +56,7 @@ async function commit(work, message) {
  * 搭一套夹具：裸库 origin + 已推送第一个提交的工作库。
  * 工作库的 remote 是这个裸库，所以 fetch/merge 全走本地文件，不需要网络。
  */
-async function fixture(name) {
+async function fixture(name, extra = null) {
   const root = join(SANDBOX, name)
   const origin = join(root, 'origin.git')
   const work = join(root, 'work')
@@ -72,6 +72,13 @@ async function fixture(name) {
   await gitAt(['config', 'commit.gpgsign', 'false'], work)
 
   writeFileSync(join(work, 'README.md'), '# fixture\n')
+  // extra 里的文件进第一个提交：这样它们不会出现在后续 diff 里，
+  // 也就不会误触发「本次改了 package.json 要装依赖」。
+  for (const [rel, content] of Object.entries(extra || {})) {
+    const target = join(work, rel)
+    mkdirSync(dirname(target), { recursive: true })
+    writeFileSync(target, content)
+  }
   const first = await commit(work, 'init')
 
   await gitAt(['remote', 'add', 'origin', origin], work)
@@ -445,5 +452,207 @@ describe('applyUpdate：真的把部署目录快进到上游', () => {
 
     process.env.UPDATE_REPO_DIR = SANDBOX
     up.clearUpdateCache()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 失败要能被诊断
+//
+// 这一组是补上一个真实的坑：线上构建失败时，界面只显示了
+// 「Command failed: /root/.nvm/.../npm-cli.js run build --prefix web」，
+// 真正的原因（vite 跑在了 node v12 上，SyntaxError）在 stderr 里，被整段丢掉了。
+// ---------------------------------------------------------------------------
+
+describe('commandError：失败原因要能被诊断，不能只剩一行命令行', () => {
+  test('把 stderr 带出来', () => {
+    const err = Object.assign(
+      new Error('Command failed: /root/.nvm/versions/node/v20.20.2/bin/node npm-cli.js run build --prefix web'),
+      { stderr: 'file:///opt/ai-gateway/web/node_modules/vite/bin/vite.js:7\n    await import("source-map-support")\n    ^^^^^\n\nSyntaxError: Unexpected reserved word\n' }
+    )
+    const text = up.commandError(err)
+    assert.match(text, /SyntaxError: Unexpected reserved word/)
+    assert.doesNotMatch(text, /^Command failed/)
+  })
+
+  test('stdout 也要带上——有些工具把报错写在 stdout', () => {
+    const err = Object.assign(new Error('Command failed: npm run build'), { stdout: 'sh: vite: command not found' })
+    assert.match(up.commandError(err), /vite: command not found/)
+  })
+
+  test('两者都没有时退回 message 首行，不返回空串', () => {
+    assert.equal(up.commandError(new Error('Command failed: git fetch\n第二行不该出现')), 'Command failed: git fetch')
+  })
+
+  test('超长输出只留尾部，因为构建报错总在最后', () => {
+    const err = Object.assign(new Error('x'), { stderr: `${'填充内容'.repeat(1200)}\nTHE REAL ERROR` })
+    const text = up.commandError(err)
+    assert.ok(text.length <= 1501, `应被截断，实际长度 ${text.length}`)
+    assert.match(text, /THE REAL ERROR/)
+    assert.ok(text.startsWith('…'))
+  })
+})
+
+// ---------------------------------------------------------------------------
+// 部署记录：只靠 HEAD 判断要不要更新会把失败的部署卡死
+// ---------------------------------------------------------------------------
+
+/** 直接落一份部署记录，模拟「上一次成功部署停在哪个提交」 */
+function writeDeployedRecord(work, revision) {
+  mkdirSync(join(work, 'data'), { recursive: true })
+  writeFileSync(join(work, 'data', 'deployed-revision.json'), JSON.stringify({ revision, at: new Date().toISOString() }))
+}
+
+describe('readDeployed：没有记录就不做任何断言', () => {
+  test('文件不存在 / 内容损坏 / revision 不是字符串 → 一律返回 null', async () => {
+    const f = await fixture('deployed-record')
+    process.env.UPDATE_REPO_DIR = f.work
+
+    assert.equal(up.readDeployed(), null, '没有记录')
+
+    mkdirSync(join(f.work, 'data'), { recursive: true })
+    writeFileSync(up.deployedRecordPath(), '{ 这不是 json')
+    assert.equal(up.readDeployed(), null, '内容损坏')
+
+    writeFileSync(up.deployedRecordPath(), JSON.stringify({ revision: 42 }))
+    assert.equal(up.readDeployed(), null, 'revision 不是字符串')
+
+    writeFileSync(up.deployedRecordPath(), JSON.stringify({ revision: 'abc123' }))
+    assert.equal(up.readDeployed().revision, 'abc123')
+
+    process.env.UPDATE_REPO_DIR = SANDBOX
+  })
+})
+
+describe('合并成功但部署没跑完：不能让界面显示「已是最新」把人卡死', () => {
+  test('checkUpdate 仍然报告需要更新，并按 deployed..HEAD 给出要补做的步骤', async () => {
+    const f = await fixture('stale-detect')
+    mkdirSync(join(f.work, 'web', 'src'), { recursive: true })
+    writeFileSync(join(f.work, 'web', 'src', 'App.vue'), '<template><div/></template>\n')
+    await commit(f.work, 'feat: 改前端')
+    await gitAt(['push', '-q', 'origin', 'main'], f.work)
+    // 代码已经合并进去了，但上一次成功部署还停在第一个提交
+    writeDeployedRecord(f.work, f.first)
+
+    process.env.UPDATE_REPO_DIR = f.work
+    up.clearUpdateCache()
+    const r = await up.checkUpdate({ force: true })
+
+    assert.equal(r.behind, 0, 'HEAD 确实已经等于上游')
+    assert.equal(r.stale_deploy, true)
+    assert.equal(r.has_update, true, 'behind 是 0 也不能说「已是最新」')
+    assert.equal(r.can_update, true)
+    assert.equal(r.deployed_revision, f.first)
+    // 关键：计划必须来自 deployed..HEAD。若照 HEAD..上游 算，这里是空的，
+    // 界面会显示「无需任何步骤」，而实际执行时却要重新构建。
+    assert.equal(r.plan.buildWeb, true, '补做部署时仍然要构建前端')
+    assert.equal(r.files.total, 1)
+    assert.deepEqual(r.files.paths, ['web/src/App.vue'])
+    assert.equal(r.commits.length, 1, '已合并未部署的提交也要能看到')
+    assert.equal(r.commits[0].subject, 'feat: 改前端')
+
+    process.env.UPDATE_REPO_DIR = SANDBOX
+    up.clearUpdateCache()
+  })
+
+  test('补做部署：不重复合并，跑完把记录补上，之后就不再报有更新', async () => {
+    const f = await fixture('stale-resume')
+    mkdirSync(join(f.work, 'docs'), { recursive: true })
+    writeFileSync(join(f.work, 'docs', 'note.md'), 'x\n')
+    await commit(f.work, 'docs: 只动文档')
+    await gitAt(['push', '-q', 'origin', 'main'], f.work)
+    writeDeployedRecord(f.work, f.first)
+
+    const headBefore = await gitAt(['rev-parse', 'HEAD'], f.work)
+    process.env.UPDATE_REPO_DIR = f.work
+    up.clearUpdateCache()
+
+    const r = await up.applyUpdate()
+
+    assert.equal(r.ok, true)
+    assert.equal(r.resumed, true, '要认出这是补做部署而不是新更新')
+    assert.equal(r.deployed_recorded, true)
+    assert.equal(r.up_to_date, undefined)
+    assert.equal(r.steps.some((s) => s.name === '合并代码'), false, '没有东西可合并就不该有合并这一步')
+    assert.match(r.steps.find((s) => s.name === '比对版本').detail, /补做后续步骤/)
+    assert.equal(await gitAt(['rev-parse', 'HEAD'], f.work), headBefore, 'HEAD 不该被动过')
+
+    // 记录补上了，再查一次就该是「已是最新」——不会永远卡在「部署未完成」
+    up.clearUpdateCache()
+    const after = await up.checkUpdate({ force: true })
+    assert.equal(after.stale_deploy, false)
+    assert.equal(after.has_update, false)
+    assert.equal(after.deployed_revision, headBefore)
+
+    process.env.UPDATE_REPO_DIR = SANDBOX
+    up.clearUpdateCache()
+  })
+
+  test('中止的更新不写部署记录——记录只代表「真的部署成功过」', async () => {
+    const f = await fixture('stale-fail')
+    writeFileSync(join(f.work, 'README.md'), '# 本地改动\n')
+    process.env.UPDATE_REPO_DIR = f.work
+    up.clearUpdateCache()
+
+    const r = await up.applyUpdate()
+
+    assert.equal(r.ok, false)
+    assert.match(r.steps[0].detail, /未提交的改动/)
+    assert.equal(existsSync(join(f.work, 'data', 'deployed-revision.json')), false)
+
+    process.env.UPDATE_REPO_DIR = SANDBOX
+    up.clearUpdateCache()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// npm 必须和跑网关的是同一个 node
+//
+// 线上真实故障：systemd 服务的 PATH 里没有 nvm 的 bin 目录，npm 拉起的 vite
+// 靠 shebang `#!/usr/bin/env node` 找到了系统自带的 node v12，顶层 await 直接
+// 语法错误。这里只能验证「PATH 被顶到了最前面」，端到端验证在服务器上做的。
+// ---------------------------------------------------------------------------
+
+describe('npm 的环境：脚本必须解析到和网关同一个 node', () => {
+  test('构建步骤里的 node 就是跑网关的那个，而不是 PATH 上碰巧找到的旧版本', async () => {
+    // package.json 进第一个提交，避免触发装依赖；探针脚本随更新一起进来，
+    // 于是这次更新只会跑「构建管理界面」这一步
+    const f = await fixture('npm-path', {
+      'web/package.json': JSON.stringify({ name: 'probe', version: '1.0.0', private: true, scripts: { build: 'node probe.mjs' } }, null, 2)
+    })
+    mkdirSync(join(f.work, 'web'), { recursive: true })
+    writeFileSync(join(f.work, 'web', 'probe.mjs'), "import { writeFileSync } from 'node:fs'\nwriteFileSync(process.env.PROBE_OUT, process.execPath)\n")
+    await commit(f.work, 'feat: 加个探针')
+    await gitAt(['push', '-q', 'origin', 'main'], f.work)
+    await gitAt(['reset', '--hard', '-q', f.first], f.work)
+
+    const probeOut = join(f.work, 'probe-out.txt')
+    process.env.PROBE_OUT = probeOut
+    process.env.UPDATE_REPO_DIR = f.work
+    up.clearUpdateCache()
+
+    // 削成 systemd 服务那种「PATH 上没有 node」的样子。Windows 上不能这么干——
+    // npm 找不到 cmd.exe 直接起不来，何况那里的 PATH 本来也只有同一个 node。
+    const savedPath = process.env.PATH
+    if (process.platform !== 'win32') {
+      process.env.PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+    }
+
+    try {
+      const r = await up.applyUpdate()
+
+      assert.equal(r.ok, true, `更新应当成功：${JSON.stringify(r.steps)}`)
+      assert.equal(r.steps.find((s) => s.name === '构建管理界面').ok, true)
+      assert.equal(existsSync(probeOut), true, '探针没跑起来，构建步骤等于没验证')
+      assert.equal(
+        readFileSync(probeOut, 'utf8').trim(),
+        process.execPath,
+        'npm 拉起的脚本必须解析到和网关同一个 node'
+      )
+    } finally {
+      process.env.PATH = savedPath
+      delete process.env.PROBE_OUT
+      process.env.UPDATE_REPO_DIR = SANDBOX
+      up.clearUpdateCache()
+    }
   })
 })
