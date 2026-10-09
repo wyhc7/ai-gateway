@@ -3,8 +3,10 @@ import { addLog } from './logger.js'
 import { modelAllowed, filterModelsForAuth, recordUsage } from './api-keys.js'
 import { ensureAccessToken, refreshAccessToken, XAI_OAUTH_BASE_URL } from './oauth.js'
 import { ensureAccessToken as ensureCodexToken, refreshAccessToken as refreshCodexToken } from './codex-oauth.js'
+import { ensureWorkbuddyToken, refreshWorkbuddyToken } from './workbuddy-oauth.js'
 import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexAccountHeader } from './codex-responses.js'
 import { TEMPLATES } from './templates.js'
+import { isWorkbuddyProtocol, workbuddyHeaders, shapeWorkbuddyBody, WORKBUDDY_CURATED_MODELS } from './workbuddy-lane.js'
 import {
   isZenProtocol,
   buildZenHeaders,
@@ -33,7 +35,11 @@ import {
 // 导致所有 openai-chat 平台在拉模型失败时被静默兜底成 gpt-5 / gpt-image-2
 // （表现为「拉取成功」但列表完全不对，用户只会以为是自己的 Key 坏了）。
 // 标准协议就该老实报错，不能用别人的模型凑数。
-const PROTOCOLS_WITHOUT_MODELS_ENDPOINT = new Set(['grok-oauth', 'codex-oauth'])
+// 上游那个 modelsPath 不能按 OpenAI 形态直接调的协议。
+// - grok-oauth / codex-oauth：根本没有可用的 GET /models
+// - workbuddy-oauth：路径存在，但返回 {code,msg,data} 信封且会漏报隐藏模型
+// 名义上是「没有可用列表」，行为上都只能走内置清单兜底，所以归在同一个集合里。
+const PROTOCOLS_WITHOUT_MODELS_ENDPOINT = new Set(['grok-oauth', 'codex-oauth', 'workbuddy-oauth'])
 
 // 上游有 /models、但那份列表不可信的协议。
 //
@@ -48,7 +54,15 @@ const PROTOCOLS_WITH_CURATED_MODELS = new Set(['zen-free'])
 // 订阅接入方案已经整体下线，TEMPLATES 里不再有 grok-oauth / codex-oauth 条目，
 // 因此这两个协议现在查不到兜底、返回 null——这是预期，不是漏改。
 // 只有 zen-free 还命中（它仍在 TEMPLATES 里）。
+// 协议自带、且与模板无关的模型清单。
+// WorkBuddy 的 19 个模型属于这一类：它们是该协议对上游的事实描述，
+// 不随用户怎么建平台而变，挂在模板上反而多一层查不到的风险。
+const PROTOCOL_CURATED_MODELS = {
+  'workbuddy-oauth': WORKBUDDY_CURATED_MODELS
+}
+
 export function defaultModelsFor(protocol) {
+  if (PROTOCOL_CURATED_MODELS[protocol]) return PROTOCOL_CURATED_MODELS[protocol].map((m) => ({ ...m }))
   if (!PROTOCOLS_WITHOUT_MODELS_ENDPOINT.has(protocol) && !PROTOCOLS_WITH_CURATED_MODELS.has(protocol)) return null
   for (const t of TEMPLATES) {
     if (t.protocol === protocol && Array.isArray(t.default_models) && t.default_models.length) {
@@ -238,6 +252,12 @@ const PROTOCOLS = {
   // Codex 订阅账号（ChatGPT Plus/Pro 的 OAuth 凭据）：上游是 Responses API，
   // 请求体用 input[]、响应体用 output[]，与 chat/completions 不同，需要转换层。
   'codex-oauth': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/models', chatPath: '/responses', imagesPath: '/images/generations', modelsMethod: 'GET' },
+  // WorkBuddy / CodeBuddy 订阅账号（腾讯，OAuth 凭据）：接口形态近似 OpenAI 兼容，
+  // 但路径带 /v2 前缀，且对请求体挑三拣四（强制流式、tool_choice 只收字符串、
+  // 首条必须是 system）。整形见 workbuddy-lane.js。
+  // 注意 modelsPath 不是 OpenAI 那个 /models —— 上游是 {code,msg,data} 信封且会漏报
+  // 隐藏模型，所以模型清单走内置白名单，刷新失败时由 defaultModelsFor 兜底。
+  'workbuddy-oauth': { auth: 'header', authHeader: 'Authorization', authPrefix: 'Bearer ', modelsPath: '/console/enterprises/personal/models', chatPath: '/v2/chat/completions', imagesPath: '/images/generations', modelsMethod: 'GET' },
   // OpenCode Zen 免费通道：上游只认固定的公共凭据（Bearer public）加一整套
   // OpenCode 客户端指纹头，用户没有任何可配置的 Key —— 目前唯一的免凭据协议。
   // 接口形态仍是 OpenAI 兼容，请求/响应整形见 zen-lane.js。
@@ -341,6 +361,11 @@ function buildHeaders(provider, plan, apiKey, key = null) {
   if (isResponsesProtocol(provider.protocol) && key) {
     Object.assign(headers, codexAccountHeader(key))
   }
+  // WorkBuddy 同理：uid 与 realm（X-Domain）都是账号级的，多账号轮换时
+  // 拿平台级头去配另一个账号的 token，上游会直接按身份不匹配拒绝
+  if (isWorkbuddyProtocol(provider.protocol) && key) {
+    Object.assign(headers, workbuddyHeaders(key))
+  }
   for (const [k, v] of Object.entries(provider.extra_headers || {})) {
     if (k && v) headers[k] = v
   }
@@ -359,6 +384,10 @@ function buildHeaders(provider, plan, apiKey, key = null) {
 function serializeUpstreamBody(provider, body) {
   if (isZenProtocol(provider.protocol)) {
     return JSON.stringify(shapeZenBody(body))
+  }
+  // WorkBuddy：强制流式 + tool_choice 收敛成字符串 + developer 角色改写 + 补 system 消息
+  if (isWorkbuddyProtocol(provider.protocol)) {
+    return JSON.stringify(shapeWorkbuddyBody(body))
   }
   const payload = withUsageOption(provider, body)
   return JSON.stringify(
@@ -411,12 +440,23 @@ function resolveTarget(body) {
 // 发请求前必须确认它还有效，否则上游只回一个无从分辨的 401。
 // 刷新成功立刻落盘——进程重启后拿已失效的 token 去撞墙没有意义。
 // 抛错代表这个账号当前不可用，调用方应冷却它并切下一个。
+// 三家订阅账号（Grok / Codex / WorkBuddy）的 OAuth 端点、参数、响应信封、凭据字段
+// 各不相同，按凭据自带的 provider 标记分流（导入/授权时写入）。
+// 抽成函数而不是嵌套三元：再加一家订阅源时，多一个 case 就够，不必改三个调用点。
+function oauthHandlersFor(key) {
+  switch (key?.provider) {
+    case 'codex':
+      return { ensure: ensureCodexToken, refresh: refreshCodexToken }
+    case 'workbuddy':
+      return { ensure: ensureWorkbuddyToken, refresh: refreshWorkbuddyToken }
+    default:
+      return { ensure: ensureAccessToken, refresh: refreshAccessToken }
+  }
+}
+
 export async function resolveKeyToken(key) {
   if (!key || key.type !== 'oauth') return key?.api_key
-  // Grok 与 Codex 的 OAuth 端点、参数、凭据字段都不同，
-  // 按凭据自带的 provider 标记分流（导入/授权时写入）
-  const ensure = key.provider === 'codex' ? ensureCodexToken : ensureAccessToken
-  const { credential, refreshed } = await ensure(key)
+  const { credential, refreshed } = await oauthHandlersFor(key).ensure(key)
   if (refreshed) {
     Object.assign(key, credential)
     persistImmediate()
@@ -432,9 +472,9 @@ export async function resolveKeyToken(key) {
 async function forceRefreshToken(key) {
   if (!key || key.type !== 'oauth') return false
   try {
-    const refresh = key.provider === 'codex' ? refreshCodexToken : refreshAccessToken
     // key.token_endpoint 允许凭据自带 token 端点（测试注入 / 特殊部署覆盖），
     // 没有时走 oauth.js 的 OIDC discovery（有缓存与兜底）
+    const { refresh } = oauthHandlersFor(key)
     const next = await refresh(key, key.token_endpoint)
     Object.assign(key, next)
     persistImmediate()
