@@ -11,12 +11,16 @@
           <svg style="margin-right: 5px" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
           导出
         </el-button>
+        <el-button plain @click="openSubscriptionDialog">
+          <svg style="margin-right: 5px" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><line x1="19" y1="8" x2="19" y2="14" /><line x1="22" y1="11" x2="16" y2="11" /></svg>
+          添加订阅
+        </el-button>
         <el-button type="primary" @click="openCreateDialog">
           <svg style="margin-right: 5px" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14" /></svg>
           添加平台
         </el-button>
       </div>
-      <input ref="importInput" type="file" accept=".json" style="display: none" @change="importProviders" />
+      <input ref="importInput" type="file" accept=".json" aria-label="导入平台配置" style="display: none" @change="importProviders" />
     </div>
 
     <div v-loading="loading" class="provider-list">
@@ -33,7 +37,18 @@
         class="provider-card"
         :class="{ 'is-open': expandedId === p.id }"
       >
-        <div class="provider-head" @click="toggle(p)">
+        <!-- 卡头本身就是「展开详情」的开关，里面没有别的可聚焦元素，
+             所以给它 button 语义与键盘触发；缺了这两样，收起状态下的平台
+             对键盘用户就是个死结——除它之外没有任何入口能展开。 -->
+        <div
+          class="provider-head"
+          role="button"
+          tabindex="0"
+          :aria-expanded="expandedId === p.id"
+          @click="toggle(p)"
+          @keydown.enter.prevent="toggle(p)"
+          @keydown.space.prevent="toggle(p)"
+        >
           <div :class="['provider-avatar', !p.enabled && 'offline']">{{ p.name.charAt(0).toUpperCase() }}</div>
           <div class="provider-info">
             <div class="name">
@@ -155,7 +170,13 @@
         <el-row :gutter="16">
           <el-col :xs="24" :sm="12">
             <el-form-item label="接口格式" required>
-              <el-select v-model="providerForm.protocol" style="width: 100%" @change="onProtocolChange">
+              <!-- 编辑订阅平台时的分支：下拉框里故意不列订阅协议（订阅平台走「添加
+                   订阅」入口创建），照常渲染只会得到一个空白的必填项——看着像没填，
+                   还可能被误选成别的协议，把手上 OAuth 凭据的调用方式一起改掉。 -->
+              <div v-if="isOAuthProtocol(providerForm.protocol)" class="protocol-locked">
+                {{ protocolLabel(providerForm.protocol) }}（协议不可更改）
+              </div>
+              <el-select v-else v-model="providerForm.protocol" style="width: 100%" @change="onProtocolChange">
                 <el-option label="OpenAI Chat" value="openai-chat" />
                 <el-option label="OpenAI Responses" value="openai-responses" />
                 <el-option label="Anthropic（OpenAI 兼容端点）" value="anthropic-openai" />
@@ -174,10 +195,13 @@
         <el-form-item label="模型 API 地址" required>
           <el-input v-model="providerForm.base_url" placeholder="https://api.openai.com/v1（填写到版本前缀，不含 /chat/completions 等接口路径）" />
         </el-form-item>
+        <!-- 订阅平台不再能从这里创建（见「添加订阅」）。这里仍保留该分支：
+             编辑已有的订阅平台时要挡住下面那个 API Token 输入框——
+             订阅凭据不在表单里填，走授权或导入。 -->
         <el-form-item v-if="isOAuthProtocol(providerForm.protocol)" label="订阅账号">
           <div class="oauth-hint">
-            订阅账号的凭据不走 API Token。平台创建后，在下方列表里点「授权 {{ authLabel(providerForm) }} 账号」
-            走网页授权，或点「导入 Token」粘贴已有凭据。
+            订阅账号的凭据不走 API Token，这个字段在这里填不了。保存后在平台列表里点
+            「授权 {{ authLabel(providerForm) }} 账号」走网页授权，或点「导入 Token」粘贴已有凭据。
           </div>
         </el-form-item>
         <el-form-item v-else-if="isCredentiallessProtocol(providerForm.protocol)" label="凭据">
@@ -241,12 +265,55 @@
           </span>
         </div>
         <el-form-item label="自定义请求头（可选）">
-          <el-input v-model="providerForm.extra_headers_text" type="textarea" :rows="2" placeholder='JSON 格式，如 {"HTTP-Referer": "https://example.com"}' />
+          <el-input v-model="providerForm.extra_headers_text" type="textarea" :rows="2" placeholder='JSON 格式，如 {"HTTP-Referer": "https://local.ai-gateway.dev"}' />
         </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="providerDialog = false">取消</el-button>
         <el-button type="primary" @click="saveProvider">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 添加订阅：与「添加平台」完全分开。订阅没有 API Token 可填，凭据要建完平台
+         才能授权/导入，塞进同一张表单里只会让人以为接口格式少了个选项。 -->
+    <el-dialog v-model="subscriptionDialog" title="添加订阅" width="600px" top="8vh" :close-on-click-modal="false">
+      <div class="oauth-hint" style="margin-bottom: 18px">
+        订阅账号与 API 平台是两回事：这里没有 API Token 可填。先选接入点把平台建出来，
+        随后用设备码授权或「导入 Token」绑定凭据——创建成功后会直接进入授权。
+      </div>
+      <el-form label-position="top" style="padding-right: 6px">
+        <el-row :gutter="16">
+          <el-col :xs="24" :sm="12">
+            <el-form-item label="订阅接入" required>
+              <el-select v-model="subForm.plan_id" placeholder="选择订阅类型" style="width: 100%" @change="applyPlan">
+                <el-option v-for="p in subscriptionPlans" :key="p.id" :label="p.name" :value="p.id" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :sm="12">
+            <el-form-item label="平台名称" required>
+              <el-input v-model="subForm.name" placeholder="例如：Grok 订阅账号（OAuth）" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="模型 API 地址" required>
+          <el-input v-model="subForm.base_url" placeholder="https://cli-chat-proxy.grok.com/v1" />
+        </el-form-item>
+        <el-form-item label="模型名称">
+          <el-input
+            v-model="subForm.model_names_text"
+            type="textarea"
+            :rows="4"
+            placeholder="每行一个模型；留空则由服务端按所选接入点预填默认列表"
+          />
+          <span class="muted" style="display: block; margin-top: 6px; font-size: 12px; line-height: 1.7">
+            订阅类上游通常没有干净的 /models。这里预填的是实测可用的默认列表，之后刷新模型失败时网关也会回退到它。
+          </span>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="subscriptionDialog = false">取消</el-button>
+        <el-button type="primary" :loading="creatingSub" @click="createSubscription">创建</el-button>
       </template>
     </el-dialog>
 
@@ -755,6 +822,80 @@ async function resetKey(p, k) {
 }
 
 // ---------------------------------------------------------------------------
+// 添加订阅：与「添加平台」完全分开的入口
+//
+// 订阅平台没有 API Token 可填，凭据要建完平台才能授权或导入。混在「添加平台」里
+// 只会在接口格式下拉框外多出几个选项，或者干脆被必填校验拦住要填 API Token。
+// 这里单独建，建完直接接后面的设备码授权。
+// ---------------------------------------------------------------------------
+const subscriptionDialog = ref(false)
+const subscriptionPlans = ref([])
+const creatingSub = ref(false)
+const emptySubForm = () => ({ plan_id: '', name: '', base_url: '', model_names_text: '' })
+const subForm = ref(emptySubForm())
+
+async function openSubscriptionDialog() {
+  subForm.value = emptySubForm()
+  subscriptionDialog.value = true
+  // 方案来自服务端（/api/subscriptions/plans），拉过一次就复用
+  if (subscriptionPlans.value.length === 0) {
+    try {
+      const data = await api.getSubscriptionPlans()
+      subscriptionPlans.value = data.plans || []
+    } catch (e) {
+      subscriptionDialog.value = false
+      return ElMessage.error(e?.message || '加载订阅方案失败')
+    }
+  }
+  if (subscriptionPlans.value.length === 0) {
+    subscriptionDialog.value = false
+    return ElMessage.warning('服务端没有返回任何订阅方案')
+  }
+  subForm.value.plan_id = subscriptionPlans.value[0].id
+  applyPlan()
+}
+
+// 换接入点时跟着刷新地址与模型清单。名称只在为空、或还停在某个方案自带的名字上
+// 时才覆盖，免得把用户自己敲的名字抹掉。
+function applyPlan() {
+  const plan = subscriptionPlans.value.find((p) => p.id === subForm.value.plan_id)
+  if (!plan) return
+  const stillPlanName = subscriptionPlans.value.some((p) => p.name === subForm.value.name)
+  if (!subForm.value.name || stillPlanName) subForm.value.name = plan.name
+  subForm.value.base_url = plan.base_url
+  subForm.value.model_names_text = (plan.default_models || []).join('\n')
+}
+
+async function createSubscription() {
+  const plan = subscriptionPlans.value.find((p) => p.id === subForm.value.plan_id)
+  if (!plan) return ElMessage.warning('请选择订阅接入')
+  if (!subForm.value.name || !subForm.value.base_url) {
+    return ElMessage.warning('平台名称和模型 API 地址为必填项')
+  }
+  const model_names = subForm.value.model_names_text.split('\n').map((s) => s.trim()).filter(Boolean)
+  creatingSub.value = true
+  try {
+    // 不提交 api_key：订阅平台的凭据走授权/导入，交了后端会存成一个永远调不通的静态 Key
+    const created = await api.createProvider({
+      name: subForm.value.name,
+      base_url: subForm.value.base_url,
+      protocol: plan.protocol,
+      extra_headers: {},
+      model_names
+    })
+    subscriptionDialog.value = false
+    await load()
+    ElMessage.success('订阅平台已创建，接下来绑定凭据')
+    // 平台没有凭据就服务不了，所以建完直接进授权；想改走「导入 Token」关掉即可
+    openGrokAuth(created)
+  } catch (e) {
+    ElMessage.error(e?.message || '创建订阅平台失败')
+  } finally {
+    creatingSub.value = false
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Grok / Codex 订阅账号（OAuth 设备码授权）
 //
 // 流程：服务端申请 user_code → 用户在浏览器确认 → 前端按服务端给的节奏轮询
@@ -1074,6 +1215,21 @@ onBeforeUnmount(() => {
   padding: 9px 13px;
   border-radius: 0 4px 4px 0;
   width: 100%;
+}
+
+/* 编辑订阅平台时替代「接口格式」下拉框——协议不是这里能改的东西，
+   照常渲染会得到一个空着的必填项 */
+.protocol-locked {
+  width: 100%;
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  padding: 0 11px;
+  background: var(--surface-2);
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--r-sm);
+  color: var(--ink-2);
+  font-size: 13px;
 }
 
 .preview-summary {
