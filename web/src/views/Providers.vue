@@ -527,16 +527,12 @@ function applyPreset(id) {
   providerForm.value.models_method = t.models_method || ''
   providerForm.value.extra_headers_text = t.extra_headers ? JSON.stringify(t.extra_headers, null, 2) : ''
   if (!providerForm.value.name) providerForm.value.name = t.name
-  // 模板自带的默认模型只用于预填当前这张表单，作为「这一家平台」的初始模型列表。
-  // 千万别让它在协议层面生效：同一协议下各家厂商模型毫无交集，
-  // 曾经正是这样把 ChatGPT 的模型列表套到了 DeepSeek / 通义 / Gemini 平台上。
-  //
-  // 免费通道（OpenCode Zen）例外，不预填：它的可用型号由上游 /models 与白名单决定，
-  // 写死一份既会随上游演进过期，也会盖过用户自己要填的。留空让他填，或建完点「刷新」。
-  const freeLane = t.protocol === 'zen-free'
-  if (!freeLane && !providerForm.value.model_names_text.trim() && Array.isArray(t.default_models) && t.default_models.length) {
-    providerForm.value.model_names_text = t.default_models.join('\n')
-  }
+  // 模型一律不预填，模板自带的 default_models 不参与这张表单。
+  // 写死一份默认清单有两个毛病：随上游版本演进很快过期，还会盖掉用户自己填的；
+  // 且同一协议下各家厂商模型毫无交集，曾经正是它把 ChatGPT 的模型列表套到了
+  // DeepSeek / 通义 / Gemini 平台上。
+  // 需要默认清单的平台（订阅、免凭据通道）靠 refreshModels 兜底拿——那是拉取失败时
+  // 才发生的事，不是创建时偷偷塞进去。
   if (t.auth_type || t.chat_path || t.models_path) advancedOpen.value = ['advanced']
 }
 

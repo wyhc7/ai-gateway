@@ -75,7 +75,7 @@ chatgpt2api 不要求走 device-code 登录，**直接粘贴已有的 ChatGPT ac
 - protocol: `openai-chat`（OpenAI 兼容，ai-gateway 默认协议）
 - base_url: `http://127.0.0.1:3000/v1`（chatgpt2api 改端口时同步改这里）
 - api_key: chatgpt2api 的 `auth-key`（请求头 `Authorization: Bearer <auth-key>`）
-- 模型：默认预填 gpt-5 / gpt-5-mini / gpt-image-2 等，也可从 /v1/models 拉取
+- 模型：不预填，点「拉取列表」从 /v1/models 取，或按 chatgpt2api 暴露的型号手动填（常见 gpt-5 / gpt-5-mini / gpt-image-2）
 
 或 API 创建：
 ```bash

@@ -55,7 +55,7 @@ sudo systemctl daemon-reload && sudo systemctl restart <gateway-service>
 # ② 建 codex 平台（管理端 API，X-Admin-Key 头）
 curl -X POST <BASE>/api/providers -H "X-Admin-Key: <ADMIN>" -H "Content-Type: application/json" \
   -d '{"name":"Codex 订阅","base_url":"https://chatgpt.com/backend-api/codex","protocol":"codex-oauth"}'
-#     → 响应里记下 provider id；模型列表自动预填，无需手填
+#     → 响应里记下 provider id；模型不预填，建完点「刷新」（拉取失败时网关回退内置默认列表）
 
 # ③ 申请设备码（网关发起，走代理到 auth.openai.com）
 curl -X POST <BASE>/api/oauth/codex/device/start -H "X-Admin-Key: <ADMIN>"

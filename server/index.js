@@ -917,13 +917,14 @@ function seedZenProvider() {
     base_url: tpl.base_url,
     protocol: tpl.protocol,
     enabled: true,
-    models: (tpl.default_models || []).map((id) => ({ id, owned_by: tpl.name })),
+    // 模型不预填：种子只是把通道开出来，模型清单由用户点「刷新」按实际上游结果填
+    models: [],
     keys: [],
     extra_headers: {},
     created_at: Date.now()
   })
   persistImmediate()
-  console.log(`[gateway] ZEN_AUTOSEED：已创建「${tpl.name}」（免凭据通道，无需配置 Key）`)
+  console.log(`[gateway] ZEN_AUTOSEED：已创建「${tpl.name}」（免凭据通道，无需配置 Key；点「刷新」拉取模型）`)
 }
 
 seedZenProvider()
