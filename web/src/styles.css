@@ -432,6 +432,18 @@ body::before {
 
 .nav-icon { width: 16px; height: 16px; color: var(--ink-4); flex-shrink: 0; }
 
+/* 侧边栏「有新版本」提示点：绝对定位，收起/展开两种宽度下位置都成立 */
+.nav-dot {
+  position: absolute;
+  right: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
 .app-sidebar .sidebar-footer {
   padding: 14px 16px;
   border-top: 1px solid var(--rule);
