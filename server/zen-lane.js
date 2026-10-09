@@ -61,6 +61,12 @@ export const ZEN_MAX_PROBES = 8
 export const ZEN_PROBE_CONCURRENCY = 3
 export const ZEN_PROBE_TIMEOUT_MS = 12000
 
+// 一轮里没测出结论的型号（429 限流 / 5xx / 超时），隔多久在同一轮内补测一次。
+// 实测 ling-3.1-flash-free 是按型号限流的：冷启 200，2 秒后再打就 429，1.5 秒的
+// 补测间隔照样吃 429。4 秒能跨过这个窗口——被限流挡下的型号当场收编，用户点一次
+// 「刷新」就拿得到完整清单，而不是缺几个留到下次。
+export const ZEN_PROBE_RETRY_DELAY_MS = 4000
+
 // 4xx 是「这个型号用公共凭据就是不行」：付费档 401、地区限制 403、上游未开放 400，
 // 记下来别反复重试。429 与 5xx / 超时 / 网络错误属于上游抖动，不能当除名依据——
 // 实测 jev-1.13-free 长期 500，一次抖动就除名会让一个好型号消失很久。

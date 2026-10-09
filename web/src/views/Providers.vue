@@ -632,8 +632,12 @@ async function saveProvider() {
   if (!providerForm.value.name || !providerForm.value.base_url) {
     return ElMessage.warning('平台名称和模型 API 地址为必填项')
   }
-  // 订阅类平台没有静态 API Token 可言，凭据要创建后走 OAuth 授权或导入，此处不拦
-  if (!editingProvider.value && !providerForm.value.api_key && !isOAuthProtocol(providerForm.value.protocol)) {
+  // 订阅类平台没有静态 API Token 可言，凭据要创建后走 OAuth 授权或导入；
+  // 免凭据通道（OpenCode Zen）凭据是固定的公共放行，表单里压根没有这个输入框。
+  // 两者都得放行——否则表单把字段藏了、提交时却要求填，用户对着空白表单无从下手。
+  if (!editingProvider.value && !providerForm.value.api_key
+    && !isOAuthProtocol(providerForm.value.protocol)
+    && !isCredentiallessProtocol(providerForm.value.protocol)) {
     return ElMessage.warning('请输入 API Token')
   }
   let extra = {}
@@ -688,7 +692,10 @@ function parseExtraFromForm() {
 async function doPreview() {
   const { base_url, api_key } = providerForm.value
   if (!base_url) return ElMessage.warning('请先填写模型 API 地址')
-  if (!editingProvider.value && !api_key) return ElMessage.warning('请先填写 API Token')
+  // 免凭据通道没有 Token 可填，拦了它就永远拉不了列表——和上面的保存同一个洞
+  if (!editingProvider.value && !api_key && !isCredentiallessProtocol(providerForm.value.protocol)) {
+    return ElMessage.warning('请先填写 API Token')
+  }
   const payload = {
     base_url,
     protocol: providerForm.value.protocol,

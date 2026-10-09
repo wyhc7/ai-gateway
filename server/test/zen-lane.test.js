@@ -10,7 +10,7 @@ const dataDir = mkdtempSync(join(tmpdir(), 'ai-gateway-zen-test-'))
 process.env.DATA_DIR = dataDir
 
 const { state } = await import('../store.js')
-const { handleChat, refreshModels } = await import('../proxy.js')
+const { handleChat, refreshModels, previewModels } = await import('../proxy.js')
 const {
   shapeZenBody,
   zenToolNameMap,
@@ -26,12 +26,21 @@ const {
 } = await import('../zen-lane.js')
 
 after(() => {
+  for (const s of openServers) {
+    // 先掐掉存量连接，否则 keep-alive 还会把进程再拖一会儿
+    s.closeAllConnections?.()
+    s.close()
+  }
   rmSync(dataDir, { recursive: true, force: true })
 })
 
 // 上游要求的会话 ID 格式，任何一条不满足都会被判 403
 const SESSION_RE = /^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$/
 const QUARTET = ['bash', 'glob', 'grep', 'read']
+
+// 用例中途断言失败会跳过末尾那句 server.close()，端口一直监听着，node --test 就
+// 永远不退出——表现为「测试卡死、一点输出都没有」，极难排查。统一登记、退出时兜底关。
+const openServers = []
 
 function startUpstream(handler) {
   const server = http.createServer(async (req, res) => {
@@ -43,6 +52,7 @@ function startUpstream(handler) {
       if (!res.writableEnded) res.writeHead(500).end(String(err))
     }
   })
+  openServers.push(server)
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }))
   })
@@ -356,7 +366,8 @@ async function withProvider(provider, run) {
   }
 }
 
-// 上游 /models 与 /chat/completions 的最小仿真：probeStatus 决定每个型号探测时回什么
+// 上游 /models 与 /chat/completions 的最小仿真：probeStatus 决定每个型号探测时回什么。
+// 值可以是数字，也可以是 (第几次探测) => 状态码 的函数，用来模拟「首轮被限流、补测放行」。
 function startZenUpstream(modelIds, probeStatus) {
   const probed = []
   return startUpstream(({ req, res, body }) => {
@@ -365,8 +376,10 @@ function startZenUpstream(modelIds, probeStatus) {
       res.end(JSON.stringify({ data: modelIds.map((id) => ({ id, object: 'model', owned_by: 'opencode' })) }))
       return
     }
+    const attempt = probed.filter((x) => x === body.model).length
     probed.push(body.model)
-    const status = probeStatus[body.model] ?? 403
+    const spec = probeStatus[body.model]
+    const status = typeof spec === 'function' ? spec(attempt) : (spec ?? 403)
     res.writeHead(status, { 'Content-Type': status === 200 ? 'text/event-stream' : 'application/json' })
     res.end(status === 200 ? 'data: [DONE]\n\n' : JSON.stringify({ error: { message: 'FreeTierError' } }))
   }).then((r) => ({ ...r, probed }))
@@ -412,7 +425,7 @@ test('刷新时实测收编上游新上的免费型号，被判死的记入缓�
   server.close()
 })
 
-test('上游 5xx / 超时不算除名依据，下次刷新重试', async () => {
+test('上游 5xx / 超时不算除名依据，同一轮补测一次、下次刷新还会重试', async () => {
   const { server, port, probed } = await startZenUpstream(
     ['flaky-free'],
     { 'flaky-free': 500 }
@@ -421,13 +434,55 @@ test('上游 5xx / 超时不算除名依据，下次刷新重试', async () => {
 
   await withProvider(provider, async () => {
     await refreshModels(provider.id)
-    assert.equal(probed.length, 1)
+    // 本轮探测 + 隔一拍补测各一次。上游按并发限流，被挡下的当场补一枪，
+    // 用户点一次「刷新」才拿得到完整清单，而不是缺几个留到下次
+    assert.equal(probed.length, 2, '首轮一次 + 本轮补测一次')
     // 抖动不记档，否则上游一次 500 就能让一个好型号长期消失
     assert.equal(provider.zen_probe_cache['flaky-free'], undefined)
 
+    const before = probed.length
     await refreshModels(provider.id)
-    assert.equal(probed.length, 2, '下次刷新重试')
+    assert.ok(probed.length > before, '补测也没测出结论的，下次刷新仍然会重试')
   })
+
+  server.close()
+})
+
+test('同一轮补测能当场收编被限流挡下的型号，不用让用户再点一次刷新', async () => {
+  const { server, port, probed } = await startZenUpstream(
+    ['burst-free'],
+    // 首轮吃 429（上游按并发限流），补测放行——这正是「第一次刷新拿不全」的成因
+    { 'burst-free': (attempt) => (attempt === 0 ? 429 : 200) }
+  )
+  const provider = makeZenProvider(port)
+
+  await withProvider(provider, async () => {
+    const r = await refreshModels(provider.id)
+    assert.equal(r.ok, true)
+    assert.equal(probed.length, 2, '首轮一次 + 补测一次')
+    assert.ok(r.discovered.includes('burst-free'), '被限流挡下的型号补测后应当场收编')
+    assert.ok(provider.models.map((m) => m.id).includes('burst-free'))
+  })
+
+  server.close()
+})
+
+test('拉取列表与刷新同源：同样实测收编，不会比刷新少几个', async () => {
+  const { server, port } = await startZenUpstream(
+    ['nemotron-3-ultra-free', 'exo-free'],
+    { 'exo-free': 200 }
+  )
+  // 走「添加平台」对话框那条路：只有地址，没有已存在的平台对象
+  const r = await previewModels({
+    base_url: makeZenProvider(port).base_url,
+    protocol: 'zen-free',
+    api_key: '',
+    extra_headers: {}
+  })
+  assert.equal(r.ok, true, JSON.stringify(r))
+  const ids = r.models.map((m) => m.id)
+  assert.ok(ids.includes('nemotron-3-ultra-free'), '白名单内的要有')
+  assert.ok(ids.includes('exo-free'), '实测通过的也要有——只留白名单的话这里会少一个')
 
   server.close()
 })
