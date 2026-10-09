@@ -4,7 +4,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import crypto from 'node:crypto'
 import { state, persist, persistImmediate, getProvider, genId, todayKey, getAdminKey } from './store.js'
-import { handleChat, handleImages, handleModels, refreshModels, previewModels, defaultModelsFor, DEFAULT_PROTOCOL } from './proxy.js'
+import { handleChat, handleImages, handleModels, refreshModels, previewModels, DEFAULT_PROTOCOL } from './proxy.js'
 import {
   createApiKey,
   updateApiKey,
@@ -373,11 +373,9 @@ app.post('/api/providers', (req, res) => {
     ...pickCallPlan(req.body),
     created_at: Date.now()
   }
-  // 订阅类平台（Grok）常没有 /models：创建时若未填模型，预填内置默认列表，避免空模型不可用
-  if (provider.models.length === 0) {
-    const def = defaultModelsFor(provider.protocol)
-    if (def && def.length) provider.models = def
-  }
+  // 这里刻意不按 defaultModelsFor 补模型：订阅与免费通道的模型清单要么随上游版本变，
+  // 要么得由用户自己定。建平台时偷偷塞一份，等于把他决定不预填的又填了回去。
+  // 空着就空着——界面会提示点「刷新」，到那时 defaultModelsFor 才作为兜底生效。
   if (api_key) {
     provider.keys.push({
       id: genId(),
