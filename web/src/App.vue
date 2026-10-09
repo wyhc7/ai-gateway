@@ -1,11 +1,12 @@
 <template>
   <el-config-provider :locale="zhCn">
     <div class="app-layout">
-      <div v-if="isMobile && drawerOpen" class="mobile-mask" @click="drawerOpen = false"></div>
+      <!-- 移动端抽屉遮罩：纯鼠标便利，键盘用户走旁边的关闭按钮与 Esc，故对辅助技术隐藏 -->
+      <div v-if="isMobile && drawerOpen" class="mobile-mask" role="presentation" aria-hidden="true" @click="drawerOpen = false"></div>
 
       <aside class="app-sidebar" :class="{ collapsed, mobile: isMobile, open: isMobile && drawerOpen }">
         <div class="brand">
-          <span class="logo" @click="toggleBrand">AI</span>
+          <button type="button" class="logo" :title="brandActionLabel" :aria-label="brandActionLabel" @click="toggleBrand">AI</button>
           <span class="brand-text">
             <span class="brand-name">AI 中转站</span>
             <span class="brand-sub">Gateway Console</span>
@@ -118,7 +119,7 @@
 </template>
 
 <script setup>
-import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import { useViewport } from './composables/useViewport.js'
@@ -166,11 +167,13 @@ function confirmLogin() {
 onMounted(() => {
   if (!getAdminKey()) showLogin.value = true
   window.addEventListener('gateway-unauthorized', onUnauthorized)
+  window.addEventListener('keydown', onKeydown)
   checkForUpdate()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('gateway-unauthorized', onUnauthorized)
+  window.removeEventListener('keydown', onKeydown)
 })
 
 watch(collapsed, (v) => {
@@ -181,12 +184,23 @@ watch(() => route.fullPath, () => {
   if (isMobile.value) drawerOpen.value = false
 })
 
+// 品牌标记和它旁边的收起按钮做的是同一件事，所以用同一套措辞，
+// 避免同一个动作在无障碍树里出现两种说法。
+const brandActionLabel = computed(() => {
+  if (isMobile.value) return drawerOpen.value ? '关闭菜单' : '打开菜单'
+  return collapsed.value ? '展开侧边栏' : '收起侧边栏'
+})
+
 function toggleBrand() {
   if (isMobile.value) {
     drawerOpen.value = !drawerOpen.value
   } else {
     collapsed.value = !collapsed.value
   }
+}
+
+function onKeydown(e) {
+  if (e.key === 'Escape' && isMobile.value && drawerOpen.value) drawerOpen.value = false
 }
 
 function onNav() {
