@@ -18,6 +18,7 @@ import {
   filterModelsForAuth
 } from './api-keys.js'
 import { TEMPLATES } from './templates.js'
+import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
 import { addLog, getLogs, initLogger } from './logger.js'
 import { checkUpdate, applyUpdate } from './update.js'
 import {
@@ -334,6 +335,13 @@ function normalizeModels(models, name) {
 
 app.get('/api/templates', (req, res) => {
   res.json({ templates: TEMPLATES })
+})
+
+// 订阅方案与模板分开返回：模板只服务「添加平台」，订阅有自己的入口。
+// 两者混在 /api/templates 里，前端就得再按 group 过滤一遍，谁忘了过滤订阅平台
+// 就又从「添加平台」里冒出来了。
+app.get('/api/subscriptions/plans', (req, res) => {
+  res.json({ plans: SUBSCRIPTION_PLANS })
 })
 
 app.get('/api/providers', (req, res) => {
