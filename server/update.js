@@ -301,6 +301,19 @@ function writeDeployed(revision) {
   }
 }
 
+// 两条 revision 是不是同一次提交。
+// git 的 sha 有短有长：rev-parse 给完整 40 位，rev-parse --short 给 7 位起。
+// 用字符串 !== 去比，同一次提交会被当成两次——已经跑完的部署被永久误报成
+// 「上次没跑完，现在跑的还是旧产物」，而界面给的按钮是「补做部署」，一次根本
+// 不需要的重建。短 sha 按定义就是长 sha 的前缀，比前缀即可；7 位是 git 的默认
+// 短位数下限，再短不足以确认身份，宁可判成不同。
+export function sameRevision(a, b) {
+  if (!a || !b) return false
+  if (a === b) return true
+  const [long, short] = a.length >= b.length ? [a, b] : [b, a]
+  return short.length >= 7 && long.startsWith(short)
+}
+
 let cache = { at: 0, value: null }
 
 /** 测试与「立即更新」后复用：丢掉缓存，强制下次重新比对。 */
@@ -379,7 +392,7 @@ async function computeCheck() {
   // 上一次部署没跑完（合并成功、构建失败）时，HEAD 已经等于上游，光看 behind
   // 会显示「已是最新」而实际跑的是旧产物，用户再也点不动更新。
   const deployedRevision = readDeployed()?.revision || null
-  const staleDeploy = Boolean(deployedRevision && deployedRevision !== local.revision)
+  const staleDeploy = Boolean(deployedRevision && !sameRevision(deployedRevision, local.revision))
   const hasUpdate = behind > 0 || staleDeploy
 
   // 变更面：正常情况下是「本地 HEAD → 上游」；补做部署时是「上次部署成功的提交 → HEAD」。
@@ -541,7 +554,7 @@ export async function applyUpdate() {
 
   // 上一次部署没跑完：代码已经合并进来了，但依赖/构建那几步失败了。
   // 这时没有东西可以合并，该做的是把没跑完的步骤补上，而不是报「已是最新」。
-  const resumeDeploy = !behind && Boolean(deployedRevision && deployedRevision !== before)
+  const resumeDeploy = !behind && Boolean(deployedRevision && !sameRevision(deployedRevision, before))
 
   if (!behind && !resumeDeploy) {
     done('比对版本', '已是最新，无需更新')
