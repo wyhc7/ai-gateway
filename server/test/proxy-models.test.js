@@ -1,11 +1,6 @@
-// 协议级模型兜底测试
+// Grok 订阅账号模型兜底测试
 // 1) defaultModelsFor 按协议返回内置默认模型
 // 2) refreshModels 在上游 /models 拉取失败时退回默认列表，保证平台立即可用
-//
-// 订阅接入方案（subscription-plans.js）已整体下线，TEMPLATES 里也不再有
-// grok-oauth / codex-oauth 条目，所以这两个协议现在没有兜底、返回 null。
-// OpenCode Zen 免费通道（zen-free）也已移除：它的准入判定落在出口 IP 上，
-// 数据中心 ASN 一律 403，服务器部署下这条通道无法工作。
 import { test, describe, before, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
@@ -32,11 +27,19 @@ beforeEach(() => { globalThis.fetch = realFetch })
 afterEach(() => { globalThis.fetch = realFetch })
 
 describe('defaultModelsFor', () => {
-  test('订阅接入方案下线后，grok/codex 不再有兜底列表', () => {
-    // 这是预期而不是漏改：方案重新配好之前，订阅平台拉不到模型就该老实报错，
-    // 而不是塞一份陈旧的、可能与当前订阅号可用模型对不上的名单。
-    assert.equal(defaultModelsFor('grok-oauth'), null)
-    assert.equal(defaultModelsFor('codex-oauth'), null)
+  test('grok-oauth 协议返回非空默认模型列表，且每项带 id/owned_by', () => {
+    const models = defaultModelsFor('grok-oauth')
+    assert.ok(Array.isArray(models) && models.length > 0)
+    assert.ok(models.every((m) => m.id && m.owned_by))
+  })
+
+  test('回归：cli-chat-proxy 订阅通道兜底必须是 grok-4.6（订阅号唯一可用模型）', () => {
+    // cli-chat-proxy 订阅通道实测只有 grok-4.6，请求其他模型一律 402。
+    // 若兜底列表写成 grok-4/3/2 系列，「刷新模型失败 → 兜底覆盖」会把
+    // 手工设置的模型冲成一批必然失败的模型名，表现为平台全部请求报
+    // 「未找到提供模型 grok-4.6 的平台」。
+    const grok = defaultModelsFor('grok-oauth')
+    assert.deepEqual(grok.map((m) => m.id), ['grok-4.6'])
   })
 
   test('openai-chat 等无默认模型的协议返回 null', () => {
@@ -59,13 +62,16 @@ describe('defaultModelsFor', () => {
     assert.equal(chatgptWeb.protocol, 'openai-chat')
 
     assert.equal(defaultModelsFor('openai-chat'), null)
+
+    // 反过来，确实没有 /models 的订阅协议必须继续兜底
+    assert.ok(defaultModelsFor('grok-oauth')?.length > 0)
+    assert.ok(defaultModelsFor('codex-oauth')?.length > 0)
   })
 })
 
 describe('refreshModels 兜底', () => {
-  test('订阅协议失败时不兜底：方案下线后没有可回退的名单，老实报错', async () => {
-    // 兜底名单随订阅接入方案一起删掉了。此时若仍假装「拉取成功」，
-    // 用户会以为模型是新的，实际一个都调不通，排查方向全错。
+  test('上游 /models 网络失败时退回内置默认列表并返回 ok', async () => {
+    // 上游统一抛网络错误（模拟 cli-chat-proxy 不可达 / 无 /models）
     globalThis.fetch = async () => { throw new TypeError('fetch failed') }
 
     const p = {
@@ -92,8 +98,10 @@ describe('refreshModels 兜底', () => {
     state.providers.push(p)
     try {
       const r = await refreshModels(p.id)
-      assert.equal(r.ok, false, '没有兜底名单就该报错，不能返回一个空的成功')
-      assert.ok(!p.models.length, '不该留下任何占位模型')
+      assert.equal(r.ok, true)
+      assert.equal(r.fallback, true)
+      assert.ok(Array.isArray(p.models) && p.models.length > 0)
+      assert.equal(p.models_source, 'default')
     } finally {
       state.providers.length = 0
     }

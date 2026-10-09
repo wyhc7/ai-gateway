@@ -8,6 +8,7 @@ import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexA
 import { TEMPLATES } from './templates.js'
 import { isWorkbuddyProtocol, workbuddyHeaders, workbuddyChatBaseFor, shapeWorkbuddyBody, workbuddyRealmFor } from './workbuddy-lane.js'
 import { fetchWorkbuddyModelRates, fetchWorkbuddyEnterpriseModels, mergeWorkbuddyCatalogs } from './workbuddy-catalog.js'
+import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
 
 // 允许「协议级默认模型」兜底的协议白名单。
 //
@@ -33,19 +34,19 @@ const PROTOCOLS_WITHOUT_MODELS_ENDPOINT = new Set(['grok-oauth', 'codex-oauth', 
 const PROTOCOLS_WITH_CURATED_MODELS = new Set()
 
 // 订阅类上游（Grok 的 cli-chat-proxy、Codex 的 chatgpt.com/backend-api）没有干净的
-// GET /models，两者都靠下面这份内置列表兜底。
+// GET /models，两者在拉取不可用时回退到方案内置的默认模型列表，保证平台建完即可用。
 //
-// 订阅接入方案已经整体下线，TEMPLATES 里不再有 grok-oauth / codex-oauth 条目，
-// 因此这两个协议现在查不到兜底、返回 null——这是预期，不是漏改。
-// 协议自带、且与模板无关的模型清单。
+// 订阅方案独立在 subscription-plans.js，所以兜底要同时查 TEMPLATES 与 SUBSCRIPTION_PLANS：
+// 只查模板的话，grok-oauth / codex-oauth 查不到兜底，订阅平台刚建好就是废的。
 //
-// 这里曾经挂着 WORKBUDDY_CURATED_MODELS（写死的 18 个模型），现已删除：
+// WorkBuddy 不走这条兜底路径：它的模型清单只有一个来源——上游接口
+// （refreshWorkbuddyCatalog）。取不到就是取不到，界面如实显示。
+// 这里曾经挂着 WORKBUDDY_CURATED_MODELS（写死的 18 个模型），已删除：
 // 那份清单既漏掉了上游新增的型号，又留着上游已下线的，拿它兜底等于用
-// 过期数据覆盖上游的真实数据。WorkBuddy 的模型清单现在只有一个来源——
-// 上游接口（refreshWorkbuddyCatalog）。取不到就是取不到，界面如实显示。
+// 过期数据覆盖上游的真实数据。
 export function defaultModelsFor(protocol) {
   if (!PROTOCOLS_WITHOUT_MODELS_ENDPOINT.has(protocol) && !PROTOCOLS_WITH_CURATED_MODELS.has(protocol)) return null
-  for (const t of TEMPLATES) {
+  for (const t of [...TEMPLATES, ...SUBSCRIPTION_PLANS]) {
     if (t.protocol === protocol && Array.isArray(t.default_models) && t.default_models.length) {
       return t.default_models.map((id) => ({ id, owned_by: t.name }))
     }

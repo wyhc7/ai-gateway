@@ -11,8 +11,6 @@
           <svg style="margin-right: 5px" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
           导出
         </el-button>
-        <!-- 入口先留着：订阅接入方案（订阅预设）已整体下线，等重新配好方案再接回实现。
-             目前点它只会明确告知「还没有可用方案」，不弹一张空表单。 -->
         <el-button plain @click="openSubscriptionDialog">
           <svg style="margin-right: 5px" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><line x1="19" y1="8" x2="19" y2="14" /><line x1="22" y1="11" x2="16" y2="11" /></svg>
           添加订阅
@@ -260,7 +258,7 @@
         <el-form-item label="模型 API 地址" required>
           <el-input v-model="providerForm.base_url" placeholder="https://api.openai.com/v1（填写到版本前缀，不含 /chat/completions 等接口路径）" />
         </el-form-item>
-        <!-- 订阅接入方案已下线，当前没有任何入口能创建订阅平台。这里仍保留该分支：
+        <!-- 订阅平台不再能从这里创建（见「添加订阅」）。这里仍保留该分支：
              编辑已有的订阅平台时要挡住下面那个 API Token 输入框——
              订阅凭据不在表单里填，走授权或导入。 -->
         <el-form-item v-if="isOAuthProtocol(providerForm.protocol)" label="订阅账号">
@@ -1047,6 +1045,7 @@ const subForm = ref(emptySubForm())
 const currentPlan = computed(() => subscriptionPlans.value.find((p) => p.id === subForm.value.plan_id) || null)
 const currentPlanHint = computed(() => currentPlan.value?.hint || '')
 const subFormPlaceholder = computed(() => currentPlan.value?.base_url || '接入地址会随所选方案自动填入')
+
 
 async function openSubscriptionDialog() {
   subForm.value = emptySubForm()
