@@ -17,7 +17,17 @@ const execFileAsync = promisify(execFile)
 // 先钉死环境：这三条必须在 import update.js 之前设好，
 // 尤其 UPDATE_NO_RESTART —— 测试绝不允许真的去重启服务器上的服务。
 const SANDBOX = mkdtempSync(join(tmpdir(), 'gw-update-sandbox-'))
-process.env.UPDATE_REPO_DIR = SANDBOX
+
+// deployedRecordPath() 优先读 process.env.DATA_DIR，其次才回落到 repoDir()/data。
+// 所以切仓库目录时两者必须成对切：只改 UPDATE_REPO_DIR 的话，DATA_DIR 仍跟着外部
+// 环境走，上一个用例 merge 成功写下的部署记录会被下一个用例读到，up_to_date 与
+// readDeployed 一起崩。本地没设 DATA_DIR 才侥幸全绿，容器/CI 里一设就必炸。
+// 让 DATA_DIR 恒等于 repoDir()/data，两个口径就再也分不开了。
+function useRepo(dir) {
+  process.env.UPDATE_REPO_DIR = dir
+  process.env.DATA_DIR = join(dir, 'data')
+}
+useRepo(SANDBOX)
 process.env.UPDATE_BRANCH = 'main'
 process.env.UPDATE_SERVICE = 'gw-update-test'
 process.env.UPDATE_NO_RESTART = '1'
@@ -222,7 +232,7 @@ describe('不是 git 仓库的部署：给出可操作的原因，而不是抛�
   test('目录里没有 .git 时明确回 not-a-git-repo', async () => {
     const plain = join(SANDBOX, 'plain-dir')
     mkdirSync(plain, { recursive: true })
-    process.env.UPDATE_REPO_DIR = plain
+    useRepo(plain)
     up.clearUpdateCache()
     try {
       const r = await up.checkUpdate({ force: true })
@@ -230,7 +240,7 @@ describe('不是 git 仓库的部署：给出可操作的原因，而不是抛�
       assert.equal(r.reason, 'not-a-git-repo')
       assert.match(r.message, /complete-deploy\.sh/)
     } finally {
-      process.env.UPDATE_REPO_DIR = SANDBOX
+      useRepo(SANDBOX)
       up.clearUpdateCache()
     }
   })
@@ -246,7 +256,7 @@ describe('检出上游新提交：提交列表、文件清单、影响面一次�
     // 把本地退回到推送前的状态：origin 领先本地 1 个提交，工作区干净
     await gitAt(['reset', '--hard', '-q', f.first], f.work)
 
-    process.env.UPDATE_REPO_DIR = f.work
+    useRepo(f.work)
     up.clearUpdateCache()
     const r = await up.checkUpdate({ force: true })
 
@@ -272,7 +282,7 @@ describe('检出上游新提交：提交列表、文件清单、影响面一次�
     // 测试环境钉死了 UPDATE_NO_RESTART，用来断言「不会自动重启」这条通路
     assert.equal(r.restart.auto, false)
 
-    process.env.UPDATE_REPO_DIR = SANDBOX
+    useRepo(SANDBOX)
     up.clearUpdateCache()
   })
 
@@ -286,7 +296,7 @@ describe('检出上游新提交：提交列表、文件清单、影响面一次�
     await gitAt(['push', '-q', 'origin', 'main'], f.work)
     await gitAt(['reset', '--hard', '-q', f.first], f.work)
 
-    process.env.UPDATE_REPO_DIR = f.work
+    useRepo(f.work)
     up.clearUpdateCache()
     const r = await up.checkUpdate({ force: true })
 
@@ -295,13 +305,13 @@ describe('检出上游新提交：提交列表、文件清单、影响面一次�
     const keys = r.areas.map((a) => a.key).sort()
     assert.deepEqual(keys, ['server', 'web'])
 
-    process.env.UPDATE_REPO_DIR = SANDBOX
+    useRepo(SANDBOX)
     up.clearUpdateCache()
   })
 
   test('已是最新时 has_update 为 false 且没有提交列表', async () => {
     const f = await fixture('up-to-date')
-    process.env.UPDATE_REPO_DIR = f.work
+    useRepo(f.work)
     up.clearUpdateCache()
     const r = await up.checkUpdate({ force: true })
 
@@ -311,7 +321,7 @@ describe('检出上游新提交：提交列表、文件清单、影响面一次�
     assert.equal(r.can_update, false)
     assert.deepEqual(r.commits, [])
 
-    process.env.UPDATE_REPO_DIR = SANDBOX
+    useRepo(SANDBOX)
     up.clearUpdateCache()
   })
 })
@@ -327,7 +337,7 @@ describe('拒绝更新的情形：必须先说清楚为什么', () => {
     // 制造一个已跟踪文件的本地改动
     writeFileSync(join(f.work, 'README.md'), '# 本地改过了\n')
 
-    process.env.UPDATE_REPO_DIR = f.work
+    useRepo(f.work)
     up.clearUpdateCache()
     const r = await up.checkUpdate({ force: true })
 
@@ -336,7 +346,7 @@ describe('拒绝更新的情形：必须先说清楚为什么', () => {
     assert.match(r.blocked_reason, /README\.md/)
     assert.deepEqual(r.current.dirty, ['README.md'])
 
-    process.env.UPDATE_REPO_DIR = SANDBOX
+    useRepo(SANDBOX)
     up.clearUpdateCache()
   })
 
@@ -349,7 +359,7 @@ describe('拒绝更新的情形：必须先说清楚为什么', () => {
     await gitAt(['reset', '--hard', '-q', f.first], f.work)
     writeFileSync(join(f.work, 'README.md'), '# 本地改过了\n')
 
-    process.env.UPDATE_REPO_DIR = f.work
+    useRepo(f.work)
     up.clearUpdateCache()
     const r = await up.applyUpdate()
 
@@ -361,7 +371,7 @@ describe('拒绝更新的情形：必须先说清楚为什么', () => {
     // 中止了就不能把上游的文件带进来
     assert.equal(existsSync(join(f.work, 'server', 'new.js')), false)
 
-    process.env.UPDATE_REPO_DIR = SANDBOX
+    useRepo(SANDBOX)
     up.clearUpdateCache()
   })
 
@@ -375,7 +385,7 @@ describe('拒绝更新的情形：必须先说清楚为什么', () => {
     await gitAt(['push', '-q', 'origin', 'main'], f.work)
     await gitAt(['reset', '--hard', '-q', f.first], f.work)
 
-    process.env.UPDATE_REPO_DIR = f.work
+    useRepo(f.work)
     up.clearUpdateCache()
     const r = await up.applyUpdate()
 
@@ -392,7 +402,7 @@ describe('拒绝更新的情形：必须先说清楚为什么', () => {
     // 构建都没成功，就不该再去重启
     assert.ok(!names.includes('重启服务'))
 
-    process.env.UPDATE_REPO_DIR = SANDBOX
+    useRepo(SANDBOX)
     up.clearUpdateCache()
   })
 })
@@ -407,7 +417,7 @@ describe('applyUpdate：真的把部署目录快进到上游', () => {
     await gitAt(['reset', '--hard', '-q', f.first], f.work)
     assert.equal(existsSync(join(f.work, 'server', 'from-upstream.js')), false)
 
-    process.env.UPDATE_REPO_DIR = f.work
+    useRepo(f.work)
     up.clearUpdateCache()
     const r = await up.applyUpdate()
 
@@ -434,13 +444,13 @@ describe('applyUpdate：真的把部署目录快进到上游', () => {
     const head = await gitAt(['rev-parse', 'HEAD'], f.work)
     assert.equal(head, upstream)
 
-    process.env.UPDATE_REPO_DIR = SANDBOX
+    useRepo(SANDBOX)
     up.clearUpdateCache()
   })
 
   test('已是最新时不产生任何改动，也不去重启', async () => {
     const f = await fixture('apply-noop')
-    process.env.UPDATE_REPO_DIR = f.work
+    useRepo(f.work)
     up.clearUpdateCache()
     const r = await up.applyUpdate()
 
@@ -450,7 +460,7 @@ describe('applyUpdate：真的把部署目录快进到上游', () => {
     assert.deepEqual(r.steps.map((s) => s.name), ['拉取远程代码', '比对版本'])
     assert.equal(r.restart.mode, 'none')
 
-    process.env.UPDATE_REPO_DIR = SANDBOX
+    useRepo(SANDBOX)
     up.clearUpdateCache()
   })
 })
@@ -505,7 +515,7 @@ function writeDeployedRecord(work, revision) {
 describe('readDeployed：没有记录就不做任何断言', () => {
   test('文件不存在 / 内容损坏 / revision 不是字符串 → 一律返回 null', async () => {
     const f = await fixture('deployed-record')
-    process.env.UPDATE_REPO_DIR = f.work
+    useRepo(f.work)
 
     assert.equal(up.readDeployed(), null, '没有记录')
 
@@ -519,7 +529,7 @@ describe('readDeployed：没有记录就不做任何断言', () => {
     writeFileSync(up.deployedRecordPath(), JSON.stringify({ revision: 'abc123' }))
     assert.equal(up.readDeployed().revision, 'abc123')
 
-    process.env.UPDATE_REPO_DIR = SANDBOX
+    useRepo(SANDBOX)
   })
 })
 
@@ -533,7 +543,7 @@ describe('合并成功但部署没跑完：不能让界面显示「已是最新�
     // 代码已经合并进去了，但上一次成功部署还停在第一个提交
     writeDeployedRecord(f.work, f.first)
 
-    process.env.UPDATE_REPO_DIR = f.work
+    useRepo(f.work)
     up.clearUpdateCache()
     const r = await up.checkUpdate({ force: true })
 
@@ -550,7 +560,7 @@ describe('合并成功但部署没跑完：不能让界面显示「已是最新�
     assert.equal(r.commits.length, 1, '已合并未部署的提交也要能看到')
     assert.equal(r.commits[0].subject, 'feat: 改前端')
 
-    process.env.UPDATE_REPO_DIR = SANDBOX
+    useRepo(SANDBOX)
     up.clearUpdateCache()
   })
 
@@ -563,7 +573,7 @@ describe('合并成功但部署没跑完：不能让界面显示「已是最新�
     writeDeployedRecord(f.work, f.first)
 
     const headBefore = await gitAt(['rev-parse', 'HEAD'], f.work)
-    process.env.UPDATE_REPO_DIR = f.work
+    useRepo(f.work)
     up.clearUpdateCache()
 
     const r = await up.applyUpdate()
@@ -583,14 +593,14 @@ describe('合并成功但部署没跑完：不能让界面显示「已是最新�
     assert.equal(after.has_update, false)
     assert.equal(after.deployed_revision, headBefore)
 
-    process.env.UPDATE_REPO_DIR = SANDBOX
+    useRepo(SANDBOX)
     up.clearUpdateCache()
   })
 
   test('中止的更新不写部署记录——记录只代表「真的部署成功过」', async () => {
     const f = await fixture('stale-fail')
     writeFileSync(join(f.work, 'README.md'), '# 本地改动\n')
-    process.env.UPDATE_REPO_DIR = f.work
+    useRepo(f.work)
     up.clearUpdateCache()
 
     const r = await up.applyUpdate()
@@ -599,7 +609,7 @@ describe('合并成功但部署没跑完：不能让界面显示「已是最新�
     assert.match(r.steps[0].detail, /未提交的改动/)
     assert.equal(existsSync(join(f.work, 'data', 'deployed-revision.json')), false)
 
-    process.env.UPDATE_REPO_DIR = SANDBOX
+    useRepo(SANDBOX)
     up.clearUpdateCache()
   })
 })
@@ -627,7 +637,7 @@ describe('npm 的环境：脚本必须解析到和网关同一个 node', () => {
 
     const probeOut = join(f.work, 'probe-out.txt')
     process.env.PROBE_OUT = probeOut
-    process.env.UPDATE_REPO_DIR = f.work
+    useRepo(f.work)
     up.clearUpdateCache()
 
     // 削成 systemd 服务那种「PATH 上没有 node」的样子。Windows 上不能这么干——
@@ -651,7 +661,7 @@ describe('npm 的环境：脚本必须解析到和网关同一个 node', () => {
     } finally {
       process.env.PATH = savedPath
       delete process.env.PROBE_OUT
-      process.env.UPDATE_REPO_DIR = SANDBOX
+      useRepo(SANDBOX)
       up.clearUpdateCache()
     }
   })
