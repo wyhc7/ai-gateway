@@ -54,6 +54,16 @@
 
     <!-- 有更新：更新内容 + 更新按钮 -->
     <template v-else-if="result && result.has_update">
+      <!-- 合并成功但后续步骤失败：代码已经进来了，别再让人以为是「已是最新」 -->
+      <div v-if="result.stale_deploy" class="card notice notice-warn" style="margin-top: 18px">
+        <div class="notice-title">上次更新没有跑完</div>
+        <p class="notice-text">
+          代码已经合并到 <b class="mono">{{ result.current.short }}</b>，但后续步骤失败了，
+          现在跑的还是旧产物。<b>点下面的按钮把没做完的补上即可</b>，不会重复合并，
+          也不会丢掉已经合并的提交。
+        </p>
+      </div>
+
       <div class="card" style="margin-top: 18px">
         <div class="section-title">更新内容</div>
 
@@ -113,7 +123,7 @@
             :disabled="!result.can_update || updating"
             :loading="updating"
             @click="apply"
-          >{{ updating ? '更新中…' : '立即更新' }}</el-button>
+          >{{ applyLabel }}</el-button>
           <span v-if="!result.can_update && !updating" class="muted">当前状态不允许自动更新，原因见上。</span>
           <span v-else-if="result.restart && !result.restart.auto" class="muted">
             已禁用自动重启（UPDATE_NO_RESTART=1），更新后需手动重启。
@@ -133,10 +143,10 @@
         </li>
       </ul>
 
-      <p v-if="applyResult.ok === false" class="notice-text notice-block">{{ applyResult.message }}</p>
+      <pre v-if="applyResult.ok === false" class="notice-text notice-block err-detail">{{ applyResult.message }}</pre>
       <p v-if="applyResult.ok === false && applyResult.merged_to" class="notice-text">
         代码已合并到 <b class="mono">{{ applyResult.merged_to }}</b>，只是后续步骤没跑完。
-        修掉上面的问题后重新点「立即更新」即可继续，不用担心重复合并。
+        修掉上面的问题后重新点「{{ isResume ? '补做部署' : '立即更新' }}」即可继续，不用担心重复合并。
       </p>
 
       <p v-if="restarting" class="notice-text">
@@ -205,7 +215,15 @@ const applyTitle = computed(() => {
   if (restarting.value) return '更新中'
   if (applyResult.value.ok === false) return '更新失败'
   if (applyResult.value.up_to_date) return '无需更新'
-  return '更新完成'
+  return applyResult.value.resumed ? '部署完成' : '更新完成'
+})
+
+// 合并成功但没部署完时，这次要做的只是「补做后续步骤」，按钮上就该这么说
+const isResume = computed(() => Boolean(result.value?.stale_deploy && !result.value?.behind))
+
+const applyLabel = computed(() => {
+  if (updating.value) return '更新中…'
+  return isResume.value ? '补做部署' : '立即更新'
 })
 
 function fmtDate(iso) {
@@ -265,9 +283,11 @@ async function waitForRestart(prevUptime, maxMs = 120000) {
 async function apply() {
   try {
     await ElMessageBox.confirm(
-      `将从上游拉取 ${behindCount.value} 个提交的更新，并在完成后重启服务（期间管理界面会短暂中断）。确定继续？`,
-      '确认更新',
-      { confirmButtonText: '开始更新', cancelButtonText: '取消', type: 'warning' }
+      isResume.value
+        ? '上次更新在合并之后中断了。这次会把没跑完的步骤（安装依赖 / 构建）补上，完成后重启服务。确定继续？'
+        : `将从上游拉取 ${behindCount.value} 个提交的更新，并在完成后重启服务（期间管理界面会短暂中断）。确定继续？`,
+      isResume.value ? '确认补做部署' : '确认更新',
+      { confirmButtonText: isResume.value ? '开始补做' : '开始更新', cancelButtonText: '取消', type: 'warning' }
     )
   } catch {
     return
@@ -291,6 +311,10 @@ async function apply() {
 
   if (!applyResult.value.ok) {
     ElMessage.error('更新失败，详情见下方步骤')
+    // 失败可能发生在合并之后——那时代码已经进来了，状态变了，必须重新比对，
+    // 否则界面还停在「有新版本」，下次点「立即更新」会报「已是最新」，
+    // 而那个提交其实一直没部署上去。
+    await check(true)
     return
   }
   if (applyResult.value.up_to_date) {
@@ -567,8 +591,26 @@ onMounted(() => check(false))
   font-size: 11px;
   color: var(--ink-3);
   word-break: break-word;
+  /* 失败详情是多行的命令输出，压成一行就看不出所以然了 */
+  white-space: pre-wrap;
+  max-height: 220px;
+  overflow: auto;
 }
 .step-fail .step-detail { color: var(--accent); }
+
+/* 失败原因：npm / git 的原始输出，保留换行与缩进，过长可滚 */
+.err-detail {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border-radius: var(--r-xs);
+}
 
 /* 这里的过渡只做颜色渐入，关掉不丢任何信息 */
 @media (prefers-reduced-motion: reduce) {

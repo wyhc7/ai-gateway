@@ -9,8 +9,8 @@
 //    把服务器本地改动冲掉的能力；工作区有未提交改动时直接拒绝，交回给人决定。
 
 import { execFile } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
@@ -178,7 +178,13 @@ async function runNpm(args) {
     timeout: NPM_TIMEOUT_MS,
     maxBuffer: 16 * 1024 * 1024,
     windowsHide: true,
-    shell
+    shell,
+    // 把 running node 的目录顶到 PATH 最前面。npm 自己是用 process.execPath 跑的，
+    // 但它拉起的脚本（vite 等）是靠 shebang `#!/usr/bin/env node` 找 node 的，
+    // 而 systemd 服务的 PATH 里通常没有 nvm 的 bin 目录——实测会落到系统自带的
+    // node v12 上，vite 的顶层 await 直接语法错误。既然用哪个 node 跑 npm，
+    // 就必须让脚本也解析到同一个 node。
+    env: { ...process.env, PATH: [dirname(process.execPath), process.env.PATH].filter(Boolean).join(delimiter) }
   })
   return `${stdout || ''}${stderr || ''}`.trim()
 }
@@ -260,6 +266,41 @@ export async function readLocal() {
 // 检查更新
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 上次成功部署到哪个提交
+//
+// 只靠「HEAD 是否等于上游」判断要不要更新是不够的：合并成功、构建失败时 HEAD 已经
+// 等于上游了，界面会显示「已是最新」，而实际跑的仍是旧产物——那样就再也点不动更新，
+// 只能上服务器手工修。所以额外记一笔「上次真正部署成功的是哪个提交」。
+// 这份记录只在一次完整成功的部署之后写入；没有记录就不做任何断言，不误报。
+// ---------------------------------------------------------------------------
+
+export function deployedRecordPath() {
+  const dir = process.env.DATA_DIR || join(repoDir(), 'data')
+  return join(dir, 'deployed-revision.json')
+}
+
+export function readDeployed() {
+  try {
+    const parsed = JSON.parse(readFileSync(deployedRecordPath(), 'utf8'))
+    return typeof parsed?.revision === 'string' && parsed.revision ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function writeDeployed(revision) {
+  try {
+    const file = deployedRecordPath()
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, JSON.stringify({ revision, at: new Date().toISOString() }, null, 2))
+    return true
+  } catch {
+    // 记录写不进去不该让一次已经成功的部署变成失败，只是下次少了这层保护
+    return false
+  }
+}
+
 let cache = { at: 0, value: null }
 
 /** 测试与「立即更新」后复用：丢掉缓存，强制下次重新比对。 */
@@ -324,7 +365,7 @@ async function computeCheck() {
       ...base,
       ok: false,
       reason: 'fetch-failed',
-      message: `拉取远程失败：${firstLine(err.message)}`
+      message: `拉取远程失败：${commandError(err)}`
     }
   }
 
@@ -335,12 +376,34 @@ async function computeCheck() {
   const remoteMeta = (await git(['log', '-1', '--format=%cI%x1f%an%x1f%s', remoteSha])).trim()
   const [remoteDate = '', remoteAuthor = '', remoteSubject = ''] = remoteMeta.split('\x1f')
 
-  // 最新的排在前面，界面上先看到刚加的
-  const commits = parseCommitLog(
-    await git(['log', '-z', `--max-count=${MAX_COMMITS}`, '--format=%H%x1f%h%x1f%cI%x1f%an%x1f%s', 'HEAD..FETCH_HEAD'])
-  ).reverse()
+  // 上一次部署没跑完（合并成功、构建失败）时，HEAD 已经等于上游，光看 behind
+  // 会显示「已是最新」而实际跑的是旧产物，用户再也点不动更新。
+  const deployedRevision = readDeployed()?.revision || null
+  const staleDeploy = Boolean(deployedRevision && deployedRevision !== local.revision)
+  const hasUpdate = behind > 0 || staleDeploy
 
-  const paths = parseChangedFiles(await git(['diff', '--name-only', '-z', 'HEAD', remoteSha]))
+  // 变更面：正常情况下是「本地 HEAD → 上游」；补做部署时是「上次部署成功的提交 → HEAD」。
+  // 后者不能漏——这时 diff(HEAD, 上游) 是空的，界面会显示「无需任何步骤」，
+  // 而实际执行时却要重新构建。两处必须同源。
+  const resuming = staleDeploy && behind === 0
+  const diffFrom = resuming ? deployedRevision : 'HEAD'
+  const diffTo = resuming ? 'HEAD' : remoteSha
+
+  // 最新的排在前面，界面上先看到刚加的
+  let commits = []
+  let paths = []
+  try {
+    commits = parseCommitLog(
+      await git(['log', '-z', `--max-count=${MAX_COMMITS}`, '--format=%H%x1f%h%x1f%cI%x1f%an%x1f%s', `${diffFrom}..${diffTo}`])
+    ).reverse()
+    paths = parseChangedFiles(await git(['diff', '--name-only', '-z', diffFrom, diffTo]))
+  } catch {
+    // 记录里的提交已经不在仓库里了（例如被强推覆盖），退回按「本地 → 上游」比对
+    commits = parseCommitLog(
+      await git(['log', '-z', `--max-count=${MAX_COMMITS}`, '--format=%H%x1f%h%x1f%cI%x1f%an%x1f%s', 'HEAD..FETCH_HEAD'])
+    ).reverse()
+    paths = parseChangedFiles(await git(['diff', '--name-only', '-z', 'HEAD', remoteSha]))
+  }
 
   const blockers = []
   if (local.dirty.length) {
@@ -359,7 +422,9 @@ async function computeCheck() {
       author: remoteAuthor,
       subject: remoteSubject
     },
-    has_update: behind > 0,
+    has_update: hasUpdate,
+    stale_deploy: staleDeploy,
+    deployed_revision: deployedRevision,
     behind,
     ahead,
     commits,
@@ -367,7 +432,7 @@ async function computeCheck() {
     files: { total: paths.length, paths: paths.slice(0, 200) },
     areas: summarizeAreas(paths),
     plan: planSteps(paths),
-    can_update: behind > 0 && blockers.length === 0,
+    can_update: hasUpdate && blockers.length === 0,
     blocked_reason: blockers.length ? blockers.join('；') : null,
     restart: { unit: serviceUnit(), auto: process.env.UPDATE_NO_RESTART !== '1' }
   }
@@ -375,6 +440,24 @@ async function computeCheck() {
 
 function firstLine(text) {
   return String(text || '').split('\n').find((l) => l.trim()) || '未知错误'
+}
+
+/**
+ * 把子进程的错误压成一段能诊断的文字。
+ *
+ * err.message 只有「Command failed: <命令行>」，真正说明原因的报错在 stderr 里。
+ * 只取 message 的第一行等于把「为什么失败」整段丢掉——实测就因此把一个 node
+ * 版本导致的 SyntaxError 藏了起来，只剩下一行看不出所以然的命令。取尾部是因为
+ * 构建类错误总在最后。
+ */
+export function commandError(err) {
+  const detail = [String(err?.stdout || ''), String(err?.stderr || '')]
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .join('\n')
+  const text = detail || firstLine(err?.message)
+  const MAX = 1500
+  return text.length > MAX ? `…${text.slice(-MAX)}` : text
 }
 
 // ---------------------------------------------------------------------------
@@ -401,7 +484,7 @@ async function triggerRestart() {
       ok: false,
       mode: 'manual',
       unit,
-      message: `自动重启失败（${firstLine(err.message)}）。代码已更新，请手动执行 systemctl restart ${unit} 让新版本生效。`
+      message: `自动重启失败（${commandError(err)}）。代码已更新，请手动执行 systemctl restart ${unit} 让新版本生效。`
     }
   }
 }
@@ -444,31 +527,60 @@ export async function applyUpdate() {
 
   const branch = updateBranch()
   const before = local.revision
+  const deployedRevision = readDeployed()?.revision || null
 
   try {
     await fetchRemote(branch)
     done('拉取远程代码', `origin/${branch}`)
   } catch (err) {
-    return fail('拉取远程代码', `拉取失败：${firstLine(err.message)}`)
+    return fail('拉取远程代码', `拉取失败：${commandError(err)}`)
   }
 
   const target = (await git(['rev-parse', 'FETCH_HEAD'])).trim()
   const behind = Number((await git(['rev-list', '--count', 'HEAD..FETCH_HEAD'])).trim()) || 0
-  if (!behind) {
+
+  // 上一次部署没跑完：代码已经合并进来了，但依赖/构建那几步失败了。
+  // 这时没有东西可以合并，该做的是把没跑完的步骤补上，而不是报「已是最新」。
+  const resumeDeploy = !behind && Boolean(deployedRevision && deployedRevision !== before)
+
+  if (!behind && !resumeDeploy) {
     done('比对版本', '已是最新，无需更新')
     return { ok: true, up_to_date: true, from: shortSha(before), to: shortSha(before), steps, restart: { ok: true, mode: 'none', message: '未做任何改动' } }
   }
 
-  // 变更文件必须在合并前算——合并后 HEAD 就指向新提交了，diff 会是空的
-  const paths = parseChangedFiles(await git(['diff', '--name-only', '-z', before, target]))
-  const plan = planSteps(paths)
-
+  // 变更面：正常更新看「合并前 → 目标」；补做部署看「上次部署成功的提交 → 当前 HEAD」。
+  // 后者能精确算出还欠哪几步，不至于每次都全量重装。
+  const diffFrom = resumeDeploy ? deployedRevision : before
+  const diffTo = resumeDeploy ? before : target
+  let paths = []
+  let commits = []
+  let plan = { installServer: true, installWeb: true, buildWeb: true }
+  let comparable = true
   try {
-    await git(['merge', '--ff-only', target])
-    mergedTo = shortSha(target)
-    done('合并代码', `${shortSha(before)} → ${mergedTo}（${paths.length} 个文件）`)
-  } catch (err) {
-    return fail('合并代码', `快进合并失败：${firstLine(err.message)}`)
+    await git(['cat-file', '-e', `${diffFrom}^{commit}`])
+    paths = parseChangedFiles(await git(['diff', '--name-only', '-z', diffFrom, diffTo]))
+    commits = parseCommitLog(
+      await git(['log', '-z', `--max-count=${MAX_COMMITS}`, '--format=%H%x1f%h%x1f%cI%x1f%an%x1f%s', `${diffFrom}..${diffTo}`])
+    ).reverse()
+    plan = planSteps(paths)
+  } catch {
+    // 记录里的提交已经不在仓库里了（例如被强推覆盖），无法比对，改为全量重跑
+    comparable = false
+  }
+
+  if (resumeDeploy) {
+    mergedTo = shortSha(before)
+    done('比对版本', comparable
+      ? `上次部署停在 ${shortSha(deployedRevision)}，补做后续步骤（${paths.length} 个文件）`
+      : `无法比对到 ${shortSha(diffFrom)}，改为全量重跑`)
+  } else {
+    try {
+      await git(['merge', '--ff-only', target])
+      mergedTo = shortSha(target)
+      done('合并代码', `${shortSha(before)} → ${mergedTo}（${paths.length} 个文件）`)
+    } catch (err) {
+      return fail('合并代码', `快进合并失败：${commandError(err)}`)
+    }
   }
 
   if (plan.installServer) {
@@ -476,7 +588,7 @@ export async function applyUpdate() {
       await runNpm(['install', '--prefix', 'server', '--omit=dev'])
       done('安装后端依赖', 'server/package.json 有变动')
     } catch (err) {
-      return fail('安装后端依赖', `npm install 失败：${firstLine(err.message)}`)
+      return fail('安装后端依赖', `npm install 失败：${commandError(err)}`)
     }
   }
 
@@ -485,7 +597,7 @@ export async function applyUpdate() {
       await runNpm(['install', '--prefix', 'web'])
       done('安装前端依赖', 'web/package.json 有变动')
     } catch (err) {
-      return fail('安装前端依赖', `npm install 失败：${firstLine(err.message)}`)
+      return fail('安装前端依赖', `npm install 失败：${commandError(err)}`)
     }
   }
 
@@ -494,7 +606,7 @@ export async function applyUpdate() {
       await runNpm(['run', 'build', '--prefix', 'web'])
       done('构建管理界面', 'web/ 有变动')
     } catch (err) {
-      return fail('构建管理界面', `前端构建失败：${firstLine(err.message)}`)
+      return fail('构建管理界面', `前端构建失败：${commandError(err)}`)
     }
   } else {
     done('构建管理界面', '本次未改动前端，已跳过')
@@ -503,13 +615,17 @@ export async function applyUpdate() {
   const restart = await triggerRestart()
   steps.push({ name: '重启服务', ok: restart.ok, detail: restart.message })
 
+  // 只有全部步骤都跑完才记这一笔——它同时是「下次还要不要更新」的判据。
+  // 上面任何一步提前 return 都不会走到这里，于是下次检查会如实报告「部署未完成」。
+  const recorded = writeDeployed(target)
+
   return {
     ok: true,
     from: shortSha(before),
     to: shortSha(target),
-    commits: parseCommitLog(
-      await git(['log', '-z', `--max-count=${MAX_COMMITS}`, '--format=%H%x1f%h%x1f%cI%x1f%an%x1f%s', before + '..' + target])
-    ).reverse(),
+    resumed: resumeDeploy,
+    deployed_recorded: recorded,
+    commits,
     files: paths.length,
     steps,
     restart
