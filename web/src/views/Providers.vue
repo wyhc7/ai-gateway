@@ -279,6 +279,51 @@
       </template>
     </el-dialog>
 
+    <!-- 添加订阅：与「添加平台」完全分开。订阅没有 API Token 可填，凭据要建完平台
+         才能授权/导入，塞进同一张表单里只会让人以为接口格式少了个选项。 -->
+    <el-dialog v-model="subscriptionDialog" title="添加订阅" width="600px" top="8vh" :close-on-click-modal="false">
+      <div class="oauth-hint" style="margin-bottom: 18px">
+        订阅账号与 API 平台是两回事：这里没有 API Token 可填。先选接入点把平台建出来，
+        随后用设备码授权或「导入 Token」绑定凭据。
+      </div>
+      <el-form label-position="top" style="padding-right: 6px">
+        <el-row :gutter="16">
+          <el-col :xs="24" :sm="12">
+            <el-form-item label="订阅接入" required>
+              <el-select v-model="subForm.plan_id" placeholder="选择订阅类型" style="width: 100%" @change="applyPlan">
+                <el-option v-for="p in subscriptionPlans" :key="p.id" :label="p.name" :value="p.id" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :xs="24" :sm="12">
+            <el-form-item label="平台名称" required>
+              <el-input v-model="subForm.name" placeholder="例如：WorkBuddy 订阅账号" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item label="模型 API 地址" required>
+          <el-input v-model="subForm.base_url" :placeholder="subFormPlaceholder" />
+        </el-form-item>
+        <el-form-item label="模型名称">
+          <el-input
+            v-model="subForm.model_names_text"
+            type="textarea"
+            :rows="4"
+            placeholder="每行一个模型；默认不预填，留空即可"
+          />
+          <span class="muted" style="display: block; margin-top: 6px; font-size: 12px; line-height: 1.7">
+            默认模型不预填——订阅上游的可用型号随版本演进，写死一份容易与实际对不上。
+            留空建完后点平台列表里的「刷新」，拉取失败时网关会回退到内置默认列表兜底。
+          </span>
+        </el-form-item>
+      </el-form>
+      <div v-if="currentPlanHint" class="oauth-hint" style="margin-top: 4px">{{ currentPlanHint }}</div>
+      <template #footer>
+        <el-button @click="subscriptionDialog = false">取消</el-button>
+        <el-button type="primary" :loading="creatingSub" @click="createSubscription">创建</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="previewDialog" title="选择可用模型" width="560px" top="12vh">
       <el-select v-model="previewSelected" multiple filterable collapse-tags collapse-tags-tooltip placeholder="搜索并选择模型，选择结果将填入「模型名称」" style="width: 100%">
         <el-option v-for="m in previewList" :key="m.id" :label="m.id" :value="m.id" />
@@ -810,14 +855,90 @@ async function resetKey(p, k) {
 }
 
 // ---------------------------------------------------------------------------
-// 添加订阅：入口保留，实现待补
+// 添加订阅：与「添加平台」完全分开的入口
 //
-// 订阅接入方案（订阅预设）已整体下线——服务端的方案表、/api/subscriptions/plans
-// 以及本页的建平台流程都已删除。按钮先留在工具栏，点它明确告知「还没有可用方案」，
-// 而不是弹一张无从填起的空表单。后续把方案加回来时，从这个入口接回即可。
+// 订阅平台没有 API Token 可填，凭据要建完平台才能授权或导入。混在「添加平台」里
+// 只会在接口格式下拉框外多出几个选项，或者干脆被必填校验拦住要填 API Token。
+// 这里单独建，建完直接接后面的凭据绑定。
 // ---------------------------------------------------------------------------
-function openSubscriptionDialog() {
-  ElMessage.warning('还没有配置任何订阅接入方案，暂时无法添加订阅')
+const subscriptionDialog = ref(false)
+const subscriptionPlans = ref([])
+const creatingSub = ref(false)
+const emptySubForm = () => ({ plan_id: '', name: '', base_url: '', model_names_text: '' })
+const subForm = ref(emptySubForm())
+
+// 方案自带的接入提示与地址占位。地址框不锁死：上游迁移时用户能自己改，
+// 但占位给的是方案的正确地址，避免手滑填成计费域（WorkBuddy 尤其容易踩）。
+const currentPlan = computed(() => subscriptionPlans.value.find((p) => p.id === subForm.value.plan_id) || null)
+const currentPlanHint = computed(() => currentPlan.value?.hint || '')
+const subFormPlaceholder = computed(() => currentPlan.value?.base_url || '接入地址会随所选方案自动填入')
+
+async function openSubscriptionDialog() {
+  subForm.value = emptySubForm()
+  subscriptionDialog.value = true
+  // 方案来自服务端（/api/subscriptions/plans），拉过一次就复用
+  if (subscriptionPlans.value.length === 0) {
+    try {
+      const data = await api.getSubscriptionPlans()
+      subscriptionPlans.value = data.plans || []
+    } catch (e) {
+      subscriptionDialog.value = false
+      return ElMessage.error(e?.message || '加载订阅方案失败')
+    }
+  }
+  if (subscriptionPlans.value.length === 0) {
+    subscriptionDialog.value = false
+    return ElMessage.warning('服务端没有返回任何订阅方案')
+  }
+  subForm.value.plan_id = subscriptionPlans.value[0].id
+  applyPlan()
+}
+
+// 换接入点时只跟着刷新接入地址。名称只在为空、或还停在某个方案自带的名字上时
+// 才覆盖，免得把用户自己敲的名字抹掉。
+// 模型清单故意不碰：默认模型随上游版本变，预填一份很容易与实际可用型号对不上，
+// 而用户在里面写过东西时更不能覆盖。留空由他自己填，或建完点「刷新」让网关兜底。
+function applyPlan() {
+  const plan = subscriptionPlans.value.find((p) => p.id === subForm.value.plan_id)
+  if (!plan) return
+  const stillPlanName = subscriptionPlans.value.some((p) => p.name === subForm.value.name)
+  if (!subForm.value.name || stillPlanName) subForm.value.name = plan.name
+  subForm.value.base_url = plan.base_url
+}
+
+async function createSubscription() {
+  const plan = subscriptionPlans.value.find((p) => p.id === subForm.value.plan_id)
+  if (!plan) return ElMessage.warning('请选择订阅接入')
+  if (!subForm.value.name || !subForm.value.base_url) {
+    return ElMessage.warning('平台名称和模型 API 地址为必填项')
+  }
+  const model_names = subForm.value.model_names_text.split('\n').map((s) => s.trim()).filter(Boolean)
+  creatingSub.value = true
+  try {
+    // 不提交 api_key：订阅平台的凭据走授权/导入，交了后端会存成一个永远调不通的静态 Key
+    const created = await api.createProvider({
+      name: subForm.value.name,
+      base_url: subForm.value.base_url,
+      protocol: plan.protocol,
+      extra_headers: {},
+      model_names
+    })
+    subscriptionDialog.value = false
+    await load()
+    ElMessage.success('订阅平台已创建，接下来绑定凭据')
+    if (isWorkbuddyProvider(created)) {
+      // WorkBuddy 没有设备码授权，凭据只能靠导入登录态文件。直接把导入框打开，
+      // 免得用户回头在平台列表里找「导入 Token」在哪一步。
+      openImportCredentialDialog(created)
+    } else {
+      // 平台没有凭据就服务不了，所以建完直接进授权；想改走「导入 Token」关掉即可
+      openGrokAuth(created)
+    }
+  } catch (e) {
+    ElMessage.error(e?.message || '创建订阅平台失败')
+  } finally {
+    creatingSub.value = false
+  }
 }
 
 // ---------------------------------------------------------------------------
