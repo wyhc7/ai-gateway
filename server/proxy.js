@@ -19,7 +19,8 @@ import {
   ZEN_PROBE_TTL_MS,
   ZEN_MAX_PROBES,
   ZEN_PROBE_CONCURRENCY,
-  ZEN_PROBE_TIMEOUT_MS
+  ZEN_PROBE_TIMEOUT_MS,
+  ZEN_PROBE_RETRY_DELAY_MS
 } from './zen-lane.js'
 
 // 允许「协议级默认模型」兜底的协议白名单。
@@ -559,26 +560,48 @@ export async function discoverZenFreeModels(provider, upstreamModels) {
   }
 
   const adopted = []
-  let cursor = 0
-  const worker = async () => {
-    while (cursor < candidates.length) {
-      const id = candidates[cursor]
-      cursor += 1
-      const r = await probeZenModel(provider, id)
-      if (r.ok) {
-        cache[id] = { ok: true, at: Date.now() }
-        adopted.push(id)
-      } else if (isDefinitiveZenRejection(r.status)) {
-        cache[id] = { ok: false, at: Date.now(), status: r.status }
-      } else {
-        // 抖动不记档，下次刷新重试——否则上游一次 500 就能让一个好型号长期消失
-        delete cache[id]
+  // 本轮没定论的型号（429 限流 / 5xx / 超时）：抖动不记档，但也别直接留到下次刷新——
+  // 用户点一次「刷新」就该拿到完整清单，漏掉的会被当成「网关没抓全」。
+  let transient = []
+  const probeOne = async (id) => {
+    const r = await probeZenModel(provider, id)
+    if (r.ok) {
+      cache[id] = { ok: true, at: Date.now() }
+      adopted.push(id)
+      return
+    }
+    if (isDefinitiveZenRejection(r.status)) {
+      cache[id] = { ok: false, at: Date.now(), status: r.status }
+      return
+    }
+    // 抖动不记档，下次刷新重试——否则上游一次 500 就能让一个好型号长期消失
+    delete cache[id]
+    transient.push(id)
+  }
+  const runWave = async (queue) => {
+    let cursor = 0
+    const worker = async () => {
+      while (cursor < queue.length) {
+        const id = queue[cursor]
+        cursor += 1
+        await probeOne(id)
       }
     }
+    await Promise.all(
+      Array.from({ length: Math.min(ZEN_PROBE_CONCURRENCY, queue.length) }, worker)
+    )
   }
-  await Promise.all(
-    Array.from({ length: Math.min(ZEN_PROBE_CONCURRENCY, candidates.length) }, worker)
-  )
+
+  await runWave(candidates)
+
+  // 上游按并发限流：三个候选同时打过去会吃到 429，被挡下的型号这一轮就漏了。
+  // 隔一拍补一轮让「一次刷新」是完整的；补完仍不稳的留给下次刷新，不无限重试。
+  if (transient.length) {
+    await new Promise((resolve) => setTimeout(resolve, ZEN_PROBE_RETRY_DELAY_MS))
+    const retry = transient
+    transient = []
+    await runWave(retry)
+  }
 
   adopted.sort() // 顺序稳定，便于对比与测试
   return { adopted, probed: candidates.length, cache }
@@ -680,6 +703,8 @@ export async function previewModels({ base_url, protocol, api_key, extra_headers
     protocol,
     api_key,
     extra_headers,
+    // 免费通道要据此找回平台自己的探测缓存与现有模型，否则每次拉取都从零重测
+    provider_id,
     auth_type,
     auth_header,
     auth_prefix,
@@ -732,11 +757,33 @@ export async function previewModels({ base_url, protocol, api_key, extra_headers
     const data = await resp.json()
     let models = (data.data || []).map((m) => ({ id: m.id, owned_by: m.owned_by || m.display_name || '' }))
     // 免费通道：上游列表里混着付费模型（公共凭据调用必 401），只保留白名单内的；
-    // 若一个都没匹配上（上游改了免费档阵容），整份换成白名单，别让用户去选付费模型
+    // 若一个都没匹配上（上游改了免费档阵容），整份换成白名单，别让用户去选付费模型。
+    //
+    // 这里必须跑和「刷新」同一套实测收编。不跑的话同一个平台拉取比刷新少两个，
+    // 用户按提示点「拉取列表」拿到的是残缺清单，会以为网关没抓全。
     if (isZenProtocol(target.protocol)) {
       const curated = new Set(ZEN_FREE_MODELS)
       const live = models.filter((m) => curated.has(m.id))
-      models = live.length ? live : ZEN_FREE_MODELS.map((id) => ({ id, owned_by: 'OpenCode Zen', free: true }))
+      // 已存在的平台沿用它自己的探测缓存与现有模型；新建的没有落盘的地方，用临时对象
+      const host = (target.provider_id && getProvider(target.provider_id)) || {
+        id: '__preview__',
+        name: '预览',
+        base_url: target.base_url,
+        protocol: target.protocol,
+        extra_headers: target.extra_headers || {},
+        models: [],
+        keys: []
+      }
+      const probe = await discoverZenFreeModels(host, models)
+      host.zen_probe_cache = probe.cache
+      if (host.id !== '__preview__') persistImmediate()
+      // 和刷新同源：白名单命中 + 用户手加过且上游仍在列的 + 本轮实测收编的
+      const manual = (host.models || []).filter((m) => !curated.has(m.id) && models.some((x) => x.id === m.id))
+      const discovered = probe.adopted
+        .filter((id) => !curated.has(id))
+        .map((id) => ({ id, owned_by: 'OpenCode Zen', free: true }))
+      models = [...live, ...manual, ...discovered]
+      if (!models.length) models = ZEN_FREE_MODELS.map((id) => ({ id, owned_by: 'OpenCode Zen', free: true }))
     }
     return { ok: true, models }
   } catch (err) {
