@@ -172,10 +172,11 @@
         <el-row :gutter="16">
           <el-col :xs="24" :sm="12">
             <el-form-item label="接口格式" required>
-              <!-- 编辑已有订阅平台时的分支：下拉框里故意不列订阅协议，照常渲染只会得到
-                   一个空白的必填项——看着像没填，还可能被误选成别的协议，
-                   把手上 OAuth 凭据的调用方式一起改掉。 -->
-              <div v-if="isOAuthProtocol(providerForm.protocol)" class="protocol-locked">
+              <!-- 锁定只对「编辑已有平台」生效：它的 OAuth 凭据是按当前协议绑定的，
+                   改协议等于让手上的凭据失效，还可能被误选成别的协议。
+                   新建时必须放行 —— WorkBuddy 就是从这个下拉建的，选完就被锁死
+                   会让人以为自己选错了。 -->
+              <div v-if="editingProvider && isOAuthProtocol(providerForm.protocol)" class="protocol-locked">
                 {{ protocolLabel(providerForm.protocol) }}（协议不可更改）
               </div>
               <el-select v-else v-model="providerForm.protocol" style="width: 100%" @change="onProtocolChange">
@@ -184,6 +185,7 @@
                 <el-option label="Anthropic（OpenAI 兼容端点）" value="anthropic-openai" />
                 <el-option label="Anthropic 原生 Messages（需转换层）" value="anthropic" />
                 <el-option label="OpenCode Zen 免费通道（免凭据）" value="zen-free" />
+                <el-option label="WorkBuddy 订阅（OAuth，需导入登录态文件）" value="workbuddy-oauth" />
                 <el-option label="自定义调用方案" value="custom" />
               </el-select>
             </el-form-item>
@@ -368,28 +370,45 @@
 
     <el-dialog v-model="importDialog" :title="`导入 ${authLabel(importProvider)} 账号 Token`" width="520px" :close-on-click-modal="false">
       <div class="grok-intro">
-        <p v-if="isCodexProvider(importProvider)">
+        <p v-if="isWorkbuddyProvider(importProvider)">
+          粘贴 CodeBuddy CLI 的登录态文件 <code>workbuddy-&lt;uid&gt;.json</code> 的完整内容。
+          uid、realm、token 五个字段网关自己解析，不用你去文件里翻——少填一个 realm，
+          请求会被发到错误的域上，只返回一个非 JSON 的 401，从报错完全看不出来。
+        </p>
+        <p v-else-if="isCodexProvider(importProvider)">
           粘贴 ~/.codex/auth.json 里的凭据（access_token 和可选的 refresh_token、account_id），网关直接当 Bearer 转发到上游。account_id 在 Codex 上游的 ChatGPT-Account-Id 头里要用，务必填对。
         </p>
         <p v-else>粘贴商城/工具提供的 Grok 订阅账号 Token（access_token 或 sso_token），网关直接把它当 Bearer 转发到上游，无需浏览器授权。</p>
-        <p class="grok-note">不填 refresh_token 时按长期有效处理；填了的话可以点账号旁的「续期」刷新。</p>
+        <p v-if="!isWorkbuddyProvider(importProvider)" class="grok-note">不填 refresh_token 时按长期有效处理；填了的话可以点账号旁的「续期」刷新。</p>
       </div>
-      <el-form label-width="130px">
+      <el-form :label-width="isWorkbuddyProvider(importProvider) ? '100px' : '130px'">
         <el-form-item label="账号名称">
           <el-input v-model="importForm.name" :placeholder="`可选，如 ${authLabel(importProvider)}-01`" />
         </el-form-item>
-        <el-form-item label="access_token / sso_token" required>
-          <el-input v-model="importForm.access_token" placeholder="eyJ0eXAiOi...（或以 . 分隔的会话票据）" show-password />
-        </el-form-item>
-        <el-form-item label="refresh_token（可选）">
-          <el-input v-model="importForm.refresh_token" placeholder="有就填，填了才能自动续期" show-password />
-        </el-form-item>
-        <el-form-item v-if="isCodexProvider(importProvider)" label="account_id">
-          <el-input v-model="importForm.account_id" placeholder="Codex 上游需要，如 acct_xxxx 或 openai 账号 ID" />
-        </el-form-item>
-        <el-form-item label="有效时长（秒）">
-          <el-input v-model="importForm.expires_in" placeholder="留空 = 长期有效；如 21600（6 小时）" />
-        </el-form-item>
+        <template v-if="isWorkbuddyProvider(importProvider)">
+          <el-form-item label="登录态文件" required>
+            <el-input
+              v-model="importForm.access_token"
+              type="textarea"
+              :rows="10"
+              placeholder='{"auth":{"accessToken":"...","refreshToken":"...","domain":"workbuddy.ai"},"account":{"uid":"..."}}'
+            />
+          </el-form-item>
+        </template>
+        <template v-else>
+          <el-form-item label="access_token / sso_token" required>
+            <el-input v-model="importForm.access_token" placeholder="eyJ0eXAiOi...（或以 . 分隔的会话票据）" show-password />
+          </el-form-item>
+          <el-form-item label="refresh_token（可选）">
+            <el-input v-model="importForm.refresh_token" placeholder="有就填，填了才能自动续期" show-password />
+          </el-form-item>
+          <el-form-item v-if="isCodexProvider(importProvider)" label="account_id">
+            <el-input v-model="importForm.account_id" placeholder="Codex 上游需要，如 acct_xxxx 或 openai 账号 ID" />
+          </el-form-item>
+          <el-form-item label="有效时长（秒）">
+            <el-input v-model="importForm.expires_in" placeholder="留空 = 长期有效；如 21600（6 小时）" />
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="importDialog = false">取消</el-button>
@@ -442,6 +461,8 @@ const PROTOCOL_LABELS = {
   'anthropic-openai': 'Anthropic（OpenAI 兼容）',
   'grok-oauth': 'Grok 订阅（OAuth）',
   'codex-oauth': 'Codex 订阅（OAuth）',
+  'workbuddy-oauth': 'WorkBuddy 订阅（OAuth）',
+  'zen-free': 'OpenCode Zen 免费通道',
   anthropic: 'Anthropic 原生',
   custom: '自定义'
 }
@@ -817,7 +838,7 @@ let pollTimer = null
 // 订阅类协议的凭据来自 OAuth 授权或导入 token，不是创建平台时手填的静态 API Key。
 // 建平台表单、必填校验都要据此区分——否则选了 Grok / Codex 模板仍被拦住要填 API Token。
 function isOAuthProtocol(protocol) {
-  return protocol === 'grok-oauth' || protocol === 'codex-oauth'
+  return protocol === 'grok-oauth' || protocol === 'codex-oauth' || protocol === 'workbuddy-oauth'
 }
 
 // 免凭据通道（OpenCode Zen 免费档）：创建平台时不需要 API Token，
@@ -834,13 +855,21 @@ function isCodexProvider(p) {
   return p?.protocol === 'codex-oauth'
 }
 
+function isWorkbuddyProvider(p) {
+  return p?.protocol === 'workbuddy-oauth'
+}
+
 // 前端操作归属哪一套 OAuth 端点
 function oauthKind(p) {
-  return isCodexProvider(p) ? 'codex' : 'grok'
+  if (isCodexProvider(p)) return 'codex'
+  if (isWorkbuddyProvider(p)) return 'workbuddy'
+  return 'grok'
 }
 
 function authLabel(p) {
-  return isCodexProvider(p) ? 'Codex' : 'Grok'
+  if (isCodexProvider(p)) return 'Codex'
+  if (isWorkbuddyProvider(p)) return 'WorkBuddy'
+  return 'Grok'
 }
 
 // 「导入 Token」直接粘贴 access_token / sso_token 作为订阅账号凭据
@@ -855,9 +884,65 @@ function openImportCredentialDialog(p) {
   importDialog.value = true
 }
 
+// 与服务端 workbuddy-oauth.js 的 parseWorkbuddyAuthFile 同源：解析 CodeBuddy CLI
+// 的登录态文件。字段是驼峰，网关内部统一用下划线。嵌套（CLI 实际写盘的形状）
+// 与扁平两种都收，用户手工改过文件也不至于认不出来。
+function parseWorkbuddyAuthFile(raw) {
+  let obj
+  try {
+    obj = JSON.parse(String(raw || '').trim())
+  } catch {
+    return null
+  }
+  const auth = obj.auth || obj
+  const account = obj.account || obj
+  const access_token = auth.accessToken || auth.access_token || ''
+  const uid = account.uid || account.UID || auth.uid || ''
+  if (!access_token || !uid) return null
+  return {
+    access_token,
+    refresh_token: auth.refreshToken || auth.refresh_token || '',
+    uid,
+    domain: auth.domain || account.domain || '',
+    expires_at: auth.expiresAt || auth.expires_at || 0
+  }
+}
+
 async function saveImportCredential() {
   const { name, access_token, refresh_token, account_id, expires_in } = importForm.value
   if (!access_token || !access_token.trim()) return ElMessage.warning('请先填写 access_token / sso_token')
+
+  // WorkBuddy 用户手里是整份 workbuddy-<uid>.json —— uid / domain / token 全在里面。
+  // 让他们自己抠五个字段出来填，出错率高得离谱，所以这里直接吃整份 JSON。
+  if (isWorkbuddyProvider(importProvider.value)) {
+    const parsed = parseWorkbuddyAuthFile(access_token.trim())
+    if (!parsed) return ElMessage.warning('读不到 access_token 与 uid，请粘贴完整的 workbuddy-<uid>.json 文件内容')
+    importingCred.value = true
+    try {
+      await api.addKey(importProvider.value.id, {
+        type: 'oauth',
+        provider: 'workbuddy',
+        name: name || '',
+        access_token: parsed.access_token,
+        refresh_token: parsed.refresh_token,
+        // WorkBuddy 上游按 uid + realm 识别身份，缺一个都调不通
+        uid: parsed.uid,
+        domain: parsed.domain,
+        // 服务端按「剩余秒数」落成 expires_at
+        expires_in: parsed.expires_at ? Math.max(0, Math.floor((parsed.expires_at - Date.now()) / 1000)) : 0,
+        enabled: true
+      })
+      ElMessage.success('WorkBuddy 凭据已导入，账号已绑定')
+      importDialog.value = false
+      await load()
+    } catch (e) {
+      ElMessage.error(e?.message || '导入失败')
+    } finally {
+      importingCred.value = false
+    }
+    return
+  }
+
   importingCred.value = true
   try {
     await api.addKey(importProvider.value.id, {

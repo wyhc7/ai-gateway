@@ -442,11 +442,17 @@ app.post('/api/providers/:id/keys', (req, res) => {
   // 也支持 Codex：把 ~/.codex/auth.json 里的 tokens 粘进来即可，
   // 此时 provider 传 codex，并建议带上 account_id（上游 ChatGPT-Account-Id 头要用）。
   if (req.body.type === 'oauth') {
-    const { access_token, refresh_token, expires_in, account_id, email } = req.body
+    const { access_token, refresh_token, expires_in, account_id, email, uid, domain } = req.body
     if (!access_token) return res.status(400).json({ error: { message: 'access_token 不能为空' } })
     // 未显式指定时保持 grok，兼容既有调用与前端
-    const credProvider = req.body.provider === 'codex' ? 'codex' : 'grok'
-    const label = credProvider === 'codex' ? 'Codex 账号' : 'Grok 账号'
+    const CRED_PROVIDERS = new Set(['codex', 'workbuddy'])
+    const credProvider = CRED_PROVIDERS.has(req.body.provider) ? req.body.provider : 'grok'
+    const label = { codex: 'Codex 账号', workbuddy: 'WorkBuddy 账号', grok: 'Grok 账号' }[credProvider]
+    // WorkBuddy 上游按 uid + realm 识别身份，缺 uid 等于存一个必定调不通的 Key，
+    // 与其让它在第一次请求时以「401」的形式暴露，不如当场说清楚缺什么
+    if (credProvider === 'workbuddy' && !uid) {
+      return res.status(400).json({ error: { message: 'WorkBuddy 账号必须提供 uid（登录态文件里的 account.uid）' } })
+    }
     const key = {
       id: genId(),
       type: 'oauth',
@@ -463,6 +469,9 @@ app.post('/api/providers/:id/keys', (req, res) => {
     if (refresh_token) key.refresh_token = refresh_token
     if (account_id) key.account_id = account_id
     if (email) key.email = email
+    // WorkBuddy 专属：uid 进 X-User-Id，domain 进 X-Domain
+    if (uid) key.uid = uid
+    if (domain) key.domain = domain
     const expiresIn = Number(expires_in)
     if (Number.isFinite(expiresIn) && expiresIn > 0) key.expires_at = Date.now() + expiresIn * 1000
     p.keys = p.keys || []
