@@ -512,6 +512,39 @@ function writeDeployedRecord(work, revision) {
   writeFileSync(join(work, 'data', 'deployed-revision.json'), JSON.stringify({ revision, at: new Date().toISOString() }))
 }
 
+describe('sameRevision：判的是同一次提交，不是同一串字符', () => {
+  const FULL = 'b88624c9428ad8c4b1f89712da48e71880d3c7ef'
+
+  test('完整 sha 与它的短 sha 是同一次提交', () => {
+    assert.equal(up.sameRevision(FULL, 'b88624c'), true)
+    assert.equal(up.sameRevision('b88624c', FULL), true)
+    assert.equal(up.sameRevision(FULL, FULL), true)
+  })
+
+  test('不同提交一律判成不同', () => {
+    assert.equal(up.sameRevision(FULL, 'b88624d'), false)
+    assert.equal(up.sameRevision(FULL, '0000000' + FULL.slice(7)), false)
+  })
+
+  // 这条就是线上踩到的：手工部署脚本按 git rev-parse --short 写了 7 位 sha，
+  // 于是「已经跑完的部署」被永久误报成「上次没跑完」，按钮变成多余的补做重建
+  test('短 sha 与长 sha 不再被判成两次提交', () => {
+    assert.equal(up.sameRevision('b88624c', FULL), true)
+    assert.equal(up.sameRevision(FULL, 'b88624c9428'), true)
+  })
+
+  test('短到 7 位以下不认，宁可判成不同也不能误判成同一个', () => {
+    assert.equal(up.sameRevision(FULL, 'b886'), false)
+    assert.equal(up.sameRevision(FULL, 'b88624c94'), true)
+  })
+
+  test('没有记录时不假装相同', () => {
+    assert.equal(up.sameRevision(null, FULL), false)
+    assert.equal(up.sameRevision(FULL, ''), false)
+    assert.equal(up.sameRevision(null, null), false)
+  })
+})
+
 describe('readDeployed：没有记录就不做任何断言', () => {
   test('文件不存在 / 内容损坏 / revision 不是字符串 → 一律返回 null', async () => {
     const f = await fixture('deployed-record')
