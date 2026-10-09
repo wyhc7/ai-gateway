@@ -60,6 +60,13 @@
             </svg>
             <span class="nav-text">运行日志</span>
           </RouterLink>
+          <RouterLink to="/update" @click="onNav" :title="updateAvailable ? `系统更新（有 ${updateCount} 个新提交）` : '系统更新'">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 3v11" /><path d="M7.5 9.5L12 14l4.5-4.5" /><path d="M4.5 20h15" />
+            </svg>
+            <span class="nav-text">系统更新</span>
+            <span v-if="updateAvailable" class="nav-dot" aria-hidden="true"></span>
+          </RouterLink>
         </nav>
 
         <div class="sidebar-footer">
@@ -115,7 +122,7 @@ import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import { useViewport } from './composables/useViewport.js'
-import { getAdminKey, setAdminKey } from './api.js'
+import api, { getAdminKey, setAdminKey } from './api.js'
 import ThemeToggle from './components/ThemeToggle.vue'
 
 const { isMobile } = useViewport()
@@ -126,6 +133,22 @@ const drawerOpen = ref(false)
 
 const showLogin = ref(false)
 const loginKey = ref('')
+
+// 侧边栏上的「有新版本」小红点。检查失败（离线、非 git 部署）静默忽略——
+// 一个环境探测的结果不该打断控制台的正常使用。
+const updateAvailable = ref(false)
+const updateCount = ref(0)
+
+async function checkForUpdate() {
+  if (!getAdminKey()) return
+  try {
+    const r = await api.checkUpdate(false)
+    updateAvailable.value = Boolean(r?.ok && r.has_update)
+    updateCount.value = r?.behind || 0
+  } catch {
+    /* 忽略：进「系统更新」页面时会给明确原因 */
+  }
+}
 
 function onUnauthorized() {
   loginKey.value = getAdminKey()
@@ -143,6 +166,7 @@ function confirmLogin() {
 onMounted(() => {
   if (!getAdminKey()) showLogin.value = true
   window.addEventListener('gateway-unauthorized', onUnauthorized)
+  checkForUpdate()
 })
 
 onBeforeUnmount(() => {

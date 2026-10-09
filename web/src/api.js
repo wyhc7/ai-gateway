@@ -91,7 +91,11 @@ export const api = {
   startCodexDevice: (data) => request('/api/oauth/codex/device/start', { method: 'POST', body: JSON.stringify(data || {}) }),
   pollCodexDevice: (sessionId) => request(`/api/oauth/codex/device/${sessionId}/poll`, { method: 'POST' }),
   cancelCodexDevice: (sessionId) => request(`/api/oauth/codex/device/${sessionId}`, { method: 'DELETE' }),
-  refreshCodexAccount: (providerId, keyId) => request(`/api/oauth/codex/accounts/${providerId}/${keyId}/refresh`, { method: 'POST' })
+  refreshCodexAccount: (providerId, keyId) => request(`/api/oauth/codex/accounts/${providerId}/${keyId}/refresh`, { method: 'POST' }),
+
+  // 系统更新（比对上游仓库并一键更新）
+  checkUpdate: (force = false) => request(`/api/update/check${force ? '?force=1' : ''}`),
+  applyUpdate: () => request('/api/update/apply', { method: 'POST' })
 }
 
 export function notifyError(err, fallback = '操作失败') {

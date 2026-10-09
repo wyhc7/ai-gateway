@@ -6,6 +6,8 @@ dist/
 
 # runtime data（含网关 Key 与平台 API Key，勿提交）
 server/data/
+# 部署脚本把 DATA_DIR 放在仓库根（/opt/ai-gateway/data），同样不能提交
+/data/
 
 # logs & env
 *.log

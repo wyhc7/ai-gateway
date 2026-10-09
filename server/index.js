@@ -19,6 +19,7 @@ import {
 } from './api-keys.js'
 import { TEMPLATES } from './templates.js'
 import { addLog, getLogs, initLogger } from './logger.js'
+import { checkUpdate, applyUpdate } from './update.js'
 import {
   startDeviceFlow,
   pollDeviceFlow,
@@ -836,6 +837,33 @@ app.post('/api/providers/import', (req, res) => {
 })
 
 app.get('/api/health', (req, res) => res.json({ ok: true, uptime: process.uptime() }))
+
+// ---------------------------------------------------------------------------
+// 系统更新
+//
+// 管理与 /api/ 同一条鉴权链，无需额外处理。检查走缓存（60 秒），避免前端每次
+// 进页面都去 fetch 一次远程；「立即更新」前会强制清缓存重新比对。
+// ---------------------------------------------------------------------------
+app.get('/api/update/check', api(async (req, res) => {
+  const force = ['1', 'true', 'yes'].includes(String(req.query.force || '').toLowerCase())
+  res.json(await checkUpdate({ force }))
+}))
+
+// 更新失败也回 200：HTTP 层没出错，出错的是更新过程本身，而前端要拿到完整步骤
+// 日志才能指出卡在哪一步。前端按 result.ok 分支，而不是按响应码。
+app.post('/api/update/apply', api(async (req, res) => {
+  const result = await applyUpdate()
+  addLog({
+    type: 'system',
+    method: 'POST',
+    path: '/api/update/apply',
+    status: result.ok ? 200 : 500,
+    detail: result.ok
+      ? (result.up_to_date ? '检查更新：已是最新版本' : `已更新 ${result.from} → ${result.to}${result.restart?.ok ? '' : `（${result.restart?.message || '需手动重启'}）`}`)
+      : `更新失败：${result.message}`
+  })
+  res.json(result)
+}))
 
 app.get('/api/logs', (req, res) => {
   const logs = getLogs({
