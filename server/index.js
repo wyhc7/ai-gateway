@@ -20,6 +20,7 @@ import {
 import { TEMPLATES } from './templates.js'
 import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
 import { startWorkbuddyLogin, pollWorkbuddyLogin, cancelWorkbuddyLogin } from './workbuddy-oauth.js'
+import { fetchWorkbuddyCheckinStatus, performWorkbuddyCheckin, beijingDayKey } from './workbuddy-checkin.js'
 import { addLog, getLogs, initLogger } from './logger.js'
 import { checkUpdate, applyUpdate } from './update.js'
 import {
@@ -694,13 +695,15 @@ app.get('/api/oauth/codex/device', (req, res) => {
 //（打开后扫码/网页登录），cookie 会话随 state 存在服务端内存，5 分钟过期。
 // start 必须带 provider_id，否则 poll 成功后凭据无处可去，只会返回而不入库。
 app.post('/api/oauth/workbuddy/login/start', api(async (req, res) => {
-  const { provider_id = null, name = '' } = req.body || {}
+  const { provider_id = null, name = '', region = 'cn' } = req.body || {}
   if (provider_id && !getProvider(provider_id)) {
     return res.status(404).json({ error: { message: '平台不存在' } })
   }
   try {
-    const flow = await startWorkbuddyLogin({ providerId: provider_id, name })
-    addLog({ type: 'oauth', action: 'device_start', provider_id, detail: 'WorkBuddy 等待扫码登录' })
+    // region 决定登录起点：cn / global 走 copilot.tencent.com，intl 走 codebuddy.ai
+    //（国际版只认 IDE 客户端，platform=ide）。落地后由 token 的 domain 决定后续路由。
+    const flow = await startWorkbuddyLogin({ providerId: provider_id, name, region })
+    addLog({ type: 'oauth', action: 'device_start', provider_id, detail: `WorkBuddy 等待扫码登录（${region}）` })
     res.status(201).json(flow)
   } catch (err) {
     res.status(502).json({ error: { message: err.message } })
@@ -742,6 +745,102 @@ app.post('/api/oauth/workbuddy/login/:state/poll', api(async (req, res) => {
 app.delete('/api/oauth/workbuddy/login/:state', (req, res) => {
   res.json({ ok: cancelWorkbuddyLogin(req.params.state) })
 })
+
+// —— WorkBuddy 每日签到 ——
+// 签到按北京时间的自然日重置，宿主机时区不能当判据：网关可能跑在 UTC 机器上，
+// 用本地日期会在凌晨把「今天」判成昨天。
+function workbuddyCheckinDay() {
+  return beijingDayKey()
+}
+
+// 单账号签到。返回值区分三种结果，前端与日志据此措辞：
+//   already  今日已签（上游或本地记录任一判定）
+//   inactive 该账号没有可签到活动（国际版账号常见）
+//   ok       本次领取成功
+async function workbuddyCheckinOne(key) {
+  const status = await fetchWorkbuddyCheckinStatus(key)
+  if (status.checked_in) {
+    key.checkin_date = workbuddyCheckinDay()
+    return { status: 'already', summary: status }
+  }
+  if (status.active === false) {
+    return { status: 'inactive', summary: status }
+  }
+  await performWorkbuddyCheckin(key)
+  key.checkin_date = workbuddyCheckinDay()
+  return { status: 'ok', summary: { ...status, checked_in: true, today_credit: status.daily_credit || status.today_credit } }
+}
+
+app.get('/api/oauth/workbuddy/accounts/:providerId/:keyId/checkin', api(async (req, res) => {
+  const p = getProvider(req.params.providerId)
+  if (!p) return res.status(404).json({ error: { message: '平台不存在' } })
+  const key = (p.keys || []).find((k) => k.id === req.params.keyId)
+  if (!key) return res.status(404).json({ error: { message: '账号不存在' } })
+  try {
+    const summary = await fetchWorkbuddyCheckinStatus(key)
+    res.json({ summary, checked_in_today: key.checkin_date === workbuddyCheckinDay() })
+  } catch (err) {
+    res.status(400).json({ error: { message: err.message } })
+  }
+}))
+
+app.post('/api/oauth/workbuddy/accounts/:providerId/:keyId/checkin', api(async (req, res) => {
+  const p = getProvider(req.params.providerId)
+  if (!p) return res.status(404).json({ error: { message: '平台不存在' } })
+  const key = (p.keys || []).find((k) => k.id === req.params.keyId)
+  if (!key) return res.status(404).json({ error: { message: '账号不存在' } })
+  try {
+    const result = await workbuddyCheckinOne(key)
+    persistImmediate()
+    addLog({
+      type: 'oauth', action: 'checkin', provider_id: p.id,
+      detail: `${key.name} 签到：${{ ok: '成功', already: '今日已签', inactive: '该账号无签到活动' }[result.status] || result.status}`
+    })
+    res.json(result)
+  } catch (err) {
+    // 签到失败只影响这一个账号，不进冷却——它不影响对话能力
+    key.last_error = err.message
+    key.last_error_at = Date.now()
+    persistImmediate()
+    res.status(400).json({ error: { message: err.message } })
+  }
+}))
+
+// 自动签到：每小时一轮，逐账号判断今天是否已签，未签就领。
+// 判据只有两处——key.checkin_date（成功后写入，避免同一天反复打上游）
+// 与上游返回的 todayCheckedIn（本地记录丢失时的兜底）。
+// 失败的账号每小时最多再试一次，不会因为一个坏账号把整轮拖死。
+const WORKBUDDY_CHECKIN_TICK_MS = 60 * 60 * 1000
+
+async function workbuddyAutoCheckinTick() {
+  const day = workbuddyCheckinDay()
+  const now = Date.now()
+  for (const p of state.providers || []) {
+    if (p.protocol !== 'workbuddy-oauth') continue
+    for (const key of p.keys || []) {
+      if (!key.enabled || key.type !== 'oauth' || !key.access_token) continue
+      if (key.checkin_date === day) continue
+      if (key.checkin_last_attempt_at && now - key.checkin_last_attempt_at < WORKBUDDY_CHECKIN_TICK_MS) continue
+      key.checkin_last_attempt_at = now
+      try {
+        const r = await workbuddyCheckinOne(key)
+        addLog({
+          type: 'oauth', action: 'checkin', provider_id: p.id,
+          detail: `${key.name} 自动签到：${{ ok: '成功', already: '今日已签', inactive: '该账号无签到活动' }[r.status] || r.status}`
+        })
+      } catch (err) {
+        addLog({ type: 'oauth', action: 'checkin', provider_id: p.id, detail: `${key.name} 自动签到失败：${err.message}` })
+      }
+    }
+  }
+  persistImmediate()
+}
+
+// unref：这是常驻服务的定时器，但测试进程里不该因为它而退不出去
+const workbuddyCheckinTimer = setInterval(() => {
+  workbuddyAutoCheckinTick().catch(() => {})
+}, WORKBUDDY_CHECKIN_TICK_MS)
+workbuddyCheckinTimer.unref?.()
 
 app.post('/api/oauth/codex/accounts/:providerId/:keyId/refresh', api(async (req, res) => {
   const p = getProvider(req.params.providerId)

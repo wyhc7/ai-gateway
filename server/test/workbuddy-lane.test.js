@@ -12,6 +12,9 @@ const {
   isWorkbuddyProtocol,
   normalizeWorkbuddyDomain,
   workbuddyHeaders,
+  workbuddyChatBaseFor,
+  workbuddyBillingBaseFor,
+  workbuddyRealmFor,
   shapeWorkbuddyBody,
   normalizeWorkbuddyTools,
   ensureWorkbuddySystemMessage
@@ -32,11 +35,15 @@ describe('按 Key 注入的请求头', () => {
     assert.equal(h['X-User-Id'], 'u-1')
     assert.equal(h['X-Domain'], 'workbuddy.ai')
     assert.equal(h['User-Agent'], WORKBUDDY_UA)
+    // Referer 同样跟着 realm：跨 realm 引用会被网关当成外部渠道
+    assert.equal(h.Referer, 'https://www.workbuddy.ai/')
   })
 
-  test('缺 realm 时落到国际默认值，不能落空', () => {
-    assert.equal(normalizeWorkbuddyDomain(''), 'workbuddy.ai')
-    assert.equal(normalizeWorkbuddyDomain(null), 'workbuddy.ai')
+  // 空 domain 落国内而不是国际：参考实现对「domain 为空的旧登录态文件」
+  // 就是兜到 CN 的，默认成国际域会把一个国内账号发到 workbuddy.ai 去。
+  test('缺 realm 时落到国内默认值，不能落空', () => {
+    assert.equal(normalizeWorkbuddyDomain(''), 'www.codebuddy.cn')
+    assert.equal(normalizeWorkbuddyDomain(null), 'www.codebuddy.cn')
     // 允许用户直接粘一个完整 URL 进来
     assert.equal(normalizeWorkbuddyDomain('https://CodeBuddy.ai/path'), 'codebuddy.ai')
   })
@@ -44,7 +51,21 @@ describe('按 Key 注入的请求头', () => {
   test('缺 uid 时也产出字段，避免上游拿 undefined 去比对', () => {
     const h = workbuddyHeaders({})
     assert.equal(h['X-User-Id'], '')
-    assert.equal(h['X-Domain'], 'workbuddy.ai')
+    assert.equal(h['X-Domain'], 'www.codebuddy.cn')
+    assert.equal(h.Referer, 'https://www.codebuddy.cn/')
+  })
+
+  test('三个 realm 各走各的网关，Referer 不串台', () => {
+    assert.equal(workbuddyChatBaseFor('www.codebuddy.cn'), 'https://copilot.tencent.com')
+    assert.equal(workbuddyChatBaseFor('workbuddy.ai'), 'https://www.workbuddy.ai')
+    assert.equal(workbuddyChatBaseFor('www.codebuddy.ai'), 'https://www.codebuddy.ai')
+    // CN 的计费域与对话域是分开的两个站，Global/Intl 则同域
+    assert.equal(workbuddyBillingBaseFor('www.codebuddy.cn'), 'https://www.codebuddy.cn')
+    assert.equal(workbuddyBillingBaseFor('workbuddy.ai'), 'https://www.workbuddy.ai')
+    assert.equal(workbuddyBillingBaseFor(''), 'https://www.codebuddy.cn')
+    assert.equal(workbuddyRealmFor('codebuddy.ai'), 'intl')
+    assert.equal(workbuddyRealmFor('https://www.workbuddy.ai/x'), 'global')
+    assert.equal(workbuddyRealmFor('codebuddy.cn'), 'cn')
   })
 })
 

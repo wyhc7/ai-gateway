@@ -109,6 +109,17 @@
                         :loading="refreshingCred === k.id"
                         @click="refreshCredential(p, k)"
                       >续期</el-button>
+                      <!-- WorkBuddy 独有：每日签到领额度。当天已签就只显示状态，不再给按钮 -->
+                      <template v-if="isWorkbuddyProvider(p)">
+                        <span v-if="k.checkin_date === checkinDay()" class="badge">已签到</span>
+                        <el-button
+                          v-else
+                          size="small"
+                          text
+                          :loading="checkingIn === `${p.id}:${k.id}`"
+                          @click="doCheckin(p, k)"
+                        >签到</el-button>
+                      </template>
                     </template>
                     <span v-else class="mask">{{ k.api_key }}</span>
                     <template v-if="isCooldown(k)">
@@ -384,6 +395,21 @@
         <p v-else-if="isWorkbuddyProvider(authProvider)" class="grok-note">
           授权会话 5 分钟过期，超时了重新点一次即可。
         </p>
+        <!-- 登录起点只有两处：国内/全球版共用腾讯这边的入口（platform=CLI），
+             国际版从 codebuddy.ai 起（只认 IDE 客户端，platform=ide）。
+             账号落到哪个 realm 由上游签发的 domain 决定，这里选的只是入口。 -->
+        <div v-if="isWorkbuddyProvider(authProvider)" class="realm-pick">
+          <span class="realm-label">接入版本</span>
+          <el-radio-group v-model="loginRealm" size="small">
+            <el-radio-button value="cn">国内 / 全球版</el-radio-button>
+            <el-radio-button value="intl">国际版</el-radio-button>
+          </el-radio-group>
+          <p class="grok-note">
+            {{ loginRealm === 'intl'
+              ? '国际版账号从 codebuddy.ai 起登录；后续对话与签到都按账号自己的 realm 路由。'
+              : '国内与 WorkBuddy 全球版账号共用这个入口；拿不准就选它。' }}
+          </p>
+        </div>
       </div>
 
       <div v-else-if="deviceFlow.status === 'pending'" class="device-step">
@@ -970,6 +996,9 @@ async function createSubscription() {
 // ---------------------------------------------------------------------------
 const grokDialog = ref(false)
 const startingAuth = ref(false)
+// 登录入口版本：cn = 国内/全球版共用入口，intl = codebuddy.ai。落地后的 realm
+// 由上游签发的 domain 决定，这里只决定去哪个网关起登录。
+const loginRealm = ref('cn')
 const deviceFlow = ref(null)
 const refreshingCred = ref(null)
 const authProvider = ref(null)
@@ -1155,7 +1184,7 @@ async function startGrokAuth() {
     // 凭据由网关侧轮询 auth/token 拿到，没有可以填的 user_code。
     // session_id 存 state，轮询与取消沿用与设备码同一套节奏。
     if (kind === 'workbuddy') {
-      const flow = await api.startWorkbuddyLogin({ provider_id: authProvider.value?.id })
+      const flow = await api.startWorkbuddyLogin({ provider_id: authProvider.value?.id, region: loginRealm.value })
       deviceFlow.value = {
         status: 'pending',
         session_id: flow.state,
@@ -1181,7 +1210,11 @@ async function startGrokAuth() {
     schedulePoll(2000)
   } catch (e) {
     // 最常见的失败原因是服务器访问不到上游授权服务器，提示要说到点子上
-    const host = { codex: 'auth.openai.com', workbuddy: 'copilot.tencent.com' }[oauthKind(authProvider.value)] || 'auth.x.ai'
+    const host = kind === 'codex'
+      ? 'auth.openai.com'
+      : kind === 'workbuddy'
+        ? (loginRealm.value === 'intl' ? 'www.codebuddy.ai' : 'copilot.tencent.com')
+        : 'auth.x.ai'
     ElMessage.error(e?.message || `发起授权失败，请确认服务器可以访问 ${host}`)
   } finally {
     startingAuth.value = false
@@ -1252,6 +1285,31 @@ async function refreshCredential(p, k) {
     ElMessage.error(e?.message || '续期失败')
   } finally {
     refreshingCred.value = null
+  }
+}
+
+// —— WorkBuddy 每日签到 ——
+// 按北京时间的自然日算：签到按自然日重置，直接用宿主机日期的话，
+// 网关跑在 UTC 机器上会在凌晨把「今天」判成昨天。
+function checkinDay() {
+  return new Date(Date.now() + 8 * 3600 * 1000).toISOString().slice(0, 10)
+}
+
+const checkingIn = ref(null)
+
+async function doCheckin(p, k) {
+  checkingIn.value = `${p.id}:${k.id}`
+  try {
+    const r = await api.workbuddyCheckin(p.id, k.id)
+    const credit = r?.summary?.daily_credit || r?.summary?.today_credit
+    if (r.status === 'ok') ElMessage.success(`签到成功${credit ? `，+${credit} 额度` : ''}`)
+    else if (r.status === 'already') ElMessage.info('今日已签到')
+    else ElMessage.info('该账号没有可签到活动')
+    await load()
+  } catch (e) {
+    ElMessage.error(e?.message || '签到失败')
+  } finally {
+    checkingIn.value = null
   }
 }
 
@@ -1371,6 +1429,31 @@ onBeforeUnmount(() => {
   padding: 9px 13px;
   border-radius: 0 4px 4px 0;
   width: 100%;
+}
+
+/* WorkBuddy 登录入口版本选择。说明文字必须另起一行：挤在按钮旁边
+   会把「开始授权」顶下去，而那个按钮才是这一步的主操作。 */
+.realm-pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 13px;
+  border-top: 1px solid var(--rule-soft);
+}
+
+.realm-pick .realm-label {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.realm-pick .grok-note {
+  flex: 1 0 100%;
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--ink-2);
 }
 
 /* 编辑订阅平台时替代「接口格式」下拉框——协议不是这里能改的东西，

@@ -8,7 +8,7 @@
 // 凭据来源有两条：扫码授权（网关侧轮询 auth/token 自动拿到 uid/domain/token），
 // 或整份粘贴 CodeBuddy CLI 的登录态文件 workbuddy-<uid>.json，解析交给
 // parseWorkbuddyAuthFile——让用户自己去文件里抠五个字段，出错率会高得离谱。
-import { WORKBUDDY_CHAT_BASE, WORKBUDDY_UA } from './workbuddy-lane.js'
+import { WORKBUDDY_UA, workbuddyChatBaseFor, workbuddyRealm, workbuddyRealmFor, WORKBUDDY_REALMS } from './workbuddy-lane.js'
 
 export const WORKBUDDY_REFRESH_PATH = '/v2/plugin/auth/token/refresh'
 
@@ -50,16 +50,19 @@ async function postRefresh(key) {
   if (!key?.refresh_token) {
     throw new Error('缺少 refresh_token，该账号需要重新登录')
   }
-  const base = String(key.chat_base || '').trim() || WORKBUDDY_CHAT_BASE
+  // 续期必须发回账号自己的 realm 网关：跨 realm 会被 APISIX 按身份不匹配拒绝，
+  // 且返回非 JSON 的 401 HTML（表现成 parse failed: invalid character）。
+  const realm = workbuddyRealm(key.domain)
+  const base = String(key.chat_base || '').trim() || realm.base
   const res = await fetch(`${base}${WORKBUDDY_REFRESH_PATH}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      // 续期同样要自称是 CLI，且带上当前 realm —— 换了域名去刷会 401
       Authorization: `Bearer ${key.refresh_token}`,
       'X-User-Id': String(key.uid || ''),
-      'X-Domain': String(key.domain || 'workbuddy.ai'),
-      'User-Agent': 'CLI/2.63.2 CodeBuddy/2.63.2'
+      'X-Domain': String(key.domain || 'www.codebuddy.cn'),
+      'User-Agent': WORKBUDDY_UA,
+      Referer: `${realm.referer}/`
     },
     body: JSON.stringify({ refreshToken: key.refresh_token })
   })
@@ -111,20 +114,21 @@ export async function refreshWorkbuddyToken(key) {
 // 都要一个隔离的 cookie 罐，随 state 存在服务端；多账号并行登录时互不串台，
 // 5 分钟过期后整条会话一起丢弃。
 //
-// 端点固定走 CN 域（copilot.tencent.com）：auth/state 是登录入口，Global 与 CN
-// 共用这一套。
+// 登录起点按 realm 走：CN 与 Global 都从 copilot.tencent.com 起（platform=CLI），
+// 国际版（codebuddy.ai）只认 IDE 客户端，起点是自己的网关 + platform=ide。
+// 哪个 realm 由用户在发起时指定，落地后由 token 的 domain 决定后续路由。
 // ---------------------------------------------------------------------------
-const WORKBUDDY_CN_BASE = 'https://copilot.tencent.com'
 const WORKBUDDY_LOGIN_TTL_MS = 5 * 60 * 1000
 
-// 与参考实现的 commonHeaders 对齐：这几项少一个，上游可能直接把请求当爬虫拦掉
-function loginHeaders(jar) {
+// 与参考实现的 commonHeaders 对齐：这几项少一个，上游可能直接把请求当爬虫拦掉。
+// Origin / Referer 跟着 realm 走——跨 realm 引用会被当成外部渠道。
+function loginHeaders(jar, realm) {
   const headers = {
     'Content-Type': 'application/json',
     Accept: 'application/json, text/plain, */*',
     'X-Requested-With': 'XMLHttpRequest',
-    Origin: 'https://www.codebuddy.cn',
-    Referer: 'https://www.codebuddy.cn/',
+    Origin: realm.referer,
+    Referer: `${realm.referer}/`,
     'User-Agent': WORKBUDDY_UA
   }
   if (jar.size > 0) {
@@ -159,12 +163,15 @@ function sweepLoginStates() {
   }
 }
 
-export async function startWorkbuddyLogin({ providerId = null, name = '', base = WORKBUDDY_CN_BASE } = {}) {
+export async function startWorkbuddyLogin({ providerId = null, name = '', region = 'cn', base = null } = {}) {
   sweepLoginStates()
+  const realm = WORKBUDDY_REALMS[region] || WORKBUDDY_REALMS.cn
   const jar = new Map()
-  const res = await fetch(`${base}/v2/plugin/auth/state?platform=CLI`, {
+  // base 可注入本地上游（测试用）；不传时按 realm 选真实网关
+  const origin = base || realm.base
+  const res = await fetch(`${origin}/v2/plugin/auth/state?platform=${realm.platform}`, {
     method: 'POST',
-    headers: loginHeaders(jar),
+    headers: loginHeaders(jar, realm),
     body: '{}'
   })
   absorbCookies(jar, res)
@@ -175,8 +182,8 @@ export async function startWorkbuddyLogin({ providerId = null, name = '', base =
     throw new Error(`auth/state 缺少 state 或 authUrl${payload?.msg ? `（${payload.msg}）` : ''}`)
   }
   const expires = Date.now() + WORKBUDDY_LOGIN_TTL_MS
-  loginStates.set(data.state, { jar, base, expires, providerId, name })
-  return { state: data.state, auth_url: data.authUrl, expires_at: expires }
+  loginStates.set(data.state, { jar, base: origin, region, expires, providerId, name })
+  return { state: data.state, auth_url: data.authUrl, expires_at: expires, region }
 }
 
 export async function pollWorkbuddyLogin(state) {
@@ -190,7 +197,7 @@ export async function pollWorkbuddyLogin(state) {
   let res
   try {
     res = await fetch(`${entry.base}/v2/plugin/auth/token?state=${encodeURIComponent(state)}`, {
-      headers: loginHeaders(entry.jar)
+      headers: loginHeaders(entry.jar, WORKBUDDY_REALMS[entry.region] || WORKBUDDY_REALMS.cn)
     })
   } catch (err) {
     // 传输层失败是真错误，不是「还在登录中」——继续轮询只会空转到超时
@@ -214,7 +221,10 @@ export async function pollWorkbuddyLogin(state) {
 
   // token 到手后再取账号信息（login/account 在 openresty 后面，登录完成前一律 401）
   const acctRes = await fetch(`${entry.base}/v2/plugin/login/account?state=${encodeURIComponent(state)}`, {
-    headers: { ...loginHeaders(entry.jar), Authorization: `Bearer ${data.accessToken}` }
+    headers: {
+      ...loginHeaders(entry.jar, WORKBUDDY_REALMS[entry.region] || WORKBUDDY_REALMS.cn),
+      Authorization: `Bearer ${data.accessToken}`
+    }
   }).catch(() => null)
   const acctPayload = acctRes && acctRes.ok ? await acctRes.json().catch(() => null) : null
   const acct = acctPayload && typeof acctPayload === 'object' && 'data' in acctPayload ? acctPayload.data : null

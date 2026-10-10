@@ -969,7 +969,10 @@ async function forwardWithFailover(provider, kind, body, res) {
       bumpFailover()
       continue
     }
-    const upstream = joinUrl(provider.base_url, path, queryAuth(plan, token))
+    // Key 自带 base_url 时以它为准：WorkBuddy 的三个 realm（CN / Global / Intl）
+    // 网关互不通用，同一枚 Bearer 发到别的 realm 只会拿到非 JSON 的 401。
+    // 其他协议的 Key 不带这个字段，行为不变。
+    const upstream = joinUrl(key.base_url || provider.base_url, path, queryAuth(plan, token))
     const controller = new AbortController()
     let timer = null
     try {
