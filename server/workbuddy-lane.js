@@ -9,12 +9,56 @@
 //
 // 一句话概括这套上游：**可以照 OpenAI 发，但必须先抹掉所有「不像它家客户端」的痕迹**。
 
-// Global 账号的对话/鉴权网关。
-// 注意与计费网关是两个域：计费与成长中心在 workbuddy.ai，对话必须走 codebuddy.ai。
-// 把 Global 凭据发到 CN 网关（copilot.tencent.com）会拿到非 JSON 的 401，
-// 在网关里表现成 "parse failed: invalid character '<'" —— 极难从报错反推是域名选错了。
-export const WORKBUDDY_CHAT_BASE = 'https://www.codebuddy.ai'
-export const WORKBUDDY_BILLING_BASE = 'https://www.workbuddy.ai'
+// 三个 realm，各自的网关互不通用：同一枚 Bearer 发到别的 realm，网关按身份
+// 不匹配拒绝，且返回非 JSON 的 401 HTML —— 在网关里表现成
+// "parse failed: invalid character '<'"，极难从报错反推是 realm 选错了。
+//
+//   cn     X-Domain 是 www.codebuddy.cn（旧登录态文件里 domain 留空的也算）
+//   global X-Domain 是 workbuddy.ai
+//   intl   X-Domain 是 codebuddy.ai，登录入口只认 IDE 客户端（platform=ide）
+//
+// CN 的对话域与计费域是分开的两个站（copilot.tencent.com vs www.codebuddy.cn），
+// Global 与 Intl 则同域。realm 的归属由 X-Domain 判定，不由平台配置决定。
+export const WORKBUDDY_REALMS = {
+  cn: {
+    base: 'https://copilot.tencent.com',
+    billingBase: 'https://www.codebuddy.cn',
+    referer: 'https://www.codebuddy.cn',
+    platform: 'CLI'
+  },
+  global: {
+    base: 'https://www.workbuddy.ai',
+    billingBase: 'https://www.workbuddy.ai',
+    referer: 'https://www.workbuddy.ai',
+    platform: 'CLI'
+  },
+  intl: {
+    base: 'https://www.codebuddy.ai',
+    billingBase: 'https://www.codebuddy.ai',
+    referer: 'https://www.codebuddy.ai',
+    platform: 'ide'
+  }
+}
+
+// 旧常量名保留，避免外部引用静默失效；语义改为「按账号 realm 取」。
+export function workbuddyRealmFor(domain) {
+  const d = String(domain || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
+  if (d === 'workbuddy.ai' || d.endsWith('.workbuddy.ai')) return 'global'
+  if (d === 'codebuddy.ai' || d.endsWith('.codebuddy.ai')) return 'intl'
+  return 'cn'
+}
+
+export function workbuddyRealm(domain) {
+  return WORKBUDDY_REALMS[workbuddyRealmFor(domain)]
+}
+
+export function workbuddyChatBaseFor(domain) {
+  return workbuddyRealm(domain).base
+}
+
+export function workbuddyBillingBaseFor(domain) {
+  return workbuddyRealm(domain).billingBase
+}
 
 // 上游要求客户端自称是 CodeBuddy CLI。缺了这个头会被认成外部渠道，
 // 与 role:developer 那条 11128 是同一类拦截。
@@ -56,19 +100,22 @@ export function isWorkbuddyProtocol(protocol) {
 
 // X-Domain 必须是账号所属的 realm。国际账号是 workbuddy.ai 或 codebuddy.ai，
 // 国内账号是 codebuddy.cn。选错 realm 的下文见文件头注释。
+// 留空按 CN 处理——参考实现对「domain 为空的旧登录态文件」就是这么兜底的，
+// 默认成国际域反而会把一个国内账号发到 workbuddy.ai 去。
 export function normalizeWorkbuddyDomain(domain) {
   const d = String(domain || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
-  return d || 'workbuddy.ai'
+  return d || 'www.codebuddy.cn'
 }
 
 // 按 Key 注入的请求头。三个值都随账号变化，不能收进平台级 extra_headers：
 // 换一个 Key 就换一个 uid 与 realm，放平台级会让多账号轮换时用错身份。
+// Referer 也跟着 realm 走：跨 realm 引用会被网关当成外部渠道。
 export function workbuddyHeaders(key = {}) {
   return {
     'X-User-Id': String(key.uid || ''),
     'X-Domain': normalizeWorkbuddyDomain(key.domain),
     'User-Agent': WORKBUDDY_UA,
-    Referer: `${WORKBUDDY_CHAT_BASE}/`
+    Referer: `${workbuddyRealm(key.domain).referer}/`
   }
 }
 
