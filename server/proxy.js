@@ -6,7 +6,7 @@ import { ensureAccessToken as ensureCodexToken, refreshAccessToken as refreshCod
 import { ensureWorkbuddyToken, refreshWorkbuddyToken } from './workbuddy-oauth.js'
 import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexAccountHeader } from './codex-responses.js'
 import { TEMPLATES } from './templates.js'
-import { isWorkbuddyProtocol, workbuddyHeaders, shapeWorkbuddyBody, WORKBUDDY_CURATED_MODELS } from './workbuddy-lane.js'
+import { isWorkbuddyProtocol, workbuddyHeaders, workbuddyChatBaseFor, shapeWorkbuddyBody, WORKBUDDY_CURATED_MODELS } from './workbuddy-lane.js'
 import {
   isZenProtocol,
   buildZenHeaders,
@@ -497,6 +497,21 @@ const ANONYMOUS_KEY = Object.freeze({
   cooldown_until: 0
 })
 
+// 请求要发去哪个上游地址。
+//
+// WorkBuddy 的接入地址不是平台级属性，而是账号级属性：它的三个 realm
+// （CN / Global / Intl）网关互不通用，同一枚 Bearer 发到别的 realm 只会拿回
+// 非 JSON 的 401 HTML。平台上配的 base_url 只是建平台时的默认值，真发请求时
+// 必须以账号自己的 X-Domain 为准——生产上就是这么撞上的：国内账号配着国际
+// 地址，聊天 401 进冷却，而同一枚 token 签到却是好的。
+//
+// 其他协议的 Key 不带 domain，行为完全不变。
+function effectiveBaseUrl(provider, key) {
+  if (key?.base_url) return key.base_url
+  if (key?.domain && isWorkbuddyProtocol(provider?.protocol)) return workbuddyChatBaseFor(key.domain)
+  return provider.base_url
+}
+
 function usableKeys(provider) {
   if (isKeylessProtocol(provider.protocol)) return [ANONYMOUS_KEY]
   const now = Date.now()
@@ -662,7 +677,9 @@ export async function refreshModels(providerId) {
       lastError = `凭据刷新失败：${err.message}`
       continue
     }
-    const url = joinUrl(provider.base_url, plan.modelsPath, queryAuth(plan, token))
+    // 模型清单同样按账号 realm 取：国内账号要向 CN 网关要它自己那套模型，
+    // 问国际网关只会拿到国际版清单（甚至因 realm 不匹配 401）
+    const url = joinUrl(effectiveBaseUrl(provider, key), plan.modelsPath, queryAuth(plan, token))
     const controller = new AbortController()
     let timer = null
     try {
@@ -675,7 +692,18 @@ export async function refreshModels(providerId) {
       clearTimeout(timer)
       if (resp.ok) {
         const data = await resp.json()
-        const models = (data.data || []).map((m) => ({ id: m.id, owned_by: m.owned_by || m.display_name || provider.name }))
+        // OpenAI 形态是 {data:[]}；WorkBuddy 是 {code,msg,data} 信封，且 data
+        // 可能是数组、也可能是 {models:[...]}。只认一种形态会把另一些账号的
+        // 刷新结果静默成「没模型」。
+        const raw = data && data.data !== undefined ? data.data : data
+        const list = Array.isArray(raw) ? raw : Array.isArray(raw?.models) ? raw.models : []
+        const models = list
+          .map((m) => ({ id: m.id || m.model_name || m.name, owned_by: m.owned_by || m.display_name || provider.name }))
+          .filter((m) => m.id)
+        // 信封报了错就别把空列表当成功——否则刷新会静默清空模型
+        if (models.length === 0 && Number.isFinite(Number(data?.code)) && Number(data.code) !== 0) {
+          throw new Error(String(data.msg || `上游返回 code=${data.code}`))
+        }
         // 免费通道：上游列表混着付费模型（公共凭据调用必 401），白名单只负责
         // 兜住已知可用项；名字像免费档的新型号在下面实测收编，因此新模型不必等发版。
         // 用户手工加进来的非白名单模型若上游仍在列，一并保留——刷新不该冲掉人的配置。
@@ -969,10 +997,8 @@ async function forwardWithFailover(provider, kind, body, res) {
       bumpFailover()
       continue
     }
-    // Key 自带 base_url 时以它为准：WorkBuddy 的三个 realm（CN / Global / Intl）
-    // 网关互不通用，同一枚 Bearer 发到别的 realm 只会拿到非 JSON 的 401。
-    // 其他协议的 Key 不带这个字段，行为不变。
-    const upstream = joinUrl(key.base_url || provider.base_url, path, queryAuth(plan, token))
+    // 地址按账号 realm 定，不是按平台配置——详见 effectiveBaseUrl
+    const upstream = joinUrl(effectiveBaseUrl(provider, key), path, queryAuth(plan, token))
     const controller = new AbortController()
     let timer = null
     try {

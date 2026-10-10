@@ -20,7 +20,7 @@ import {
 import { TEMPLATES } from './templates.js'
 import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
 import { startWorkbuddyLogin, pollWorkbuddyLogin, cancelWorkbuddyLogin } from './workbuddy-oauth.js'
-import { fetchWorkbuddyCheckinStatus, performWorkbuddyCheckin, beijingDayKey } from './workbuddy-checkin.js'
+import { fetchWorkbuddyCheckinStatus, performWorkbuddyCheckin, beijingDayKey, fetchWorkbuddyCredits } from './workbuddy-checkin.js'
 import { addLog, getLogs, initLogger } from './logger.js'
 import { checkUpdate, applyUpdate } from './update.js'
 import {
@@ -801,6 +801,30 @@ app.post('/api/oauth/workbuddy/accounts/:providerId/:keyId/checkin', api(async (
     // 签到失败只影响这一个账号，不进冷却——它不影响对话能力
     key.last_error = err.message
     key.last_error_at = Date.now()
+    persistImmediate()
+    res.status(400).json({ error: { message: err.message } })
+  }
+}))
+
+// 剩余额度。查询结果缓存在 Key 上：额度是慢变量，没必要每次进页面都打上游，
+// 前端只在缓存过期时才回来查。
+app.get('/api/oauth/workbuddy/accounts/:providerId/:keyId/credits', api(async (req, res) => {
+  const p = getProvider(req.params.providerId)
+  if (!p) return res.status(404).json({ error: { message: '平台不存在' } })
+  const key = (p.keys || []).find((k) => k.id === req.params.keyId)
+  if (!key) return res.status(404).json({ error: { message: '账号不存在' } })
+  try {
+    const credits = await fetchWorkbuddyCredits(key)
+    key.credits_remain = credits.remain
+    key.credits_used = credits.used
+    key.credits_size = credits.size
+    key.credits_unit = credits.unit
+    key.credits_at = credits.fetched_at
+    delete key.credits_error
+    persistImmediate()
+    res.json(credits)
+  } catch (err) {
+    key.credits_error = err.message
     persistImmediate()
     res.status(400).json({ error: { message: err.message } })
   }

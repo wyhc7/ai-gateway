@@ -1,8 +1,9 @@
-// WorkBuddy / CodeBuddy 每日签到
+// WorkBuddy / CodeBuddy 计费面：每日签到 + 剩余额度
 //
 // 契约来自 cpa-multi-plugins 的 workbuddy 插件（docs/PROTOCOL.md 与 billing.go）：
 //   状态 POST /v2/billing/meter/checkin-activity-status
 //   领取 POST /v2/billing/meter/daily-checkin   body {}
+//   额度 POST /v2/billing/meter/get-user-resource（ProductCode=p_tcaca, Status=[0,3]）
 //
 // 两个必须记住的坑：
 //  1. 计费域与对话域不是同一个站。CN 账号对话走 copilot.tencent.com，签到却要去
@@ -14,6 +15,7 @@ import { WORKBUDDY_UA, workbuddyBillingBaseFor, workbuddyRealm, workbuddyRealmFo
 
 export const WORKBUDDY_CHECKIN_STATUS_PATH = '/v2/billing/meter/checkin-activity-status'
 export const WORKBUDDY_CHECKIN_CLAIM_PATH = '/v2/billing/meter/daily-checkin'
+export const WORKBUDDY_RESOURCE_PATH = '/v2/billing/meter/get-user-resource'
 
 // 计费面的头与对话面不同：UA 是简短的 "CodeBuddy"，还要带上企业/租户头。
 // 国际版（codebuddy.ai）网关只认 IDE 客户端头集且不要 X-Requested-With，
@@ -112,4 +114,121 @@ export async function performWorkbuddyCheckin(key) {
 // 网关可能跑在 UTC 机器上，用本地时间会在凌晨误判成昨天。
 export function beijingDayKey(now = Date.now()) {
   return new Date(now + 8 * 3600 * 1000).toISOString().slice(0, 10)
+}
+
+// ---------------------------------------------------------------------------
+// 剩余额度
+// ---------------------------------------------------------------------------
+
+const num = (v) => {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : 0
+}
+
+// 折算一个资源包的 (remain, used, size)。
+//
+// 优先周期字段：它才是「本周期还能花多少」。签到是**新增一个包**，size 与
+// remain 一起往上涨——那是发放不是消耗，所以消耗必须看 used = size − remain，
+// 只盯着 remain 下降会把发额度误读成花钱。
+// 周期字段完全缺席时才回落到终身容量字段。
+export function packageBalance(a = {}) {
+  const cycleSize = num(a.CycleCapacitySize)
+  if (cycleSize > 0) {
+    let remain = num(a.CycleCapacityRemain)
+    if (remain < 0) remain = 0
+    if (remain > cycleSize) remain = cycleSize
+    let used = cycleSize - remain
+    // 上游自报的 used 更大时信它，同时把 remain 拉平，别让两个数对不上
+    const reported = num(a.CycleCapacityUsed)
+    if (reported > used) {
+      used = reported
+      if (cycleSize >= used) remain = cycleSize - used
+    }
+    return { remain, used, size: cycleSize }
+  }
+
+  const cycleRemain = num(a.CycleCapacityRemain)
+  const cycleUsed = num(a.CycleCapacityUsed)
+  if (cycleRemain > 0 || cycleUsed > 0) {
+    let remain = cycleRemain < 0 ? 0 : cycleRemain
+    let used = cycleUsed < 0 ? 0 : cycleUsed
+    let size = remain + used
+    const lifetime = num(a.CapacitySize)
+    if (lifetime > size) {
+      size = lifetime
+      if (size >= remain) used = size - remain
+    }
+    return { remain, used, size }
+  }
+
+  let remain = num(a.CapacityRemain)
+  let used = num(a.CapacityUsed)
+  if (remain < 0) remain = 0
+  if (used < 0) used = 0
+  let size = num(a.CapacitySize)
+  if (size <= 0) size = remain + used
+  if (used === 0 && size > remain) used = size - remain
+  return { remain, used, size }
+}
+
+// 时间范围按上游要求给 "YYYY-MM-DD HH:MM:SS"。Begin=now、End=百年后，
+// 时区偏移落在一个世纪宽的窗口里，不影响过滤结果。
+function fmtStamp(d) {
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ` +
+    `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`
+}
+
+export async function fetchWorkbuddyCredits(key) {
+  const now = new Date()
+  const body = {
+    PageNumber: 1,
+    PageSize: 100,
+    ProductCode: 'p_tcaca',
+    // 0=生效中，3=已耗尽但仍在列。少了 3 会把已经用光的账号显示成「额度未知」
+    Status: [0, 3],
+    PackageEndTimeRangeBegin: fmtStamp(now),
+    PackageEndTimeRangeEnd: fmtStamp(new Date(now.getTime() + 101 * 365 * 24 * 3600 * 1000))
+  }
+  const payload = await billingCall(key, WORKBUDDY_RESOURCE_PATH, body)
+  const envelope = payload && typeof payload === 'object' && 'data' in payload ? payload.data : payload
+  const accounts = Array.isArray(envelope?.Response?.Data?.Accounts) ? envelope.Response.Data.Accounts : []
+  if (accounts.length === 0) {
+    const code = payload && typeof payload === 'object' ? Number(payload.code) : 0
+    if (Number.isFinite(code) && code !== 0) {
+      throw new Error(payload.msg ? String(payload.msg) : `额度查询被拒绝（code=${code}）`)
+    }
+  }
+
+  // 汇总全部包（体验版 + 签到/裂变赠送包 + 其它赠送包）。多个包并存是常态，
+  // 只读第一个会把签到攒出来的额度漏掉。
+  let remain = 0
+  let used = 0
+  let size = 0
+  const packages = accounts.map((a) => {
+    const b = packageBalance(a)
+    remain += b.remain
+    used += b.used
+    size += b.size
+    return {
+      name: a.PackageName || '额度包',
+      remain: b.remain,
+      used: b.used,
+      size: b.size,
+      cycle_end: a.CycleEndTime || null
+    }
+  })
+  if (size > 0) {
+    const derived = Math.max(0, size - remain)
+    if (derived > used) used = derived
+  }
+  return {
+    remain,
+    used,
+    size,
+    unit: accounts[0]?.CapacityUnit || 'credits',
+    pack_count: packages.length,
+    packages,
+    fetched_at: Date.now()
+  }
 }

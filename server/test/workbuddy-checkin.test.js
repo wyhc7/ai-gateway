@@ -14,7 +14,9 @@ const {
   fetchWorkbuddyCheckinStatus,
   performWorkbuddyCheckin,
   workbuddyBillingHeaders,
-  beijingDayKey
+  beijingDayKey,
+  packageBalance,
+  fetchWorkbuddyCredits
 } = await import('../workbuddy-checkin.js')
 
 function startUpstream(handler) {
@@ -134,5 +136,114 @@ describe('签到日', () => {
     assert.equal(beijingDayKey(Date.parse('2026-10-01T16:00:00Z')), '2026-10-02')
     // 2026-10-01 15:59 UTC → 北京 10-01 23:59（还没跨天）
     assert.equal(beijingDayKey(Date.parse('2026-10-01T15:59:00Z')), '2026-10-01')
+  })
+})
+
+describe('额度折算', () => {
+  test('周期字段优先，消耗按 size − remain 算', () => {
+    // 签到是新增一个包：size 与 remain 一起涨，那是发放不是消耗。
+    // 只盯着 remain 会把「发了 30」读成「花了 30」。
+    const b = packageBalance({ CycleCapacitySize: 500, CycleCapacityRemain: 470 })
+    assert.equal(b.size, 500)
+    assert.equal(b.remain, 470)
+    assert.equal(b.used, 30)
+  })
+
+  test('上游自报的 used 更大时信它，并把 remain 拉平', () => {
+    const b = packageBalance({ CycleCapacitySize: 500, CycleCapacityRemain: 470, CycleCapacityUsed: 60 })
+    assert.equal(b.used, 60)
+    assert.equal(b.remain, 440)
+  })
+
+  test('remain 越界时收敛到 [0, size]', () => {
+    assert.equal(packageBalance({ CycleCapacitySize: 100, CycleCapacityRemain: -5 }).remain, 0)
+    assert.equal(packageBalance({ CycleCapacitySize: 100, CycleCapacityRemain: 999 }).remain, 100)
+  })
+
+  test('周期字段缺席时回落到终身容量字段', () => {
+    const b = packageBalance({ CapacityRemain: 80, CapacityUsed: 20, CapacitySize: 100 })
+    assert.equal(b.remain, 80)
+    assert.equal(b.used, 20)
+    assert.equal(b.size, 100)
+  })
+
+  test('终身字段缺 used 时按 size − remain 推，不低估消耗', () => {
+    const b = packageBalance({ CapacityRemain: 80, CapacitySize: 100 })
+    assert.equal(b.used, 20)
+  })
+
+  test('完全没有字段时不产生 NaN', () => {
+    const b = packageBalance({})
+    assert.equal(b.remain, 0)
+    assert.equal(b.used, 0)
+    assert.equal(b.size, 0)
+  })
+})
+
+describe('额度查询', () => {
+  test('多个资源包累加——签到攒出来的包不能漏', async () => {
+    // startUpstream 已经消费完请求体再回调，这里不能再注册一次 req 事件，
+    // 否则 end 永远不会再触发，测试会一直挂到超时。
+    const { server, base } = await startUpstream(({ res }) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        code: 0,
+        data: {
+          Response: {
+            Data: {
+              TotalCount: 2,
+              Accounts: [
+                { PackageName: '体验版', CycleCapacitySize: 100, CycleCapacityRemain: 40, CapacityUnit: 'credits' },
+                { PackageName: '签到包', CycleCapacitySize: 30, CycleCapacityRemain: 30 }
+              ]
+            }
+          }
+        }
+      }))
+    })
+    try {
+      const out = await fetchWorkbuddyCredits({ billing_base: base, access_token: 't', domain: 'www.codebuddy.cn' })
+      assert.equal(out.remain, 70)
+      assert.equal(out.size, 130)
+      assert.equal(out.used, 60)
+      assert.equal(out.pack_count, 2)
+      assert.equal(out.unit, 'credits')
+      assert.equal(out.packages[1].name, '签到包')
+    } finally {
+      server.close()
+    }
+  })
+
+  test('请求体带 ProductCode 与 Status=[0,3]，少了会漏掉已耗尽的包', async () => {
+    let seen = null
+    const { server, base } = await startUpstream(({ res, raw }) => {
+      seen = JSON.parse(raw)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ code: 0, data: { Response: { Data: { Accounts: [] } } } }))
+    })
+    try {
+      await fetchWorkbuddyCredits({ billing_base: base, access_token: 't' })
+      assert.equal(seen.ProductCode, 'p_tcaca')
+      assert.deepEqual(seen.Status, [0, 3])
+      assert.equal(seen.PageSize, 100)
+      assert.match(seen.PackageEndTimeRangeBegin, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)
+    } finally {
+      server.close()
+    }
+  })
+
+  test('信封报错时抛上游消息，不返回一个看似正常的 0', async () => {
+    const { server, base } = await startUpstream(({ res }) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ code: 1003, msg: '凭据失效' }))
+    })
+    try {
+      await assert.rejects(
+        () => fetchWorkbuddyCredits({ billing_base: base, access_token: 'bad' }),
+        /凭据失效/
+      )
+    } finally {
+      server.close()
+    }
   })
 })
