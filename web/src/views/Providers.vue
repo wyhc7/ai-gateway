@@ -390,9 +390,9 @@
         <!-- WorkBuddy 没有验证码：上游给的是登录页地址，扫码或网页登录，没有可输入的 user_code -->
         <template v-if="!deviceFlow.user_code">
           <p class="device-hint">
-            打开
-            <a :href="deviceFlow.verify_url" target="_blank" rel="noopener noreferrer">{{ deviceFlow.verify_url }}</a>
-            ，用 CodeBuddy 手机端扫码，或直接在页面上登录。完成后这里会自动绑定。
+            用 CodeBuddy 手机端扫码，或直接在
+            <a :href="deviceFlow.verify_url" target="_blank" rel="noopener noreferrer">登录页</a>
+            上登录。完成后这里会自动绑定。
           </p>
           <div class="device-actions">
             <el-button size="small" plain @click="openVerifyPage">打开授权登录页</el-button>
