@@ -109,8 +109,19 @@
                         :loading="refreshingCred === k.id"
                         @click="refreshCredential(p, k)"
                       >续期</el-button>
-                      <!-- WorkBuddy 独有：每日签到领额度。当天已签就只显示状态，不再给按钮 -->
+                      <!-- WorkBuddy 独有：剩余额度 + 每日签到。
+                           当天已签就只显示状态，不再给按钮 -->
                       <template v-if="isWorkbuddyProvider(p)">
+                        <el-tooltip
+                          v-if="k.credits_remain !== undefined"
+                          :content="creditsTip(k)"
+                          placement="top"
+                        >
+                          <span class="badge" :class="{ 'badge-amber': creditsLow(k) }">剩 {{ k.credits_remain }}</span>
+                        </el-tooltip>
+                        <el-tooltip v-else-if="k.credits_error" :content="k.credits_error" placement="top">
+                          <span class="badge badge-amber">额度未知</span>
+                        </el-tooltip>
                         <span v-if="k.checkin_date === checkinDay()" class="badge">已签到</span>
                         <el-button
                           v-else
@@ -667,10 +678,34 @@ async function load() {
   loading.value = true
   try {
     providers.value = await api.getProviders()
+    refreshWorkbuddyCredits()
   } catch (e) {
     ElMessage.error(e?.message || '加载平台列表失败')
   } finally {
     loading.value = false
+  }
+}
+
+// WorkBuddy 额度：缓存过期（5 分钟）才回查上游。结果直接回写当前这份数据，
+// 不再触发整页 reload——额度只是展示信息，不该让页面闪一下。
+const CREDITS_TTL_MS = 5 * 60 * 1000
+
+function refreshWorkbuddyCredits() {
+  for (const p of providers.value || []) {
+    if (p.protocol !== 'workbuddy-oauth') continue
+    for (const k of p.keys || []) {
+      if (k.type !== 'oauth' || !k.token_present) continue
+      if (k.credits_at && Date.now() - k.credits_at < CREDITS_TTL_MS) continue
+      api.getWorkbuddyCredits(p.id, k.id)
+        .then((c) => {
+          k.credits_remain = c.remain
+          k.credits_used = c.used
+          k.credits_size = c.size
+          k.credits_at = c.fetched_at
+          delete k.credits_error
+        })
+        .catch((e) => { k.credits_error = e?.message || '额度查询失败' })
+    }
   }
 }
 
@@ -1311,6 +1346,20 @@ async function doCheckin(p, k) {
   } finally {
     checkingIn.value = null
   }
+}
+
+// 一行放不下全部额度信息：明细进 tooltip，行上只留「剩 X」这个最要紧的数。
+function creditsTip(k) {
+  if (k.credits_error) return `额度查询失败：${k.credits_error}`
+  const parts = [`剩余额度 ${k.credits_remain}${k.credits_size ? ` / ${k.credits_size}` : ''} ${k.credits_unit || 'credits'}`]
+  if (k.credits_used) parts.push(`已用 ${k.credits_used}`)
+  if (k.credits_at) parts.push(`更新于 ${new Date(k.credits_at).toLocaleTimeString()}`)
+  return parts.join(' · ')
+}
+
+// 低于总量 10% 转琥珀色：签到攒出来的额度本来就不多，别等归零才提醒
+function creditsLow(k) {
+  return Number(k.credits_size) > 0 && Number(k.credits_remain) <= Number(k.credits_size) / 10
 }
 
 async function exportProviders() {
