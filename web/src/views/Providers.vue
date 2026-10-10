@@ -372,29 +372,53 @@
         <p v-if="isCodexProvider(authProvider)">
           用你的 ChatGPT Plus / Pro / Business 订阅账号授权，授权后这个账号的 Codex 额度即可通过网关调用。
         </p>
+        <p v-else-if="isWorkbuddyProvider(authProvider)">
+          用你的 CodeBuddy 订阅账号扫码授权，授权后这个账号的额度即可通过网关调用。
+          uid、realm、token 由网关自动拿到并绑定，不用再去 CLI 里翻登录态文件。
+        </p>
         <p v-else>用你的 SuperGrok / X Premium 订阅账号授权，授权后这个账号的额度即可通过网关调用。</p>
         <p class="grok-note">不需要 API Key，也不会保存你的登录密码。网关只拿到一枚可撤销的访问令牌。</p>
         <p v-if="isCodexProvider(authProvider)" class="grok-note">
           注意：需先在 ChatGPT → 设置 → 安全 中开启「允许设备码登录」（默认关闭），否则无法完成授权。
         </p>
+        <p v-else-if="isWorkbuddyProvider(authProvider)" class="grok-note">
+          授权会话 5 分钟过期，超时了重新点一次即可。
+        </p>
       </div>
 
       <div v-else-if="deviceFlow.status === 'pending'" class="device-step">
-        <div class="device-code">{{ deviceFlow.user_code }}</div>
-        <p class="device-hint">
-          请在浏览器打开
-          <a :href="deviceFlow.verify_url" target="_blank" rel="noopener noreferrer">{{ deviceFlow.verify_url }}</a>
-          ，输入上面的验证码完成授权。
-        </p>
-        <div class="device-actions">
-          <el-button size="small" plain @click="copyCode">复制验证码</el-button>
-          <el-button v-if="deviceFlow.verify_url_complete" size="small" text @click="openVerifyPage">
-            直接打开验证页
-          </el-button>
-        </div>
-        <p class="device-status">
-          等待授权确认……页面会自动检查，无需手动刷新。
-        </p>
+        <!-- WorkBuddy 没有验证码：上游给的是登录页地址，扫码或网页登录，没有可输入的 user_code -->
+        <template v-if="!deviceFlow.user_code">
+          <p class="device-hint">
+            打开
+            <a :href="deviceFlow.verify_url" target="_blank" rel="noopener noreferrer">{{ deviceFlow.verify_url }}</a>
+            ，用 CodeBuddy 手机端扫码，或直接在页面上登录。完成后这里会自动绑定。
+          </p>
+          <div class="device-actions">
+            <el-button size="small" plain @click="openVerifyPage">打开授权登录页</el-button>
+            <el-button size="small" text @click="copyCode">复制链接</el-button>
+          </div>
+          <p class="device-status">
+            等待登录完成……页面会自动检查，无需手动刷新。
+          </p>
+        </template>
+        <template v-else>
+          <div class="device-code">{{ deviceFlow.user_code }}</div>
+          <p class="device-hint">
+            请在浏览器打开
+            <a :href="deviceFlow.verify_url" target="_blank" rel="noopener noreferrer">{{ deviceFlow.verify_url }}</a>
+            ，输入上面的验证码完成授权。
+          </p>
+          <div class="device-actions">
+            <el-button size="small" plain @click="copyCode">复制验证码</el-button>
+            <el-button v-if="deviceFlow.verify_url_complete" size="small" text @click="openVerifyPage">
+              直接打开验证页
+            </el-button>
+          </div>
+          <p class="device-status">
+            等待授权确认……页面会自动检查，无需手动刷新。
+          </p>
+        </template>
       </div>
 
       <div v-else-if="deviceFlow.status === 'done'" class="device-done">
@@ -926,14 +950,9 @@ async function createSubscription() {
     subscriptionDialog.value = false
     await load()
     ElMessage.success('订阅平台已创建，接下来绑定凭据')
-    if (isWorkbuddyProvider(created)) {
-      // WorkBuddy 没有设备码授权，凭据只能靠导入登录态文件。直接把导入框打开，
-      // 免得用户回头在平台列表里找「导入 Token」在哪一步。
-      openImportCredentialDialog(created)
-    } else {
-      // 平台没有凭据就服务不了，所以建完直接进授权；想改走「导入 Token」关掉即可
-      openGrokAuth(created)
-    }
+    // 平台没有凭据就服务不了，所以建完直接进授权：WorkBuddy 扫码、Grok/Codex 设备码。
+    // 想改走「导入 Token」关掉这个框，从平台列表里点即可
+    openGrokAuth(created)
   } catch (e) {
     ElMessage.error(e?.message || '创建订阅平台失败')
   } finally {
@@ -1117,10 +1136,12 @@ function stopPolling() {
 function closeGrokAuth() {
   stopPolling()
   const flow = deviceFlow.value
-  // 用户中途放弃时通知服务端丢弃会话，别让它在那儿空转到过期
+  // 用户中途放弃时通知服务端丢弃会话，别让它在那儿空转到过期——
+  // WorkBuddy 的 cookie 罐也随 state 挂在服务端，不通知就只能等满 5 分钟
   if (flow?.status === 'pending' && flow?.session_id) {
-    const kind = isCodexProvider(authProvider.value) ? 'codex' : 'grok'
-    ;(kind === 'codex' ? api.cancelCodexDevice(flow.session_id) : api.cancelGrokDevice(flow.session_id)).catch(() => {})
+    const kind = oauthKind(authProvider.value)
+    const cancel = { codex: api.cancelCodexDevice, workbuddy: api.cancelWorkbuddyLogin }[kind] || api.cancelGrokDevice
+    cancel(flow.session_id).catch(() => {})
   }
   deviceFlow.value = null
   authProvider.value = null
@@ -1130,6 +1151,23 @@ async function startGrokAuth() {
   startingAuth.value = true
   try {
     const kind = oauthKind(authProvider.value)
+    // WorkBuddy 不是设备码：上游给的是登录页地址（打开后扫码或网页登录），
+    // 凭据由网关侧轮询 auth/token 拿到，没有可以填的 user_code。
+    // session_id 存 state，轮询与取消沿用与设备码同一套节奏。
+    if (kind === 'workbuddy') {
+      const flow = await api.startWorkbuddyLogin({ provider_id: authProvider.value?.id })
+      deviceFlow.value = {
+        status: 'pending',
+        session_id: flow.state,
+        user_code: '',
+        verify_url: flow.auth_url,
+        verify_url_complete: flow.auth_url
+      }
+      // 扫码这件事发生在用户自己的浏览器里，直接开新标签，别让他再手动复制
+      window.open(flow.auth_url, '_blank', 'noopener')
+      schedulePoll(2000)
+      return
+    }
     const flow = kind === 'codex'
       ? await api.startCodexDevice({ provider_id: authProvider.value?.id })
       : await api.startGrokDevice({ provider_id: authProvider.value?.id })
@@ -1143,7 +1181,7 @@ async function startGrokAuth() {
     schedulePoll(2000)
   } catch (e) {
     // 最常见的失败原因是服务器访问不到上游授权服务器，提示要说到点子上
-    const host = isCodexProvider(authProvider.value) ? 'auth.openai.com' : 'auth.x.ai'
+    const host = { codex: 'auth.openai.com', workbuddy: 'copilot.tencent.com' }[oauthKind(authProvider.value)] || 'auth.x.ai'
     ElMessage.error(e?.message || `发起授权失败，请确认服务器可以访问 ${host}`)
   } finally {
     startingAuth.value = false
@@ -1160,9 +1198,11 @@ async function pollOnce() {
   if (!sessionId) return
   try {
     const kind = oauthKind(authProvider.value)
-    const r = kind === 'codex'
-      ? await api.pollCodexDevice(sessionId)
-      : await api.pollGrokDevice(sessionId)
+    const r = kind === 'workbuddy'
+      ? await api.pollWorkbuddyLogin(sessionId)
+      : kind === 'codex'
+        ? await api.pollCodexDevice(sessionId)
+        : await api.pollGrokDevice(sessionId)
     if (r.status === 'done') {
       stopPolling()
       deviceFlow.value = { status: 'done' }
@@ -1172,10 +1212,13 @@ async function pollOnce() {
     }
     if (r.status === 'error' || r.status === 'expired') {
       stopPolling()
-      deviceFlow.value = { status: 'error', error: r.error || '授权已超时，请重新发起' }
+      // WorkBuddy 用 message 传错误，设备码流程用 error，两个都认
+      deviceFlow.value = { status: 'error', error: r.error || r.message || '授权已超时，请重新发起' }
       return
     }
-    schedulePoll(Math.max((r.retry_after || 5) * 1000, 2000))
+    // 扫码登录的「刚扫完」这一下值得查得密一点，人会盯着页面看
+    const fallback = kind === 'workbuddy' ? 3 : 5
+    schedulePoll(Math.max((r.retry_after || fallback) * 1000, 2000))
   } catch (e) {
     stopPolling()
     deviceFlow.value = { status: 'error', error: e?.message || '轮询失败' }
@@ -1183,16 +1226,19 @@ async function pollOnce() {
 }
 
 async function copyCode() {
+  // 设备码流程复制验证码，WorkBuddy 复制登录页地址——没有 user_code 可抄
+  const flow = deviceFlow.value
+  const isCode = Boolean(flow?.user_code)
   try {
-    await navigator.clipboard.writeText(deviceFlow.value.user_code)
-    ElMessage.success('验证码已复制')
+    await navigator.clipboard.writeText(flow?.user_code || flow?.verify_url || '')
+    ElMessage.success(isCode ? '验证码已复制' : '链接已复制')
   } catch {
     ElMessage.warning('复制失败，请手动选中')
   }
 }
 
 function openVerifyPage() {
-  window.open(deviceFlow.value.verify_url_complete, '_blank', 'noopener')
+  window.open(deviceFlow.value.verify_url_complete || deviceFlow.value.verify_url, '_blank', 'noopener')
 }
 
 async function refreshCredential(p, k) {

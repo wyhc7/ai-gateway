@@ -19,6 +19,7 @@ import {
 } from './api-keys.js'
 import { TEMPLATES } from './templates.js'
 import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
+import { startWorkbuddyLogin, pollWorkbuddyLogin, cancelWorkbuddyLogin } from './workbuddy-oauth.js'
 import { addLog, getLogs, initLogger } from './logger.js'
 import { checkUpdate, applyUpdate } from './update.js'
 import {
@@ -686,6 +687,60 @@ app.delete('/api/oauth/codex/device/:id', (req, res) => {
 
 app.get('/api/oauth/codex/device', (req, res) => {
   res.json({ sessions: listCodexPendingSessions() })
+})
+
+// —— WorkBuddy（腾讯 CodeBuddy 国际版）扫码授权 ——
+// 与设备码流程同构，差异全在 workbuddy-oauth.js：上游返回的是登录页地址
+//（打开后扫码/网页登录），cookie 会话随 state 存在服务端内存，5 分钟过期。
+// start 必须带 provider_id，否则 poll 成功后凭据无处可去，只会返回而不入库。
+app.post('/api/oauth/workbuddy/login/start', api(async (req, res) => {
+  const { provider_id = null, name = '' } = req.body || {}
+  if (provider_id && !getProvider(provider_id)) {
+    return res.status(404).json({ error: { message: '平台不存在' } })
+  }
+  try {
+    const flow = await startWorkbuddyLogin({ providerId: provider_id, name })
+    addLog({ type: 'oauth', action: 'device_start', provider_id, detail: 'WorkBuddy 等待扫码登录' })
+    res.status(201).json(flow)
+  } catch (err) {
+    res.status(502).json({ error: { message: err.message } })
+  }
+}))
+
+app.post('/api/oauth/workbuddy/login/:state/poll', api(async (req, res) => {
+  const result = await pollWorkbuddyLogin(req.params.state)
+  if (result.status !== 'done') return res.json(result)
+
+  const { credential, provider_id } = result
+  const p = provider_id ? getProvider(provider_id) : null
+  if (!p) return res.json({ status: 'done', credential: serializeKey(credential) })
+
+  const key = {
+    id: genId(),
+    type: 'oauth',
+    provider: 'workbuddy',
+    name: credential.name || `WorkBuddy 账号 ${(p.keys || []).length + 1}`,
+    enabled: true,
+    cooldown_until: 0,
+    last_error: null,
+    last_error_at: null,
+    created_at: Date.now(),
+    access_token: credential.access_token,
+    refresh_token: credential.refresh_token,
+    expires_at: credential.expires_at,
+    domain: credential.domain,
+    uid: credential.uid,
+    token_type: 'Bearer'
+  }
+  p.keys = p.keys || []
+  p.keys.push(key)
+  persistImmediate()
+  addLog({ type: 'oauth', action: 'bound', provider_id, detail: `${key.name} 已绑定` })
+  res.json({ status: 'done', key_id: key.id, provider: serializeProvider(p) })
+}))
+
+app.delete('/api/oauth/workbuddy/login/:state', (req, res) => {
+  res.json({ ok: cancelWorkbuddyLogin(req.params.state) })
 })
 
 app.post('/api/oauth/codex/accounts/:providerId/:keyId/refresh', api(async (req, res) => {

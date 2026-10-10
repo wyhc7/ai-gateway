@@ -91,6 +91,9 @@ export const api = {
   // Codex 订阅账号（ChatGPT Plus/Pro 的设备码授权）
   startCodexDevice: (data) => request('/api/oauth/codex/device/start', { method: 'POST', body: JSON.stringify(data || {}) }),
   pollCodexDevice: (sessionId) => request(`/api/oauth/codex/device/${sessionId}/poll`, { method: 'POST' }),
+  startWorkbuddyLogin: (data) => request('/api/oauth/workbuddy/login/start', { method: 'POST', body: JSON.stringify(data || {}) }),
+  pollWorkbuddyLogin: (state) => request(`/api/oauth/workbuddy/login/${encodeURIComponent(state)}/poll`, { method: 'POST' }),
+  cancelWorkbuddyLogin: (state) => request(`/api/oauth/workbuddy/login/${encodeURIComponent(state)}`, { method: 'DELETE' }),
   cancelCodexDevice: (sessionId) => request(`/api/oauth/codex/device/${sessionId}`, { method: 'DELETE' }),
   refreshCodexAccount: (providerId, keyId) => request(`/api/oauth/codex/accounts/${providerId}/${keyId}/refresh`, { method: 'POST' }),
 

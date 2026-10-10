@@ -20,7 +20,7 @@ export const SUBSCRIPTION_PLANS = [
     // 19 个模型里有 8 个上游界面不展示但直调可用（gpt-5.6-luna/sol/terra、
     // claude-opus-5、glm-5.3、gpt-6-astra 等），清单由协议内置白名单兜底，
     // 不在这里重复维护。
-    hint: '凭据从 CodeBuddy CLI 的登录态文件 workbuddy-<uid>.json 取，建完平台用「导入 Token」整份粘贴，网关自己解析 uid / realm / token。'
+    hint: '建完平台直接弹扫码授权，uid / realm / token 由网关自动拿到；不想扫码也可以在平台列表点「导入 Token」，把 CLI 的 workbuddy-<uid>.json 整份粘贴进去。'
   }
 ]
 
