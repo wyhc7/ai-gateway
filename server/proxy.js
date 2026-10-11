@@ -7,6 +7,7 @@ import { ensureWorkbuddyToken, refreshWorkbuddyToken } from './workbuddy-oauth.j
 import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexAccountHeader } from './codex-responses.js'
 import { TEMPLATES } from './templates.js'
 import { isWorkbuddyProtocol, workbuddyHeaders, workbuddyChatBaseFor, shapeWorkbuddyBody, WORKBUDDY_CURATED_MODELS } from './workbuddy-lane.js'
+import { fetchWorkbuddyModelRates } from './workbuddy-catalog.js'
 import {
   isZenProtocol,
   buildZenHeaders,
@@ -737,6 +738,19 @@ export async function refreshModels(providerId) {
         provider.models = usable
         provider.models_updated_at = Date.now()
         if (curatedOnly) provider.models_source = 'default'
+        // WorkBuddy：顺带取一次积分倍率。它在另一个端点（/v3/config），模型
+        // 清单里没有。取不到不影响清单——倍率只是展示信息，不能因为它失败
+        // 就把整次刷新判成失败。
+        if (isWorkbuddyProtocol(provider.protocol)) {
+          try {
+            const { rates } = await fetchWorkbuddyModelRates(key)
+            provider.model_rates = rates
+            delete provider.model_rates_error
+          } catch (err) {
+            provider.model_rates_error = err.message
+            addLog({ type: 'system', detail: `WorkBuddy 积分倍率获取失败：${err.message}` })
+          }
+        }
         persistImmediate()
         return { ok: true, count: usable.length, discovered: discoveredIds, provider }
       }
