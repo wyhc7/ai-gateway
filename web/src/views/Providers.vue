@@ -159,7 +159,15 @@
                 <div v-else class="model-list">
                   <div v-for="m in p.models" :key="m.id" class="model-item">
                     <span class="model-id">{{ m.id }}</span>
-                    <span class="muted">{{ m.owned_by }}</span>
+                    <!-- 倍率来自上游 /v3/config，格式就是它给的 "x0.79"；
+                         没有倍率的（如倍率浮动的 auto）回落到厂商名 -->
+                    <span
+                      v-if="modelRate(p, m.id)"
+                      class="rate-chip"
+                      :class="{ 'rate-free': isFreeRate(modelRate(p, m.id)) }"
+                      :title="`积分倍率 ${modelRate(p, m.id)}——调用该模型按此倍率扣积分`"
+                    >{{ modelRate(p, m.id) }}</span>
+                    <span v-else class="muted">{{ m.owned_by }}</span>
                   </div>
                 </div>
                 <div v-if="p.models_updated_at" class="muted" style="margin-top: 8px">最近更新：{{ formatTime(p.models_updated_at) }}</div>
@@ -686,27 +694,45 @@ async function load() {
   }
 }
 
-// WorkBuddy 额度：缓存过期（5 分钟）才回查上游。结果直接回写当前这份数据，
-// 不再触发整页 reload——额度只是展示信息，不该让页面闪一下。
-const CREDITS_TTL_MS = 5 * 60 * 1000
+// 额度轮询。结果直接回写当前这份数据，不触发整页 reload——额度只是展示
+// 信息，不该让页面闪一下。in-flight 集合防止上一轮还没回来又发一轮：
+// 这个上游接口不快，30 秒一轮时偶尔会重叠。
+const CREDITS_POLL_MS = 30 * 1000
+let creditsTimer = null
+const creditsInFlight = new Set()
 
 function refreshWorkbuddyCredits() {
   for (const p of providers.value || []) {
     if (p.protocol !== 'workbuddy-oauth') continue
     for (const k of p.keys || []) {
       if (k.type !== 'oauth' || !k.token_present) continue
-      if (k.credits_at && Date.now() - k.credits_at < CREDITS_TTL_MS) continue
+      const tag = `${p.id}:${k.id}`
+      if (creditsInFlight.has(tag)) continue
+      creditsInFlight.add(tag)
       api.getWorkbuddyCredits(p.id, k.id)
         .then((c) => {
           k.credits_remain = c.remain
-          k.credits_used = c.used
           k.credits_size = c.size
           k.credits_at = c.fetched_at
           delete k.credits_error
         })
         .catch((e) => { k.credits_error = e?.message || '额度查询失败' })
+        .finally(() => creditsInFlight.delete(tag))
     }
   }
+}
+
+// 模型积分倍率。上游 /v3/config 给的是 "x0.79" 这样的字符串，原样展示；
+// 没有倍率的模型（比如倍率浮动的 auto）回落到厂商名。
+function modelRate(p, id) {
+  return (p.model_rates || {})[id] || null
+}
+
+// 上游写成 "x0.79" 这种带前缀的字符串，去掉前缀再判零。
+// 倍率为 0 的模型走免费配色——hy3 就是 0，别和 0.79 一个待遇。
+function isFreeRate(rate) {
+  const n = Number(String(rate).trim().replace(/^[xX×]/, ''))
+  return Number.isFinite(n) && n === 0
 }
 
 function openCreateDialog() {
@@ -1348,11 +1374,11 @@ async function doCheckin(p, k) {
   }
 }
 
-// 一行放不下全部额度信息：明细进 tooltip，行上只留「剩 X」这个最要紧的数。
+// 一行放不下全部信息：明细进 tooltip，行上只留「剩 X」这个数。
+// 刻意不展示已消耗量——用户要的是「现在还剩多少」，不是账本。
 function creditsTip(k) {
   if (k.credits_error) return `额度查询失败：${k.credits_error}`
   const parts = [`剩余额度 ${k.credits_remain}${k.credits_size ? ` / ${k.credits_size}` : ''} ${k.credits_unit || 'credits'}`]
-  if (k.credits_used) parts.push(`已用 ${k.credits_used}`)
   if (k.credits_at) parts.push(`更新于 ${new Date(k.credits_at).toLocaleTimeString()}`)
   return parts.join(' · ')
 }
@@ -1423,10 +1449,14 @@ onMounted(() => {
   load()
   loadTemplates()
   timer = setInterval(() => { now.value = Date.now() }, 1000)
+  // 额度要「现在还剩多少」：刚发完一次对话就得看到数字掉下去。
+  // 30 秒一轮，只在本页存活期间跑，离开即停。
+  creditsTimer = setInterval(() => refreshWorkbuddyCredits(), CREDITS_POLL_MS)
 })
 
 onBeforeUnmount(() => {
   if (timer) clearInterval(timer)
+  if (creditsTimer) clearInterval(creditsTimer)
 })
 </script>
 

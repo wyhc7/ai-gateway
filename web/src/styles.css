@@ -852,6 +852,25 @@ body::before {
 }
 .model-item .muted { flex-shrink: 0; font-size: 11px; }
 
+/* 模型积分倍率。上游给的就是 "x0.79" 这种字符串，原样显示——
+   自行换算成百分比只是多一层可能算错的地方。倍率为 0（如 hy3）用品牌色
+   标出来：免费模型是这一列里最该被一眼看到的信息。 */
+.rate-chip {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--rule-soft);
+  color: var(--ink-2);
+}
+.rate-chip.rate-free {
+  background: var(--accent-tint);
+  border-color: var(--accent-line);
+  color: var(--accent);
+}
+
 /* ==========================================================================
    对话测试
    ========================================================================== */
