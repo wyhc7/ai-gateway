@@ -101,6 +101,14 @@
                     <span class="key-name">{{ k.name }}</span>
                     <template v-if="k.type === 'oauth'">
                       <span class="mask">{{ k.email || '订阅账号' }}</span>
+                      <!-- realm 是三套互不通用的网关，一眼要能分清——
+                           不标出来的话「这个账号为什么 401」只能靠翻配置才知道 -->
+                      <span
+                        v-if="isWorkbuddyProvider(p)"
+                        class="badge realm-badge"
+                        :class="realmOf(k).cls"
+                        :title="realmOf(k).tip"
+                      >{{ realmOf(k).label }}</span>
                       <span class="badge" :class="credBadge(k)">{{ credText(k) }}</span>
                       <el-button
                         v-if="k.refresh_token_present"
@@ -169,6 +177,12 @@
                     >{{ modelRate(p, m.id) }}</span>
                     <span v-else class="muted">{{ m.owned_by }}</span>
                   </div>
+                </div>
+                <!-- 倍率是上游给的，不是网关内置：把取数时间标出来，
+                     过没过期一眼能看出来，不用猜这个数还准不准 -->
+                <div v-if="p.model_rates_at" class="muted" style="margin-top: 8px">
+                  倍率取自上游 /v3/config · {{ formatTime(p.model_rates_at) }}
+                  <span v-if="p.model_rates_error">（{{ p.model_rates_error }}）</span>
                 </div>
                 <div v-if="p.models_updated_at" class="muted" style="margin-top: 8px">最近更新：{{ formatTime(p.models_updated_at) }}</div>
               </el-col>
@@ -735,6 +749,19 @@ function isFreeRate(rate) {
   return Number.isFinite(n) && n === 0
 }
 
+// WorkBuddy 账号属于哪个 realm。由 token 的 X-Domain 判定，不是平台配置——
+// 一个平台里混进另一 realm 的账号时，只有这里看得出来。
+function realmOf(k) {
+  const d = String(k.domain || '').toLowerCase()
+  if (d.includes('workbuddy.ai')) {
+    return { label: '全球', cls: 'realm-global', tip: `WorkBuddy 全球版 · ${k.domain} · 对话走 www.workbuddy.ai` }
+  }
+  if (d.includes('codebuddy.ai')) {
+    return { label: '国际', cls: 'realm-intl', tip: `CodeBuddy 国际版 · ${k.domain} · 对话走 www.codebuddy.ai` }
+  }
+  return { label: '国内', cls: 'realm-cn', tip: `腾讯 CodeBuddy 国内版 · ${k.domain || 'codebuddy.cn'} · 对话走 copilot.tencent.com` }
+}
+
 function openCreateDialog() {
   editingProvider.value = null
   advancedOpen.value = []
@@ -1032,6 +1059,8 @@ async function createSubscription() {
       base_url: subForm.value.base_url,
       protocol: plan.protocol,
       extra_headers: {},
+      // 登录起点版本：国际版入口只认 IDE 客户端，和国内版不是同一个地址
+      workbuddy_region: plan.region,
       model_names
     })
     subscriptionDialog.value = false
@@ -1213,6 +1242,9 @@ function credText(k) {
 function openGrokAuth(p) {
   authProvider.value = p
   deviceFlow.value = null
+  // 版本预选跟随建平台时选的方案：国际版从 codebuddy.ai 起，国内版从
+  // copilot.tencent.com 起，选错了会去错登录入口
+  loginRealm.value = p?.workbuddy_region === 'intl' ? 'intl' : 'cn'
   grokDialog.value = true
 }
 

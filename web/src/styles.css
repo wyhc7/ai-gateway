@@ -587,6 +587,15 @@ body::before {
 .badge-amber  { background: var(--warn-soft);  color: var(--warn);  border-color: color-mix(in srgb, var(--warn) 26%, transparent); }
 .badge-blue   { background: var(--info-soft);  color: var(--info);  border-color: color-mix(in srgb, var(--info) 26%, transparent); }
 .badge-purple { background: var(--surface-2);  color: var(--ink-2); border-color: var(--rule); }
+
+/* WorkBuddy 账号的 realm 标记：国内 / 国际 / 全球是三套互不通用的网关，
+   发错域会拿到非 JSON 的 401，报错里完全看不出是域名选错了。
+   配色复用上面的 badge 色系，但语义类名留在标记上——看到 .realm-intl
+   就知道是哪套，不必先记住「红色代表国际」。 */
+.realm-badge { letter-spacing: 0.06em; }
+.realm-cn     { background: var(--info-soft);   color: var(--info);   border-color: color-mix(in srgb, var(--info) 26%, transparent); }
+.realm-intl   { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-line); }
+.realm-global { background: var(--warn-soft);   color: var(--warn);   border-color: color-mix(in srgb, var(--warn) 26%, transparent); }
 .badge-gray   { background: var(--surface-2);  color: var(--ink-3); border-color: var(--rule); }
 
 .badge-dot {

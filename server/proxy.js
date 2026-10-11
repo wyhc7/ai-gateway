@@ -745,6 +745,7 @@ export async function refreshModels(providerId) {
           try {
             const { rates } = await fetchWorkbuddyModelRates(key)
             provider.model_rates = rates
+            provider.model_rates_at = Date.now()
             delete provider.model_rates_error
           } catch (err) {
             provider.model_rates_error = err.message
