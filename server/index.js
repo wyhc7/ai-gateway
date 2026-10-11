@@ -21,6 +21,7 @@ import { TEMPLATES } from './templates.js'
 import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
 import { startWorkbuddyLogin, pollWorkbuddyLogin, cancelWorkbuddyLogin } from './workbuddy-oauth.js'
 import { fetchWorkbuddyCheckinStatus, performWorkbuddyCheckin, beijingDayKey, fetchWorkbuddyCredits } from './workbuddy-checkin.js'
+import { fetchWorkbuddyModelRates } from './workbuddy-catalog.js'
 import { addLog, getLogs, initLogger } from './logger.js'
 import { checkUpdate, applyUpdate } from './update.js'
 import {
@@ -373,6 +374,9 @@ app.post('/api/providers', (req, res) => {
     keys: [],
     extra_headers: extra_headers || {},
     ...pickCallPlan(req.body),
+    // WorkBuddy 的登录起点版本（cn / intl）。国际版的登录入口只认 IDE 客户端，
+    // 起点也不同，所以建平台时就定下来，授权框据此预选。
+    ...(protocol === 'workbuddy-oauth' ? { workbuddy_region: req.body.workbuddy_region === 'intl' ? 'intl' : 'cn' } : {}),
     created_at: Date.now()
   }
   // 这里刻意不按 defaultModelsFor 补模型：订阅与免费通道的模型清单要么随上游版本变，
@@ -865,6 +869,40 @@ const workbuddyCheckinTimer = setInterval(() => {
   workbuddyAutoCheckinTick().catch(() => {})
 }, WORKBUDDY_CHECKIN_TICK_MS)
 workbuddyCheckinTimer.unref?.()
+
+// —— WorkBuddy 积分倍率复取 ——
+//
+// 倍率必须持续来自上游。只在用户点「刷新」时取一次然后存盘，那不是获取，
+// 是把某一天的快照当成了常量。按 TTL 复取，界面上标出取数时间——
+// 过没过期一眼能看出来，不用猜这个数是不是还准。
+const WORKBUDDY_RATES_TTL_MS = 15 * 60 * 1000
+
+async function workbuddyRefreshRates() {
+  for (const p of state.providers || []) {
+    if (p.protocol !== 'workbuddy-oauth') continue
+    if (p.model_rates_at && Date.now() - p.model_rates_at < WORKBUDDY_RATES_TTL_MS) continue
+    const key = (p.keys || []).find((k) => k.enabled && k.type === 'oauth' && k.access_token)
+    if (!key) continue
+    try {
+      const { rates } = await fetchWorkbuddyModelRates(key)
+      p.model_rates = rates
+      p.model_rates_at = Date.now()
+      delete p.model_rates_error
+      persistImmediate()
+    } catch (err) {
+      // 取不到不告警刷屏：倍率是展示信息，TTL 到了还会再试
+      p.model_rates_error = err.message
+    }
+  }
+}
+
+// 启动后先补一轮（延迟几秒，别和启动期其它初始化抢），之后按 TTL 复取
+const workbuddyRatesWarm = setTimeout(() => { workbuddyRefreshRates().catch(() => {}) }, 15 * 1000)
+workbuddyRatesWarm.unref?.()
+const workbuddyRatesTimer = setInterval(() => {
+  workbuddyRefreshRates().catch(() => {})
+}, WORKBUDDY_RATES_TTL_MS)
+workbuddyRatesTimer.unref?.()
 
 app.post('/api/oauth/codex/accounts/:providerId/:keyId/refresh', api(async (req, res) => {
   const p = getProvider(req.params.providerId)
