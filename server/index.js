@@ -4,7 +4,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import crypto from 'node:crypto'
 import { state, persist, persistImmediate, getProvider, genId, todayKey, getAdminKey } from './store.js'
-import { handleChat, handleImages, handleModels, refreshModels, previewModels, DEFAULT_PROTOCOL } from './proxy.js'
+import { handleChat, handleImages, handleModels, refreshModels, previewModels, refreshWorkbuddyCatalog, DEFAULT_PROTOCOL } from './proxy.js'
 import {
   createApiKey,
   updateApiKey,
@@ -21,7 +21,6 @@ import { TEMPLATES } from './templates.js'
 import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
 import { startWorkbuddyLogin, pollWorkbuddyLogin, cancelWorkbuddyLogin } from './workbuddy-oauth.js'
 import { fetchWorkbuddyCheckinStatus, performWorkbuddyCheckin, beijingDayKey, fetchWorkbuddyCredits } from './workbuddy-checkin.js'
-import { fetchWorkbuddyModelRates } from './workbuddy-catalog.js'
 import { addLog, getLogs, initLogger } from './logger.js'
 import { checkUpdate, applyUpdate } from './update.js'
 import {
@@ -881,14 +880,10 @@ async function workbuddyRefreshRates() {
   for (const p of state.providers || []) {
     if (p.protocol !== 'workbuddy-oauth') continue
     if (p.model_rates_at && Date.now() - p.model_rates_at < WORKBUDDY_RATES_TTL_MS) continue
-    const key = (p.keys || []).find((k) => k.enabled && k.type === 'oauth' && k.access_token)
-    if (!key) continue
     try {
-      const { rates } = await fetchWorkbuddyModelRates(key)
-      p.model_rates = rates
-      p.model_rates_at = Date.now()
-      delete p.model_rates_error
-      persistImmediate()
+      // 模型清单与倍率一起刷新：它们来自同一次目录抓取，分开取会让清单里的
+      // 模型和倍率表对不上——两个 realm 的模型名是两套，各取各的必然错位
+      await refreshWorkbuddyCatalog(p)
     } catch (err) {
       // 取不到不告警刷屏：倍率是展示信息，TTL 到了还会再试
       p.model_rates_error = err.message

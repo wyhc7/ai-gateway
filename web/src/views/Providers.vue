@@ -170,11 +170,11 @@
                     <!-- 倍率来自上游 /v3/config，格式就是它给的 "x0.79"；
                          没有倍率的（如倍率浮动的 auto）回落到厂商名 -->
                     <span
-                      v-if="modelRate(p, m.id)"
+                      v-if="modelRate(p, m)"
                       class="rate-chip"
-                      :class="{ 'rate-free': isFreeRate(modelRate(p, m.id)) }"
-                      :title="`积分倍率 ${modelRate(p, m.id)}——调用该模型按此倍率扣积分`"
-                    >{{ modelRate(p, m.id) }}</span>
+                      :class="{ 'rate-free': isFreeRate(modelRate(p, m)) }"
+                      :title="`积分倍率 ${modelRate(p, m)}——调用该模型按此倍率扣积分`"
+                    >{{ modelRate(p, m) }}</span>
                     <span v-else class="muted">{{ m.owned_by }}</span>
                   </div>
                 </div>
@@ -736,10 +736,17 @@ function refreshWorkbuddyCredits() {
   }
 }
 
-// 模型积分倍率。上游 /v3/config 给的是 "x0.79" 这样的字符串，原样展示；
-// 没有倍率的模型（比如倍率浮动的 auto）回落到厂商名。
-function modelRate(p, id) {
-  return (p.model_rates || {})[id] || null
+// 模型积分倍率。按 realm 分开存：两个 realm 的模型名是两套（国际版是
+// fast-model 这种抽象别名），合成一张表会让国际模型去查国内的倍率，
+// 一条都查不到——生产上就是这么撞上的。
+// 优先用模型自带的 rate（目录刷新时就写好），旧数据回落到按 realm 查表。
+function modelRate(p, m) {
+  if (m?.rate) return m.rate
+  const table = p?.model_rates
+  if (!table) return null
+  if (m?.realm) return table[m.realm]?.[m.id] || null
+  // 旧格式：扁平的一张表
+  return table[m.id] || null
 }
 
 // 上游写成 "x0.79" 这种带前缀的字符串，去掉前缀再判零。

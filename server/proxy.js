@@ -6,8 +6,8 @@ import { ensureAccessToken as ensureCodexToken, refreshAccessToken as refreshCod
 import { ensureWorkbuddyToken, refreshWorkbuddyToken } from './workbuddy-oauth.js'
 import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexAccountHeader } from './codex-responses.js'
 import { TEMPLATES } from './templates.js'
-import { isWorkbuddyProtocol, workbuddyHeaders, workbuddyChatBaseFor, shapeWorkbuddyBody, WORKBUDDY_CURATED_MODELS } from './workbuddy-lane.js'
-import { fetchWorkbuddyModelRates } from './workbuddy-catalog.js'
+import { isWorkbuddyProtocol, workbuddyHeaders, workbuddyChatBaseFor, shapeWorkbuddyBody, WORKBUDDY_CURATED_MODELS, workbuddyRealmFor } from './workbuddy-lane.js'
+import { fetchWorkbuddyModelRates, fetchWorkbuddyEnterpriseModels, mergeWorkbuddyCatalogs } from './workbuddy-catalog.js'
 import {
   isZenProtocol,
   buildZenHeaders,
@@ -382,13 +382,23 @@ function buildHeaders(provider, plan, apiKey, key = null) {
 // - 免费通道：强制流式 + 补齐四件套工具 + 工具名小写化
 // - 其余：原样透传
 // 抽成函数是因为 400 重试时要按可能被收敛过的 max_tokens 重新序列化。
+// 同一个模型 id 在两个 realm 里倍率不同时，非主 realm 的那个对外是带后缀的
+// 别名（如 glm-5.3-intl）——否则调用方点名时根本不知道网关会拿哪一个去扣费。
+// 别名只是对外的名字，转发前要换回上游认得的原始 id。
+function workbuddyUpstreamBody(provider, body) {
+  const alias = body?.model
+  const map = provider?.model_upstream_id
+  if (!alias || !map || !map[alias]) return body
+  return { ...body, model: map[alias] }
+}
+
 function serializeUpstreamBody(provider, body) {
   if (isZenProtocol(provider.protocol)) {
     return JSON.stringify(shapeZenBody(body))
   }
   // WorkBuddy：强制流式 + tool_choice 收敛成字符串 + developer 角色改写 + 补 system 消息
   if (isWorkbuddyProtocol(provider.protocol)) {
-    return JSON.stringify(shapeWorkbuddyBody(body))
+    return JSON.stringify(shapeWorkbuddyBody(workbuddyUpstreamBody(provider, body)))
   }
   const payload = withUsageOption(provider, body)
   return JSON.stringify(
@@ -662,12 +672,71 @@ export async function discoverZenFreeModels(provider, upstreamModels) {
   return { adopted, probed: candidates.length, cache }
 }
 
+// WorkBuddy 的目录按 realm 分别取，再合并成一份。
+//
+// 两个 realm 不对称，这是实测出来的：国内版企业端点 200 且给得最全（含上游
+// 界面不展示的隐藏型号），国际版企业端点直接 500，它的模型清单只能来自
+// /v3/config。两边的模型名也是两套——国际版是 fast-model 这种抽象别名，
+// 与国内的 glm-5.3 一个都不重叠，所以必须分别取再合并，只用第一个可用 Key
+// 会把另一个 realm 整份漏掉。
+export async function refreshWorkbuddyCatalog(provider) {
+  const byRealm = new Map()
+  for (const key of provider.keys || []) {
+    if (!key.enabled || key.type !== 'oauth' || !key.access_token) continue
+    const realm = workbuddyRealmFor(key.domain)
+    // 一个 realm 一个 Key 就够：同 realm 的账号拿到的目录是同一份
+    if (!byRealm.has(realm)) byRealm.set(realm, key)
+  }
+  if (byRealm.size === 0) return null
+
+  const entries = []
+  const notes = []
+  for (const [realm, key] of byRealm) {
+    try {
+      const { rates, ids: v3Ids } = await fetchWorkbuddyModelRates(key)
+      let ids = v3Ids
+      try {
+        const ent = await fetchWorkbuddyEnterpriseModels(key)
+        ids = ent.ids
+      } catch (err) {
+        // 企业端点失败不是致命的：国际版这条路本来就是 500，v3/config 的
+        // 清单照样可用，只是少了几个隐藏型号
+        notes.push(`${realm}：企业端点不可用（${err.message}），清单退回 v3/config`)
+      }
+      entries.push({ realm, ids, rates })
+    } catch (err) {
+      notes.push(`${realm}：${err.message}`)
+    }
+  }
+  if (entries.length === 0) return null
+
+  const { models, rates, upstream, realmById } = mergeWorkbuddyCatalogs(entries)
+  provider.models = models.map((m) => ({ id: m.id, owned_by: provider.name, realm: m.realm, rate: m.rate }))
+  provider.model_rates = rates
+  provider.model_rates_at = Date.now()
+  provider.model_upstream_id = upstream
+  provider.model_realm = realmById
+  provider.models_updated_at = Date.now()
+  provider.models_source = 'workbuddy'
+  delete provider.model_rates_error
+  persistImmediate()
+  for (const note of notes) addLog({ type: 'system', detail: `WorkBuddy 模型目录：${note}` })
+  return { ok: true, count: provider.models.length, provider }
+}
+
 export async function refreshModels(providerId) {
   const provider = getProvider(providerId)
   if (!provider) return { ok: false, error: '平台不存在' }
   const keys = usableKeys(provider)
   if (keys.length === 0) return { ok: false, error: '该平台尚未配置可用的 Key' }
   const plan = callPlan(provider)
+
+  // WorkBuddy 走独立的目录路径；全部 realm 都取不到时才落到下面的通用逻辑，
+  // 让内置清单兜底
+  if (isWorkbuddyProtocol(provider.protocol)) {
+    const merged = await refreshWorkbuddyCatalog(provider)
+    if (merged) return merged
+  }
 
   let lastError = null
   for (const key of keys) {
@@ -738,20 +807,6 @@ export async function refreshModels(providerId) {
         provider.models = usable
         provider.models_updated_at = Date.now()
         if (curatedOnly) provider.models_source = 'default'
-        // WorkBuddy：顺带取一次积分倍率。它在另一个端点（/v3/config），模型
-        // 清单里没有。取不到不影响清单——倍率只是展示信息，不能因为它失败
-        // 就把整次刷新判成失败。
-        if (isWorkbuddyProtocol(provider.protocol)) {
-          try {
-            const { rates } = await fetchWorkbuddyModelRates(key)
-            provider.model_rates = rates
-            provider.model_rates_at = Date.now()
-            delete provider.model_rates_error
-          } catch (err) {
-            provider.model_rates_error = err.message
-            addLog({ type: 'system', detail: `WorkBuddy 积分倍率获取失败：${err.message}` })
-          }
-        }
         persistImmediate()
         return { ok: true, count: usable.length, discovered: discoveredIds, provider }
       }
@@ -944,6 +999,17 @@ function nextProbeDelay(provider) {
 
 async function forwardWithFailover(provider, kind, body, res) {
   let keys = usableKeys(provider)
+
+  // 混载平台里模型可能只属于某个 realm，拿别的 realm 的账号发过去只会拿到
+  // 跨域的非 JSON 401。先把不属于该 realm 的 Key 排掉；该 realm 的 Key 全在
+  // 冷却时不硬拦，仍交给下面的通用冷却逻辑处理。
+  if (isWorkbuddyProtocol(provider.protocol) && provider.model_realm) {
+    const want = provider.model_realm[String(body?.model || '')]
+    if (want) {
+      const same = keys.filter((k) => workbuddyRealmFor(k.domain) === want)
+      if (same.length > 0) keys = same
+    }
+  }
 
   // 所有 Key 都在冷却时，与其立刻返回 503 让用户看到"输出断了"，
   // 不如等最早的那个解锁。线上日志显示这类失败几乎全部来自 429 限流，
