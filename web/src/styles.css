@@ -791,7 +791,11 @@ body::before {
   border: 1px solid var(--rule);
   border-radius: var(--r-sm);
   background: var(--surface);
-  overflow: hidden;
+  /* 与右侧「模型列表」保持一致：限高 + 框内滚动。
+     Key 数量一多，不限高会把整张平台卡无限撑高、把所有 Key 全部平铺出来；
+     现在超过 300px 就在框内滚动，左右两列高度也更好对齐。 */
+  max-height: 300px;
+  overflow-y: auto;
 }
 
 .key-item {
