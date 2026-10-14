@@ -691,7 +691,14 @@ export function normalizeModel(raw, providerName) {
   else if (raw.iconUrl_en) out.icon = String(raw.iconUrl_en)
   if (Number.isFinite(Number(raw.maxInputTokens))) out.max_input = Number(raw.maxInputTokens)
   if (Number.isFinite(Number(raw.maxOutputTokens))) out.max_output = Number(raw.maxOutputTokens)
-  if (Number.isFinite(Number(ctx.defaultLength))) out.context = Number(ctx.defaultLength)
+  // 上下文窗口：上游优先给 contextWindow.defaultLength，但实测**几乎不下发**
+  // （国内 0/33 条有），真正给的是 maxInputTokens（31/33）。
+  // 两者都不给时才留空 → 前端显示「未知」。宁可说不知道，也不用网关的猜测
+  // 冒充上游事实。
+  const ctxLen = Number(ctx.defaultLength)
+  const maxIn = Number(raw.maxInputTokens)
+  if (Number.isFinite(ctxLen) && ctxLen > 0) out.context = Math.floor(ctxLen)
+  else if (Number.isFinite(maxIn) && maxIn > 0) out.context = Math.floor(maxIn)
   if (raw.supportsImages !== undefined) out.images = Boolean(raw.supportsImages)
   if (raw.supportsReasoning !== undefined) out.reasoning = Boolean(raw.supportsReasoning)
   if (raw.supportsToolCall !== undefined) out.tools = Boolean(raw.supportsToolCall)

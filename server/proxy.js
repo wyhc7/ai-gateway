@@ -571,6 +571,63 @@ export async function refreshWorkbuddyCatalog(provider) {
   return { ok: true, count: provider.models.length, provider }
 }
 
+/**
+ * 上下文字段名候选：通用协议的上游各写各的，按顺序取第一个有效值。
+ *
+ * ⚠️ 实测上游**普遍不给**上下文字段：标准 OpenAI 的 /v1/models 只有
+ * id/object/owned_by/created；WorkBuddy 的 contextWindow 也几乎不下发
+ * （实测国内 0/33 条有），真正给的是 maxInputTokens（国内 31/33）。
+ * 所以取不到是常态，交由前端如实显示「未知」，不回落到网关编的默认值。
+ */
+const CONTEXT_WINDOW_KEYS = [
+  'context_length',      // OpenRouter 及一批中转
+  'context_window',      // 部分代理
+  'max_context_tokens',
+  'max_model_len',       // vLLM / 本地后端
+  'contextWindow',       // WorkBuddy（可能是对象）
+  'contextWindowTokens',
+  'maxInputTokens',      // WorkBuddy 实际下发的那个
+  'max_input_tokens'
+]
+
+/** 从上游一条模型记录取上下文窗口长度（tokens）；取不到返回 null。 */
+export function pickContextWindow(raw) {
+  const m = raw && typeof raw === 'object' ? raw : {}
+  for (const key of CONTEXT_WINDOW_KEYS) {
+    const v = m[key]
+    if (v === null || v === undefined || v === '') continue
+    // WorkBuddy 给的是对象：contextWindow: { defaultLength, ... }
+    if (typeof v === 'object') {
+      const d = v.defaultLength ?? v.maxLength ?? v.length
+      const n = Number(d)
+      if (Number.isFinite(n) && n > 0) return Math.floor(n)
+      continue
+    }
+    const n = Number(v)
+    if (Number.isFinite(n) && n > 0) return Math.floor(n)
+  }
+  return null
+}
+
+/**
+ * 把通用协议上游的一条模型记录压成网关内部形状。
+ *
+ * 只做「认字段」，不做推断：id 有的上游叫 model_name、有的只给 name；
+ * 上下文窗口写法更是五花八门（见上面的候选表）。上游没给的一律留空，
+ * 前端显示「未知」——不能拿默认值假装上游说过这句话。
+ */
+function normalizeUpstreamModel(raw, provider) {
+  const m = raw && typeof raw === 'object' ? raw : {}
+  const id = m.id || m.model_name || m.name
+  const out = {
+    id: id ? String(id) : '',
+    owned_by: m.owned_by || m.display_name || provider?.name || ''
+  }
+  const ctx = pickContextWindow(m)
+  if (ctx !== null) out.context = ctx
+  return out
+}
+
 export async function refreshModels(providerId) {
   const provider = getProvider(providerId)
   if (!provider) return { ok: false, error: '平台不存在' }
@@ -615,7 +672,7 @@ export async function refreshModels(providerId) {
         const raw = data && data.data !== undefined ? data.data : data
         const list = Array.isArray(raw) ? raw : Array.isArray(raw?.models) ? raw.models : []
         const models = list
-          .map((m) => ({ id: m.id || m.model_name || m.name, owned_by: m.owned_by || m.display_name || provider.name }))
+          .map((m) => normalizeUpstreamModel(m, provider))
           .filter((m) => m.id)
         // 信封报了错就别把空列表当成功——否则刷新会静默清空模型
         if (models.length === 0 && Number.isFinite(Number(data?.code)) && Number(data.code) !== 0) {
@@ -714,7 +771,7 @@ export async function previewModels({ base_url, protocol, api_key, extra_headers
       return { ok: false, error: `拉取失败：HTTP ${resp.status}${hint}` }
     }
     const data = await resp.json()
-    const models = (data.data || []).map((m) => ({ id: m.id, owned_by: m.owned_by || m.display_name || '' }))
+    const models = (data.data || []).map((m) => normalizeUpstreamModel(m, null))
     return { ok: true, models }
   } catch (err) {
     if (timer) clearTimeout(timer)
