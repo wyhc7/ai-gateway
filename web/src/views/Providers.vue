@@ -191,7 +191,17 @@
                       :class="{ 'rate-free': isFreeRate(modelRate(p, m)) }"
                       :title="`积分倍率 ${modelRate(p, m)}——调用该模型按此倍率扣积分`"
                     >{{ rateLabel(modelRate(p, m)) }}</span>
-                    <span v-else class="rate-none" title="上游未提供该模型的固定倍率（如浮动倍率或专用模型）">未给倍率</span>
+                    <!-- 没有倍率的模型：realm 才是有用的那一维——厂商名在同一平台里
+                         每行都一样，而模型落在哪个网关决定调用时用哪个账号。
+                         标完 realm 仍要如实写「未给倍率」，不能让这一格看起来像有值。 -->
+                    <template v-else>
+                      <span
+                        v-if="m.realm"
+                        class="model-realm"
+                        :title="`该模型属于 ${realmLabel(m.realm)} 网关，调用时用对应版本的账号`"
+                      >{{ realmLabel(m.realm) }}</span>
+                      <span class="rate-none" title="上游未提供该模型的固定倍率（如浮动倍率或专用模型）">未给倍率</span>
+                    </template>
                   </div>
                 </div>
                 <!-- 倍率是上游给的，不是网关内置：把取数时间标出来，
@@ -785,6 +795,12 @@ function fmtTokens(n) {
   if (v >= 1000000) return `${Math.round(v / 100000) / 10}M`
   if (v >= 1000) return `${Math.round(v / 100) / 10}K`
   return String(v)
+}
+
+// realm 的可读名。账号标记与模型标记共用同一套叫法，
+// 免得同一个 realm 在页面上出现两种称呼。
+function realmLabel(realm) {
+  return { cn: '国内', intl: '国际', global: '全球' }[realm] || realm
 }
 
 // WorkBuddy 账号属于哪个 realm。由 token 的 X-Domain 判定，不是平台配置——

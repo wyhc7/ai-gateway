@@ -340,7 +340,7 @@ function buildHeaders(provider, plan, apiKey, key = null) {
 // 同一个模型 id 在两个 realm 里倍率不同时，非主 realm 的那个对外是带后缀的
 // 别名（如 glm-5.3-intl）——否则调用方点名时根本不知道网关会拿哪一个去扣费。
 // 别名只是对外的名字，转发前要换回上游认得的原始 id。
-function workbuddyUpstreamBody(provider, body) {
+export function workbuddyUpstreamBody(provider, body) {
   const alias = body?.model
   const map = provider?.model_upstream_id
   if (!alias || !map || !map[alias]) return body
@@ -797,18 +797,21 @@ function nextProbeDelay(provider) {
   return best === Infinity ? 0 : Math.ceil(best)
 }
 
+// 混载平台里模型可能只属于某个 realm，拿别的 realm 的账号发过去只会拿到
+// 跨域的非 JSON 401。这里只按 realm 挑 Key，不负责冷却判断——该 realm 的
+// Key 全在冷却时原样返回，交给上层的冷却逻辑处理，别把请求直接判死。
+export function workbuddyKeysForModel(provider, model, keys) {
+  const want = provider?.model_realm?.[String(model || '')]
+  if (!want) return keys
+  const same = keys.filter((k) => workbuddyRealmFor(k.domain) === want)
+  return same.length > 0 ? same : keys
+}
+
 async function forwardWithFailover(provider, kind, body, res) {
   let keys = usableKeys(provider)
 
-  // 混载平台里模型可能只属于某个 realm，拿别的 realm 的账号发过去只会拿到
-  // 跨域的非 JSON 401。先把不属于该 realm 的 Key 排掉；该 realm 的 Key 全在
-  // 冷却时不硬拦，仍交给下面的通用冷却逻辑处理。
   if (isWorkbuddyProtocol(provider.protocol) && provider.model_realm) {
-    const want = provider.model_realm[String(body?.model || '')]
-    if (want) {
-      const same = keys.filter((k) => workbuddyRealmFor(k.domain) === want)
-      if (same.length > 0) keys = same
-    }
+    keys = workbuddyKeysForModel(provider, body?.model, keys)
   }
 
   // 所有 Key 都在冷却时，与其立刻返回 503 让用户看到"输出断了"，

@@ -926,6 +926,9 @@ body::before {
   color: var(--ink-3);
   opacity: 0.75;
 }
+/* 无倍率模型右侧标 realm 而不是厂商名：厂商名在同一平台里每行都一样，
+   realm 才是决定「用哪个账号调」的那一维。比 .muted 深一档，好认。 */
+.model-item .model-realm { flex-shrink: 0; font-size: 11px; color: var(--ink-2); }
 
 /* 模型积分倍率。上游给的就是 "x0.79" 这种字符串，原样显示——
    自行换算成百分比只是多一层可能算错的地方。倍率为 0（如 hy3）用品牌色
