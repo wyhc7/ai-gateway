@@ -80,7 +80,6 @@ function startGateway(port, dataDir, repoDir) {
       DATA_DIR: dataDir,
       ADMIN_KEY,
       WEB_DIST: join(dataDir, 'no-such-dist'),
-      ZEN_AUTOSEED: '0',
       UPDATE_REPO_DIR: repoDir,
       UPDATE_BRANCH: 'main',
       UPDATE_SERVICE: 'gw-update-route-test',

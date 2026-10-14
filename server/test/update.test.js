@@ -173,7 +173,7 @@ describe('summarizeAreas：把变更归到「改了哪一块」', () => {
       'server/index.js',
       'server/update.js',
       'web/src/App.vue',
-      'docs/OPENCODE-ZEN.md'
+      'docs/DEPLOYMENT.md'
     ])
     assert.deepEqual(areas, [
       { key: 'server', label: '后端', count: 2 },
