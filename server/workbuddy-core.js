@@ -184,9 +184,22 @@ export const AUTH_REFRESH_SOURCE = 'ide-main'
 
 /** 对话面 UA：上游要求客户端自称是 CodeBuddy CLI。 */
 export const WORKBUDDY_UA = 'CLI/2.63.2 CodeBuddy/2.63.2'
-/** 目录面 UA：v3/config 自称 CLI 只会拿到削减表。 */
+/**
+ * 目录面（/v3/config）的两种 UA：上游按 UA 下发**两份不同的清单**，
+ * 必须都取再并集，只取一份必然少模型。
+ *
+ * ⚠️ 实测（2026-10-15，同一账号、同一端点、只换 UA）：
+ *   国际版 www.workbuddy.ai     CLI UA → 20 个（cli agent 19）/ IDE UA → 13 个（craft agent 4）
+ *   国内版 copilot.tencent.com  CLI UA → 33 个             / IDE UA → 22 个
+ * 两份**互有独有**：国际版 CLI 独有 glm-5.3、kimi-k3、gpt-5.5、hy3 等 16 个，
+ * IDE 独有 auto-chat、nes-1.2、o4-mini 等 9 个。
+ * 只取 IDE 那份时网关里国际版只有 14 个模型，取并集后是 29 个。
+ * 倍率数值两边一致，仅写法不同（IDE "x0.34" vs CLI "x0.34 credits"）。
+ *
+ * 早期注释称「CLI UA 只拿到削减表」——那是旧上游的结论，**现已反转**，勿再照抄。
+ */
 export const WORKBUDDY_V3_UA = 'CodeBuddyIDE/4.12.0 CodeBuddy/4.12.0'
-/** 企业模型端点 UA：反过来，拿 IDE 的 UA 会 404。 */
+/** 企业模型端点 UA：反过来，拿 IDE 的 UA 会 404。目录面也用它取那份更全的清单。 */
 export const WORKBUDDY_CLI_UA = 'CLI/2.63.2 CodeBuddy/2.63.2'
 /** 计费面 UA：与对话面不同，是简短的 "CodeBuddy"。 */
 export const WORKBUDDY_BILLING_UA = 'CodeBuddy'

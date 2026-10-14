@@ -17,8 +17,9 @@
 // 而「限时免费」促销的 modelIds 只写着 ["hy4-preview-f"] —— 挂在只由
 // /v3/config 下发的那个 id 上。只取 scoped 会让该促销永远对不上。
 //
-// UA 必须按端点自称：v3/config 自称 CLI 只会拿到削减表；企业端点反过来，
-// 拿 IDE 的 UA 会 404。
+// UA 必须按端点自称：企业端点拿 IDE 的 UA 会 404。
+// /v3/config 则更麻烦：上游按 UA 下发两份**互有独有**的清单，必须两种 UA
+// 各取一次再并集（实测数据与结论见 workbuddy-core.js 的 UA 注释）。
 //
 // 本文件只做网络与信封处理，解析与常量在 workbuddy-core.js（可被单测直接钉住）。
 import {
@@ -79,7 +80,7 @@ async function readEnvelope(res, what) {
   return payload
 }
 
-function rateHeaders(key) {
+function rateHeaders(key, ua = WORKBUDDY_V3_UA) {
   const headers = {
     Authorization: `Bearer ${key?.access_token || ''}`,
     Accept: 'application/json, text/plain, */*',
@@ -87,7 +88,7 @@ function rateHeaders(key) {
     'X-Domain': key?.domain || 'www.codebuddy.cn',
     'X-Product': 'SaaS',
     'X-CodeBuddy-Request': '1',
-    'User-Agent': WORKBUDDY_V3_UA,
+    'User-Agent': ua,
     Origin: workbuddyRealm(key?.domain).referer,
     Referer: `${workbuddyRealm(key?.domain).referer}/`
   }
@@ -113,26 +114,54 @@ function enterpriseHeaders(key) {
 /**
  * 取 /v3/config 的模型与促销表。
  *
- * 这是倍率的权威来源，也是国际版模型清单的唯一来源。
+ * 这是倍率的权威来源，也是国际版模型清单的唯一来源（企业端点对它 500）。
  * 返回完整模型对象（含倍率、显示名、token 上限、能力开关）—— 上游给的信息
  * 都是事实，直接带回去给调用方展示，不要在中间层削成只剩一个 id。
+ *
+ * ⚠️ 必须用**两种 UA 各取一次再并集**：上游按 UA 下发两份互有独有的清单
+ * （CLI 那份更全，IDE 那份另有 auto-chat / o4-mini 等），只取一份就少一大半。
+ * 这是「国际版只有 14 个模型」的根因 —— 详见 core 的 UA 注释。
+ *
+ * 其中一个 UA 失败不算致命：另一个的清单照样可用，只有两个都失败才抛错。
+ * 但**凭据失效是硬失败**，必须立刻上抛（那是账号问题，不是「这个 UA 取不到」）。
  */
 export async function fetchWorkbuddyModelRates(key, provider) {
   const realm = workbuddyRealm(key?.domain)
   const base = String(key?.rates_base || '').trim() || realm.base
-  const res = await fetch(`${base}${CONFIG_PATH}`, { headers: rateHeaders(key) })
-  const payload = await readEnvelope(res, '模型配置')
+  const url = `${base}${CONFIG_PATH}`
 
-  const data = payload?.data
-  if (!data || typeof data !== 'object') throw new Error('模型配置缺少 data')
-  if (!Array.isArray(data.models)) throw new Error('模型配置缺少 data.models')
+  const collected = []
+  let lastErr = null
+  for (const ua of [WORKBUDDY_CLI_UA, WORKBUDDY_V3_UA]) {
+    try {
+      const res = await fetch(url, { headers: rateHeaders(key, ua) })
+      const payload = await readEnvelope(res, '模型配置')
 
-  // 走与目录同一套解析（含对话模型过滤），免得两处口径漂移
-  const models = parseModelsFromConfig(payload, provider?.name)
-  if (models.length === 0) throw new Error('模型配置里没有可用的对话模型')
+      const data = payload?.data
+      if (!data || typeof data !== 'object') throw new Error('模型配置缺少 data')
+      if (!Array.isArray(data.models)) throw new Error('模型配置缺少 data.models')
 
-  const rates = {}
-  for (const m of models) if (m.rate) rates[m.id] = m.rate
+      // 走与目录同一套解析（含对话模型标注），免得两处口径漂移
+      const models = parseModelsFromConfig(payload, provider?.name)
+      if (models.length === 0) throw new Error('模型配置里没有可用的对话模型')
+
+      const rates = {}
+      for (const m of models) if (m.rate) rates[m.id] = m.rate
+      collected.push({ models, rates })
+    } catch (err) {
+      if (err?.auth_failed) throw err
+      lastErr = err
+    }
+  }
+  if (collected.length === 0) throw lastErr || new Error('模型配置不可用')
+
+  // 并集：先到的（CLI 那份，清单更全）为主，其余只补它没有的 id 与空倍率
+  let models = collected[0].models
+  const rates = { ...collected[0].rates }
+  for (const extra of collected.slice(1)) {
+    models = mergeRemoteModels(models, extra.models)
+    for (const [id, v] of Object.entries(extra.rates)) if (!rates[id]) rates[id] = v
+  }
   return { rates, models, ids: models.map((m) => m.id) }
 }
 
