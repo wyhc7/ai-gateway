@@ -698,4 +698,45 @@ describe('npm 的环境：脚本必须解析到和网关同一个 node', () => {
       up.clearUpdateCache()
     }
   })
+
+  test('缓存目录钉在仓库内，不能用服务用户的 home', () => {
+    // 部署脚本给的服务单元带 ProtectHome=true，服务用户连自己的 home 都读不到
+    // （实测 `ls ~` 报 Permission denied），而 npm 默认缓存就在 ~/.npm。
+    // 于是 npm 直接以「Your cache folder contains root-owned files」中止 ——
+    // 只要这次更新动了 package.json，装依赖那一步就必然失败。
+    // 缓存落进仓库内就没有这个问题：仓库对服务用户可写。
+    useRepo(SANDBOX)
+    const dir = up.npmCacheDir()
+    assert.equal(dir, join(SANDBOX, '.npm-cache'))
+    assert.ok(dir.startsWith(SANDBOX), '缓存必须在仓库内，否则服务用户写不了')
+  })
+})
+
+describe('自重启：不提权，靠 Restart=on-failure', () => {
+  // 这些用例只钉「判定逻辑」，绝不真的退出进程 —— 测试进程本身不能死。
+
+  test('UPDATE_NO_RESTART=1 时明确跳过，并告诉人怎么手动重启', async () => {
+    process.env.UPDATE_NO_RESTART = '1'
+    useRepo(SANDBOX)
+    const r = await up.triggerRestartForTest()
+    assert.equal(r.ok, false)
+    assert.equal(r.mode, 'skipped')
+    assert.match(r.message, /systemctl restart gw-update-test/)
+  })
+
+  test('systemd 不可用（或单元没配 on-failure）时退回人工重启，绝不自退出', async () => {
+    // 用不存在的单元名 → systemctl show 失败 → 判定不可自重启。
+    // 这条最关键：判错方向就会把服务直接打死，而不是重启。
+    delete process.env.UPDATE_NO_RESTART
+    process.env.UPDATE_SERVICE = 'gw-nonexistent-unit-xyz'
+    try {
+      const r = await up.triggerRestartForTest()
+      assert.equal(r.ok, false, '查不到单元时不能声称重启成功')
+      assert.equal(r.mode, 'manual')
+      assert.match(r.message, /请手动重启|不支持自动重启/)
+    } finally {
+      process.env.UPDATE_SERVICE = 'gw-update-test'
+      process.env.UPDATE_NO_RESTART = '1'
+    }
+  })
 })

@@ -183,10 +183,20 @@ Environment=NODE_ENV=production
 Environment=PORT=3001
 Environment=DATA_DIR=$DATA_DIR
 ExecStart=$NODE_BIN $WORK_DIR/server/index.js
+
+# Restart=on-failure 不只是「崩溃后自动拉起」——管理界面里的「立即更新」
+# 也依赖它：更新流程跑在服务进程内、以 ai-gateway 普通用户身份，而服务带
+# NoNewPrivileges=true，sudo（setuid 被内核 flag 忽略）与 polkit 0.105
+# （不加载 JS 规则）两条提权路都走不通。所以更新完成后进程主动以非零码退出，
+# 由 systemd 把新版本拉起来。**改成 always 也可以，但别改成 no/on-abnormal**：
+# 那会让「更新完成」变成「服务停摆」。
+# 注意 on-failure 不认 SIGTERM —— 靠 SIGTERM 自杀不会触发重启。
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
 ProtectSystem=full
+# ProtectHome 让服务用户读不到自己的 home。这正是 npm 默认缓存（~/.npm）
+# 不可写的原因，所以 server/update.js 把 npm 缓存改到仓库内的 .npm-cache。
 ProtectHome=true
 PrivateTmp=true
 LimitNOFILE=65536
@@ -198,6 +208,19 @@ EOF
 systemctl daemon-reload
 systemctl enable ai-gateway
 log_info "systemd 服务已安装"
+
+# 第 6.5 步：确认仓库属主干净
+#
+# 一旦有人用 root 在仓库里跑过 git（排障、手工 pull），.git 下就会留下
+# root 拥有的对象与 index。服务以 ai-gateway 运行时 git fetch 写不进去，
+# 管理界面的「检查更新」直接报：
+#   insufficient permission for adding an object to repository database
+# 部署时统一 chown 一次，避免带着这个坑上线。
+log_step "第 6.5 步：确认仓库属主..."
+chown -R ai-gateway:ai-gateway "$WORK_DIR"
+mkdir -p "$WORK_DIR/.npm-cache"
+chown -R ai-gateway:ai-gateway "$WORK_DIR/.npm-cache"
+log_info "仓库属主已归一到 ai-gateway"
 
 # 第 7 步：启动服务
 log_step "第 7 步：启动服务..."
