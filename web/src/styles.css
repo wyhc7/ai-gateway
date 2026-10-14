@@ -918,14 +918,6 @@ body::before {
   border-radius: 3px;
 }
 
-/* 上游没给固定倍率时如实说明。
-   原来这里回落到厂商名，看起来像有值——那是网关编的，不是上游说的。 */
-.rate-none {
-  flex-shrink: 0;
-  font-size: 10.5px;
-  color: var(--ink-3);
-  opacity: 0.75;
-}
 /* 无倍率模型右侧标 realm 而不是厂商名：厂商名在同一平台里每行都一样，
    realm 才是决定「用哪个账号调」的那一维。比 .muted 深一档，好认。 */
 .model-item .model-realm { flex-shrink: 0; font-size: 11px; color: var(--ink-2); }
@@ -942,37 +934,6 @@ body::before {
   border-radius: 3px;
 }
 
-/* 模型积分倍率。上游给的就是 "x0.79" 这种字符串，原样显示——
-   自行换算成百分比只是多一层可能算错的地方。倍率为 0（如 hy3）用品牌色
-   标出来：免费模型是这一列里最该被一眼看到的信息。 */
-.rate-chip {
-  flex-shrink: 0;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--surface-2);
-  border: 1px solid var(--rule-soft);
-  color: var(--ink-2);
-}
-.rate-chip.rate-free {
-  background: var(--accent-tint);
-  border-color: var(--accent-line);
-  color: var(--accent);
-}
-
-/* 倍率内联在模型名这一串文本里（型号 · 名字 · 倍率），不是独立气泡：
-   扫列表时视线不横向跳，「这模型扣多少」紧跟型号读完。
-   免费的用品牌色单独点出来——这是这一行里最该被一眼看到的信息。 */
-.rate-inline {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--ink-2);
-}
-.rate-inline.rate-free {
-  color: var(--accent);
-  font-weight: 600;
-}
 
 /* ==========================================================================
    对话测试
