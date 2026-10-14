@@ -7,7 +7,7 @@ import { ensureWorkbuddyToken, refreshWorkbuddyToken } from './workbuddy-oauth.j
 import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexAccountHeader } from './codex-responses.js'
 import { TEMPLATES } from './templates.js'
 import { isWorkbuddyProtocol, workbuddyHeaders, workbuddyChatBaseFor, shapeWorkbuddyBody, workbuddyRealmFor } from './workbuddy-lane.js'
-import { fetchWorkbuddyModelRates, fetchWorkbuddyEnterpriseModels, mergeWorkbuddyCatalogs } from './workbuddy-catalog.js'
+import { fetchWorkbuddyCatalog, mergeWorkbuddyCatalogs } from './workbuddy-catalog.js'
 import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
 
 // 允许「协议级默认模型」兜底的协议白名单。
@@ -347,10 +347,23 @@ export function workbuddyUpstreamBody(provider, body) {
   return { ...body, model: map[alias] }
 }
 
+// 取某个模型在平台目录里的元数据。整形的最后一步要用它下发 max_tokens：
+// 上游对每个模型有各自的单次输出上限，不下发就用网关默认值，长回答会被
+// 截断成 finish_reason: 'length'（实测各端点上限不一，128000–131072）。
+function workbuddyModelMeta(provider, model) {
+  const list = Array.isArray(provider?.models) ? provider.models : []
+  return list.find((m) => m && m.id === model) || null
+}
+
 function serializeUpstreamBody(provider, body) {
-  // WorkBuddy：强制流式 + tool_choice 收敛成字符串 + developer 角色改写 + 补 system 消息
+  // WorkBuddy：强制流式 + tool_choice 收敛成字符串 + developer 角色改写 +
+  // 补 system 消息 + system 内容指纹改写 + 按模型上限下发 max_tokens
   if (isWorkbuddyProtocol(provider.protocol)) {
-    return JSON.stringify(shapeWorkbuddyBody(workbuddyUpstreamBody(provider, body)))
+    const upstream = workbuddyUpstreamBody(provider, body)
+    // 元数据要按**上游 id** 找：别名（glm-5.3-intl）在目录里是一条独立记录，
+    // 但它的 max_output 与原始 id 一致，用上游 id 查更稳
+    const meta = workbuddyModelMeta(provider, upstream?.model) || workbuddyModelMeta(provider, body?.model)
+    return JSON.stringify(shapeWorkbuddyBody(upstream, meta))
   }
   const payload = withUsageOption(provider, body)
   return JSON.stringify(
@@ -520,9 +533,11 @@ export async function refreshWorkbuddyCatalog(provider) {
   const entries = []
   const notes = []
   for (const [realm, key] of byRealm) {
-    let v3
+    let catalog
     try {
-      v3 = await fetchWorkbuddyModelRates(key, provider)
+      // 一次取齐：企业端点（清单，给得最全）+ /v3/config（倍率与促销）。
+      // 两个端点下发的 id 集合不同，取并集在 catalog 层完成。
+      catalog = await fetchWorkbuddyCatalog(key, provider)
     } catch (err) {
       // 凭据失效是硬失败：这个账号不该再被当成数据来源，
       // 如实记下来让用户去处理，不能降级成「这个 realm 没数据」后装作无事发生
@@ -534,32 +549,10 @@ export async function refreshWorkbuddyCatalog(provider) {
       notes.push(`${realm}：模型配置不可用（${err.message}）`)
       continue
     }
-
-    // 清单优先取企业端点（给得最全），失败再退回 v3/config 的清单。
-    // 企业端点不可用是常态而非异常：国际版这条路本来就 500。
-    let models = v3.models
-    try {
-      const ent = await fetchWorkbuddyEnterpriseModels(key, provider)
-      // 企业端点给得更全，且同样带倍率——用整份换掉 v3 清单
-      models = ent.models
-    } catch (err) {
-      if (err.auth_failed) {
-        notes.push(`${realm}：企业端点凭据失效（${err.message}），清单退回 v3/config`)
-      } else {
-        notes.push(`${realm}：企业端点不可用（${err.message}），清单退回 v3/config`)
-      }
-    }
-    entries.push({ realm, ids: models.map((m) => m.id), models, rates: v3.rates })
+    for (const note of catalog.notes) notes.push(`${realm}：${note}`)
+    entries.push({ realm, ids: catalog.ids, models: catalog.models, rates: catalog.rates })
   }
   if (entries.length === 0) return null
-
-  // 企业端点也带倍率，与 v3/config 的倍率并表——上游给过答案就别浪费，
-  // 但 v3/config 是倍率的权威来源，同 id 冲突时以它为准。
-  for (const entry of entries) {
-    for (const m of entry.models) {
-      if (m.rate && !entry.rates[m.id]) entry.rates[m.id] = m.rate
-    }
-  }
 
   const { models, rates, upstream, realmById } = mergeWorkbuddyCatalogs(entries)
   provider.models = models

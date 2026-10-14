@@ -135,6 +135,69 @@ describe('请求体整形', () => {
   })
 })
 
+describe('max_tokens 按模型上限下发', () => {
+  // 上游对每个模型有各自的单次输出上限（实测各端点 128000–131072）。
+  // 不下发就用网关默认值（实测 32000），大文件写入与长回答会被截断成
+  // finish_reason: 'length' —— 那是「上游声明的能力」，不是网关能替它省的。
+  test('客户端没给 max_tokens 时按该模型的上限下发', () => {
+    const out = shapeWorkbuddyBody({ model: 'glm-5.3', messages: [{ role: 'user', content: 'x' }] }, { max_output: 131072 })
+    assert.equal(out.max_tokens, 131072)
+  })
+
+  test('客户端显式给了就尊重它（用户可能刻意要短回答）', () => {
+    const out = shapeWorkbuddyBody(
+      { model: 'glm-5.3', max_tokens: 512, messages: [{ role: 'user', content: 'x' }] },
+      { max_output: 131072 }
+    )
+    assert.equal(out.max_tokens, 512)
+  })
+
+  test('目录里没有该模型（或上游没给上限）时不猜一个值', () => {
+    const a = shapeWorkbuddyBody({ model: 'x', messages: [{ role: 'user', content: 'x' }] }, null)
+    assert.equal(a.max_tokens, undefined)
+    const b = shapeWorkbuddyBody({ model: 'x', messages: [{ role: 'user', content: 'x' }] }, {})
+    assert.equal(b.max_tokens, undefined)
+    const c = shapeWorkbuddyBody({ model: 'x', messages: [{ role: 'user', content: 'x' }] }, { max_output: 0 })
+    assert.equal(c.max_tokens, undefined, '0 是无效上限，不能下发')
+  })
+})
+
+describe('内容指纹改写接入', () => {
+  // 腾讯网关按 system 里的模板句做内容级拦截（400 / 11128）。
+  // 整形流程必须顺带把它改掉，否则带这类提示词的客户端每次请求都失败。
+  test('system 里的已知指纹在整形时被改写', () => {
+    const out = shapeWorkbuddyBody({
+      model: 'glm-5.3',
+      messages: [
+        { role: 'system', content: 'Main branch (you will usually use this for PRs): master' },
+        { role: 'user', content: 'hi' }
+      ]
+    })
+    assert.match(out.messages[0].content, /PRs usually go here/)
+    assert.equal(out.messages[0].content.includes('usually use this'), false)
+  })
+
+  // 顺序要求：developer → system 的改写必须先发生，否则内容指纹那一步
+  // 会漏掉这条消息（它当时还不是 system）。
+  test('developer 角色改写后，其内容也参与指纹改写', () => {
+    const out = shapeWorkbuddyBody({
+      model: 'glm-5.3',
+      messages: [{ role: 'developer', content: 'Main branch (you will usually use this for PRs)' }]
+    })
+    assert.equal(out.messages[0].role, 'system')
+    assert.equal(out.messages[0].content, 'Main branch (PRs usually go here)')
+  })
+
+  test('user 消息里的同一句不动（实测不拦，改了只会破坏用户原话）', () => {
+    const text = 'Main branch (you will usually use this for PRs)'
+    const out = shapeWorkbuddyBody({
+      model: 'glm-5.3',
+      messages: [{ role: 'system', content: 'ok' }, { role: 'user', content: text }]
+    })
+    assert.equal(out.messages[1].content, text)
+  })
+})
+
 describe('模型清单', () => {
   test('不再内置写死清单：模型只能来自上游', () => {
     // 曾经这里有一份写死的 18 个模型。它既漏掉了上游新增的型号，又留着

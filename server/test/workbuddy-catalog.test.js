@@ -13,10 +13,14 @@ const {
   workbuddyRateValue,
   fetchWorkbuddyModelRates,
   fetchWorkbuddyEnterpriseModels,
+  fetchWorkbuddyCatalog,
   mergeWorkbuddyCatalogs,
+  mergeRemoteModels,
+  applyPromotions,
   WORKBUDDY_V3_UA,
   WORKBUDDY_CLI_UA
 } = await import('../workbuddy-catalog.js')
+const { formatCreditsRate } = await import('../workbuddy-core.js')
 
 function startUpstream(handler) {
   const server = http.createServer((req, res) => {
@@ -448,5 +452,126 @@ describe('两个 realm 的合并', () => {
     const { models } = mergeWorkbuddyCatalogs([a, b])
     assert.equal(models.length, 1)
     assert.equal(models[0].rate, 'x0.00', 'x0.00 是「免费」，不是「没给」')
+  })
+})
+
+describe('两个端点的并集', () => {
+  // 实测（2026-09-21）：企业端点给 hy4-preview / hy4-preview-x（30 个），
+  // /v3/config 给 hy4-preview-f（22 个），而「限时免费」促销的 modelIds
+  // 只写着 ["hy4-preview-f"] —— 挂在只由 /v3/config 下发的那个 id 上。
+  // 只取企业端点，该促销永远对不上，界面显示 x0.29 而官方客户端显示免费。
+  test('只在另一个端点下发的模型必须并进来，否则促销永远对不上', () => {
+    const scoped = [{ id: 'hy4-preview' }, { id: 'glm-5.3' }]
+    const config = [{ id: 'hy4-preview-f' }, { id: 'glm-5.3' }]
+    const merged = mergeRemoteModels(scoped, config)
+    assert.deepEqual(merged.map((m) => m.id), ['hy4-preview', 'glm-5.3', 'hy4-preview-f'])
+  })
+
+  test('同名 id 以企业端点为准（它带更完整的元数据）', () => {
+    const scoped = [{ id: 'glm-5.3', max_input: 1000000, vendor: 'zhipu' }]
+    const config = [{ id: 'glm-5.3', vendor: '旧值' }]
+    const merged = mergeRemoteModels(scoped, config)
+    assert.equal(merged.length, 1)
+    assert.equal(merged[0].max_input, 1000000)
+  })
+
+  test('促销价并入模型，且格式与原价一致（同一行不能两种写法）', () => {
+    const models = [{ id: 'glm-5.2', rate: 'x0.17' }]
+    const merged = applyPromotions(models, new Map([['glm-5.2', 'x0.50']]))
+    assert.equal(merged[0].rate, 'x0.17')
+    assert.equal(merged[0].rate_discounted, 'x0.50')
+    // 拼起来必须是同一种写法
+    assert.equal(formatCreditsRate(merged[0].rate, merged[0].rate_discounted), 'x0.17→x0.50')
+  })
+
+  test('没有促销表时模型原样返回', () => {
+    const models = [{ id: 'a' }]
+    assert.equal(applyPromotions(models, new Map())[0], models[0])
+    assert.equal(applyPromotions(models, null)[0], models[0])
+  })
+})
+
+describe('一次取齐目录', () => {
+  // 国际版企业端点本来就是 500，v3/config 的清单照样可用，只是少几个隐藏型号。
+  // 失败必须如实上报（notes），不能静默吞掉让用户以为目录是完整的。
+  test('企业端点失败时退回 v3/config 并留下可读的说明', async () => {
+    const { server, base } = await startUpstream(({ req, res }) => {
+      if (req.url.includes('/console/enterprises/')) {
+        res.writeHead(500, { 'Content-Type': 'text/html' })
+        res.end('<html><h1>500</h1></html>')
+        return
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ code: 0, data: { models: [{ id: 'fast-model', credits: 'x0.34' }] } }))
+    })
+    try {
+      const out = await fetchWorkbuddyCatalog({ models_base: base, rates_base: base, access_token: 't', domain: 'www.codebuddy.ai' })
+      assert.deepEqual(out.ids, ['fast-model'])
+      assert.equal(out.rates['fast-model'], 'x0.34')
+      assert.equal(out.notes.length, 1, '降级要留痕')
+      assert.match(out.notes[0], /企业端点不可用/)
+    } finally {
+      server.close()
+    }
+  })
+
+  test('两个端点都成功时取并集，倍率以 v3/config 为准', async () => {
+    const { server, base } = await startUpstream(({ req, res }) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      if (req.url.includes('/console/enterprises/')) {
+        res.end(JSON.stringify({ code: 0, data: { models: [{ id: 'glm-5.3', credits: 'x9.99' }, { id: 'hidden-only' }] } }))
+        return
+      }
+      res.end(JSON.stringify({ code: 0, data: { models: [{ id: 'glm-5.3', credits: 'x0.79' }, { id: 'config-only' }] } }))
+    })
+    try {
+      const out = await fetchWorkbuddyCatalog({ models_base: base, rates_base: base, access_token: 't', domain: 'www.codebuddy.cn' })
+      assert.ok(out.ids.includes('hidden-only'), '企业端点独有的模型要保留')
+      assert.ok(out.ids.includes('config-only'), 'v3/config 独有的模型要保留')
+      assert.equal(out.rates['glm-5.3'], 'x0.79', '倍率权威来源是 v3/config')
+      assert.deepEqual(out.notes, [])
+    } finally {
+      server.close()
+    }
+  })
+
+  // 凭据失效与「端点对本 realm 不可用」是两件事：前者必须让调用方看见
+  // （去处理账号），不能降级成「这个 realm 没数据」后装作无事发生。
+  test('企业端点 401 是凭据失效，往上抛而不是降级', async () => {
+    const { server, base } = await startUpstream(({ req, res }) => {
+      if (req.url.includes('/console/enterprises/')) {
+        res.writeHead(401, { 'Content-Type': 'text/html' })
+        res.end('<html>401</html>')
+        return
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ code: 0, data: { models: [{ id: 'x' }] } }))
+    })
+    try {
+      await assert.rejects(
+        () => fetchWorkbuddyCatalog({ models_base: base, rates_base: base, access_token: 'bad', domain: 'www.codebuddy.cn' }),
+        (err) => {
+          assert.equal(err.auth_failed, true)
+          return true
+        }
+      )
+    } finally {
+      server.close()
+    }
+  })
+
+  test('v3/config 拿不到数据时整个目录失败（它是清单与倍率的底线）', async () => {
+    const { server, base } = await startUpstream(({ res }) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ code: 0, data: {} }))
+    })
+    try {
+      await assert.rejects(
+        () => fetchWorkbuddyCatalog({ models_base: base, rates_base: base, access_token: 't' }),
+        /data\.models/
+      )
+    } finally {
+      server.close()
+    }
   })
 })
