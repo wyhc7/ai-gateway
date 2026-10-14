@@ -123,19 +123,93 @@ describe('v3/config：倍率与国际版清单', () => {
     }
   })
 
-  test('必须自称 CodeBuddyIDE，CLI UA 拿到的是削减表', async () => {
-    let seen = null
+  test('两种 UA 都要发：上游按 UA 下发两份不同的清单，只发一种必然少模型', async () => {
+    // ⚠️ 与旧认知相反：不是「CLI 只拿削减表」，而是**两份互有独有**。
+    // 实测国际版 CLI UA 给 20 个（含 glm-5.3 等具体型号）、IDE UA 给 13 个
+    // （含 auto-chat / o4-mini 等），两边都有对方没有的。
+    const seen = []
     const { server, base } = await startUpstream(({ req, res }) => {
-      seen = { ua: req.headers['user-agent'], domain: req.headers['x-domain'], uid: req.headers['x-user-id'] }
+      seen.push({ ua: req.headers['user-agent'], domain: req.headers['x-domain'], uid: req.headers['x-user-id'] })
       res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify(CN_V3))
     })
     try {
       await fetchWorkbuddyModelRates({ rates_base: base, access_token: 't', domain: 'www.codebuddy.cn', uid: 'u-1' })
-      assert.equal(seen.ua, WORKBUDDY_V3_UA)
-      assert.match(seen.ua, /CodeBuddyIDE/)
-      assert.equal(seen.domain, 'www.codebuddy.cn')
-      assert.equal(seen.uid, 'u-1')
+      assert.equal(seen.length, 2, 'CLI 与 IDE 两种 UA 各取一次')
+      assert.deepEqual(
+        seen.map((s) => s.ua).sort(),
+        [WORKBUDDY_CLI_UA, WORKBUDDY_V3_UA].sort(),
+        '两种 UA 都要用到，漏一种就少一份独有的模型'
+      )
+      assert.equal(seen[0].domain, 'www.codebuddy.cn')
+      assert.equal(seen[0].uid, 'u-1')
+    } finally {
+      server.close()
+    }
+  })
+
+  test('两份清单互有独有，必须取并集（国际版只有 14 个模型的根因）', async () => {
+    // 实测形态：CLI 那份给 glm-5.3 / kimi-k3 等具体型号，IDE 那份给
+    // auto-chat / o4-mini 等。只取 IDE 那份时网关里国际版只有 14 个模型。
+    const byUa = {
+      [WORKBUDDY_CLI_UA]: {
+        code: 0,
+        data: {
+          models: [
+            { id: 'fast-model', credits: 'x0.34 credits' },
+            { id: 'glm-5.3', credits: 'x0.79 credits' },
+            { id: 'kimi-k3', credits: 'x1.62 credits' }
+          ]
+        }
+      },
+      [WORKBUDDY_V3_UA]: {
+        code: 0,
+        data: {
+          models: [
+            { id: 'fast-model', credits: 'x0.34' },
+            { id: 'auto-chat', credits: 'x0.57' },
+            { id: 'o4-mini' }
+          ]
+        }
+      }
+    }
+    const { server, base } = await startUpstream(({ req, res }) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(byUa[req.headers['user-agent']]))
+    })
+    try {
+      const { ids, rates, models } = await fetchWorkbuddyModelRates({ rates_base: base, access_token: 't', domain: 'www.workbuddy.ai' })
+      assert.deepEqual([...ids].sort(), ['auto-chat', 'fast-model', 'glm-5.3', 'kimi-k3', 'o4-mini'])
+      assert.equal(models.length, 5, '两份清单的并集，缺一份就少模型')
+      // 倍率：先到的（CLI 那份）为准；两边数值一致，只是写法不同
+      assert.equal(rates['fast-model'], 'x0.34 credits')
+      assert.equal(rates['glm-5.3'], 'x0.79 credits')
+      assert.equal(rates['auto-chat'], 'x0.57')
+      assert.equal('o4-mini' in rates, false, '上游没给倍率就不塞')
+    } finally {
+      server.close()
+    }
+  })
+
+  test('其中一个 UA 失败不算致命，另一份清单照样可用', async () => {
+    // 单个 UA 拿不到是常态（上游分区域灰度），不能让整次刷新失败。
+    // 但凭据失效是另一回事——那必须硬失败（见上面的 401 用例）。
+    let hits = 0
+    const { server, base } = await startUpstream(({ req, res }) => {
+      hits += 1
+      if (req.headers['user-agent'] === WORKBUDDY_CLI_UA) {
+        res.writeHead(500, { 'Content-Type': 'text/html' })
+        res.end('<html><h1>500 Internal Server Error</h1></html>')
+        return
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ code: 0, data: { models: [{ id: 'hy3', credits: 'x0.00' }] } }))
+    })
+    try {
+      const { ids, rates } = await fetchWorkbuddyModelRates({ rates_base: base, access_token: 't', domain: 'www.codebuddy.cn' })
+      assert.deepEqual(ids, ['hy3'])
+      assert.equal(rates.hy3, 'x0.00')
+      assert.equal(hits, 2, '两个 UA 都试过了')
     } finally {
       server.close()
     }
