@@ -176,11 +176,12 @@
                     <span class="model-id" :title="m.description || m.id">
                       {{ m.id }}
                       <span v-if="m.name && m.name !== m.id" class="model-name">{{ m.name }}</span>
-                      <!-- 倍率紧跟在模型名后面：一行里先读到型号、紧接着就知道它
-                           扣多少积分，不用把视线甩到行尾去找 -->
+                      <!-- 倍率直接写进模型名这一串文本里（型号 · 名字 · 倍率），
+                           不做成独立气泡：扫列表时视线不用横向跳，
+                           「这模型扣多少」紧跟型号读完，方便快速比对 -->
                       <span
                         v-if="modelRate(p, m)"
-                        class="rate-chip"
+                        class="rate-inline"
                         :class="{ 'rate-free': isFreeModel(m) }"
                         :title="m.rate_discounted
                           ? `原价 ${modelRate(p, m)}，促销价 ${m.rate_discounted}——调用该模型按促销价扣积分`
