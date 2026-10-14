@@ -184,10 +184,32 @@ async function runNpm(args) {
     // 而 systemd 服务的 PATH 里通常没有 nvm 的 bin 目录——实测会落到系统自带的
     // node v12 上，vite 的顶层 await 直接语法错误。既然用哪个 node 跑 npm，
     // 就必须让脚本也解析到同一个 node。
-    env: { ...process.env, PATH: [dirname(process.execPath), process.env.PATH].filter(Boolean).join(delimiter) }
+    //
+    // npm_config_cache 同理必须钉死，不能让它用默认的 ~/.npm：
+    // 部署脚本给的服务单元带 ProtectHome=true，服务用户连自己的 home 都读不到
+    // （实测 `ls ~` 报 Permission denied），npm 会直接以
+    // 「Your cache folder contains root-owned files」中止 —— 只要这次更新动了
+    // package.json，装依赖那一步就必然失败。缓存落在仓库内就没有这个问题：
+    // 仓库对服务用户可写（ProtectSystem=full 只读 /usr /boot /etc，不碰 /opt）。
+    env: {
+      ...process.env,
+      PATH: [dirname(process.execPath), process.env.PATH].filter(Boolean).join(delimiter),
+      npm_config_cache: npmCacheDir()
+    }
   })
   return `${stdout || ''}${stderr || ''}`.trim()
 }
+
+/**
+ * npm 缓存目录：放在仓库内，而不是服务用户的 home。
+ *
+ * 理由见 runNpm 的注释：ProtectHome=true 让服务用户读不到 ~/.npm，
+ * 而默认缓存路径就在那里。仓库内目录对服务用户可写，且随仓库一起被 chown。
+ */
+export function npmCacheDir() {
+  return join(repoDir(), '.npm-cache')
+}
+
 
 async function isShallow() {
   try {
@@ -478,29 +500,127 @@ export function commandError(err) {
 // ---------------------------------------------------------------------------
 
 /**
- * 通知 systemd 重启本服务。
+ * 让新版本生效：通知服务管理器重启本服务。
  *
- * --no-block 是关键：同步等待的话，systemd 停止本服务时会向本进程发 SIGTERM，
- * 我们自己发起的那次重启会在半路被打断，服务停在停止状态起不来。
- * 加上 --no-block，任务交给 PID 1 托管，本进程随后被杀也不影响它跑完。
+ * ## 为什么不是 `systemctl restart`
+ *
+ * 服务单元带 `NoNewPrivileges=true`（部署脚本里就有，是个正确的加固项），
+ * 而这个更新流程是**在服务进程内**跑的、以 `ai-gateway` 普通用户身份。
+ * 实测两条提权路都被堵死：
+ *   - sudo：`The "no new privileges" flag is set, which prevents sudo from running as root.`
+ *     —— NoNewPrivileges 是内核 per-task flag，sudo 的 setuid 位被直接忽略。
+ *     所以「往 sudoers 里加一条 NOPASSWD」在这台机器上根本不生效。
+ *   - polkit：本机是 0.105，不加载 JS 规则（`/etc/polkit-1/rules.d` 形同虚设），
+ *     而 0.105 的 .pkla 只能按 action 授权、无法限定到「只许重启这一个单元」，
+ *     那等于把管理任意 systemd 服务的权限顺手送出去。
+ *
+ * ## 采用的办法：非零退出，交给 `Restart=on-failure`
+ *
+ * 服务单元已有 `Restart=on-failure`，所以**根本不需要提权**：
+ * 进程以非零码退出，systemd 会把它当作失败并自动拉起新进程。
+ * 实测确认（临时单元 + 生产同款属性）：
+ *   - `exit 1`   → 被拉起（NRestarts 递增）✅
+ *   - `exit 0`   → 不拉起 ❌（on-failure 只认失败）
+ *   - `SIGTERM`  → 不拉起 ❌（on-failure 明确排除 SIGHUP/SIGINT/SIGTERM/SIGPIPE）
+ * 最后一条尤其重要：**不能靠 SIGTERM 自杀**，那条路不会重启，服务会一直停着。
+ *
+ * ## 代价与边界
+ *
+ * - 重启**不是瞬时**的：`RestartSec=3`，实测约 3~5 秒后新进程起来。
+ *   前端 waitForRestart 靠 uptime 变小判断新进程，本来就能等。
+ * - 启动限流：`StartLimitBurst=5` / `StartLimitIntervalSec=10s`。一次更新只退出
+ *   一次，远达不到阈值；但若新版本本身起不来（例如依赖装坏），systemd 连续拉起
+ *   5 次后会放弃并把单元置为 failed —— 这是**正确**的行为（避免无限重启打转），
+ *   此时需要人工介入，所以下面把这一点写进返回消息。
+ * - `UPDATE_NO_RESTART=1` 仍然尊重：那时只更新代码，由人自己重启。
+ *
+ * 返回后调用方应尽快结束响应；本进程随后会退出。
  */
 async function triggerRestart() {
+  const unit = serviceUnit()
+  const decision = await decideRestart()
+  if (decision.mode !== 'self-exit') return decision
+
+  // 延后一拍再退出：让 HTTP 响应先完整发回前端，否则用户看到的是连接被掐断，
+  // 而不是「更新成功、正在重启」。退出码 1 = 失败语义，正是 on-failure 要的。
+  const delayMs = Number(process.env.UPDATE_RESTART_DELAY_MS || 400) || 400
+  setTimeout(() => {
+    // 把退出原因写进日志，便于事后在 journalctl 里区分「更新重启」与「真崩溃」
+    console.log(`[gateway] 更新完成，主动退出以触发 ${unit} 重启（Restart=on-failure）`)
+    process.exit(1)
+  }, delayMs).unref?.()
+
+  return {
+    ...decision,
+    message: `已更新，${Math.max(1, Math.round(delayMs / 1000))} 秒内由 systemd 自动重启（Restart=on-failure）。若新版本起不来，连续失败 5 次后服务会停在 failed，需查看 journalctl -u ${unit}`
+  }
+}
+
+/**
+ * 决定「怎么让新版本生效」。纯判定，不产生副作用。
+ *
+ * 抽出来是为了让单测能覆盖全部分支：真的调用 triggerRestart 会让测试进程
+ * 自己退出，整个测试套件无声中断——那种「测不了所以不测」正是缺陷的温床。
+ */
+async function decideRestart() {
   const unit = serviceUnit()
   if (process.env.UPDATE_NO_RESTART === '1') {
     return { ok: false, mode: 'skipped', unit, message: `已配置为不自动重启（UPDATE_NO_RESTART=1），请手动执行 systemctl restart ${unit}` }
   }
-  try {
-    await execFileAsync(systemctlBin(), ['--no-block', 'restart', unit], { timeout: 10 * 1000, windowsHide: true })
-    return { ok: true, mode: 'systemd', unit, message: `已通知 systemd 重启 ${unit}` }
-  } catch (err) {
+
+  // 先探一下「本服务是不是由 systemd 管的、且带 on-failure」。
+  // 不是的话自退出等于把服务打死——那种部署（nohup / pm2 / docker）必须回退到提示人工重启。
+  const managed = await detectRestartPolicy()
+  if (!managed.canSelfRestart) {
     return {
       ok: false,
       mode: 'manual',
       unit,
-      message: `自动重启失败（${commandError(err)}）。代码已更新，请手动执行 systemctl restart ${unit} 让新版本生效。`
+      message: `当前部署不支持自动重启（${managed.reason}）。代码已更新，请手动重启让新版本生效。`
     }
   }
+  return { ok: true, mode: 'self-exit', unit, message: '将由 systemd 自动重启（Restart=on-failure）' }
 }
+
+/**
+ * 判断本服务能否靠 `Restart=on-failure` 自重启。
+ *
+ * 判据全部来自 `systemctl show`，不猜：
+ *  - 能查到单元（说明确实是 systemd 托管）；
+ *  - Restart 策略是 on-failure 或 always（always 也认非零退出）；
+ *  - 不是通过 `systemd-run` 之类临时单元跑的（那种单元名带 .service 但无 Restart）。
+ *
+ * 查不到 systemctl（macOS / Windows / 容器内无 systemd）时返回 false，
+ * 由调用方退回「提示人工重启」，绝不自退出。
+ */
+async function detectRestartPolicy() {
+  try {
+    const { stdout } = await execFileAsync(
+      systemctlBin(),
+      ['show', '-p', 'Restart', '-p', 'ActiveState', '--value', `${serviceUnit()}.service`],
+      { timeout: 10 * 1000, windowsHide: true }
+    )
+    const lines = String(stdout || '').split('\n').map((s) => s.trim()).filter(Boolean)
+    const policy = lines[0] || ''
+    if (!['on-failure', 'always'].includes(policy)) {
+      return { canSelfRestart: false, reason: `服务单元的 Restart 策略是 ${policy || '未设置'}，非 on-failure/always` }
+    }
+    return { canSelfRestart: true, policy }
+  } catch (err) {
+    return { canSelfRestart: false, reason: `无法查询 systemd 单元（${firstLine(commandError(err))}）` }
+  }
+}
+
+/**
+ * 仅供测试：跑一遍自重启的**判定**，但不真的退出进程。
+ *
+ * 单测绝不能调用 triggerRestart 本体——那会让测试进程自己退出，整个测试套件
+ * 无声中断。判定逻辑与生产走同一条 decideRestart，只是不做退出动作。
+ */
+export async function triggerRestartForTest() {
+  return decideRestart()
+}
+
 
 /**
  * 执行一次更新。

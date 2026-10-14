@@ -157,6 +157,9 @@
       </p>
       <p v-else-if="restartTimedOut" class="notice-text notice-block">
         等待超时。请到服务器确认服务状态：<span class="mono">systemctl status {{ applyResult.restart?.unit || 'ai-gateway' }}</span>
+        <br />
+        若服务停在 failed，多半是新版本起不来（例如依赖没装上），用
+        <span class="mono">journalctl -u {{ applyResult.restart?.unit || 'ai-gateway' }} -n 50</span> 看原因。
       </p>
 
       <div v-if="applyResult.ok" class="apply-bar">
