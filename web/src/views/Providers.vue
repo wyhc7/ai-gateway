@@ -176,6 +176,24 @@
                     <span class="model-id" :title="m.description || m.id">
                       {{ m.id }}
                       <span v-if="m.name && m.name !== m.id" class="model-name">{{ m.name }}</span>
+                      <!-- 倍率紧跟在模型名后面：一行里先读到型号、紧接着就知道它
+                           扣多少积分，不用把视线甩到行尾去找 -->
+                      <span
+                        v-if="modelRate(p, m)"
+                        class="rate-chip"
+                        :class="{ 'rate-free': isFreeModel(m) }"
+                        :title="m.rate_discounted
+                          ? `原价 ${modelRate(p, m)}，促销价 ${m.rate_discounted}——调用该模型按促销价扣积分`
+                          : `积分倍率 ${modelRate(p, m)}——调用该模型按此倍率扣积分`"
+                      >{{ rateText(m) }}</span>
+                      <!-- 平台提供倍率、但这个模型恰好没给：如实写「未给倍率」。
+                           整个平台一个倍率都没拉到时下面这格不显示——那说明这个上游
+                           根本不提供倍率，写「未给」是拿网关的判断冒充上游事实。 -->
+                      <span
+                        v-else-if="platformHasRates(p)"
+                        class="rate-none"
+                        title="上游未提供该模型的固定倍率（如浮动倍率或专用模型）"
+                      >未给倍率</span>
                     </span>
                     <!-- 非对话模型（补全/生图）或自动选择别名：上游确实接受这些名字，
                          所以留在路由表里可点名，但在列表里标出来免得被当成常规对话模型 -->
@@ -186,36 +204,23 @@
                     >{{ m.auto_select ? '自动' : '非对话' }}</span>
                     <!-- 厂商：上游 vendor 字段直接给，不在网关里映射成猜测的名字 -->
                     <span v-if="m.vendor" class="model-vendor">{{ m.vendor }}</span>
-                    <!-- 上下文长度来自上游 maxInputTokens，单位换算是唯一一处必要的加工 -->
-                    <span v-if="m.max_input" class="model-ctx" :title="`最大输入 ${m.max_input} tokens${m.max_output ? ` / 输出 ${m.max_output} tokens` : ''}`">{{ fmtTokens(m.max_input) }}</span>
+                    <!-- 上下文窗口：上游给了就显示长度，没给明说「未知」。
+                         标准 OpenAI /models 大多不含这个字段，所以「未知」是常态，
+                         让这一格空着反而让人以为刷新坏了。 -->
+                    <span class="model-ctx" :title="contextTitle(m)">{{ contextText(m) }}</span>
                     <!-- 能力标记同样是上游事实，不猜 -->
                     <span v-if="m.images || m.reasoning || m.tools" class="model-caps">
                       <span v-if="m.tools" title="支持工具调用">工具</span>
                       <span v-if="m.reasoning" title="支持推理">推理</span>
                       <span v-if="m.images" title="支持图像输入">视觉</span>
                     </span>
-                    <!-- 倍率来自上游 /v3/config，格式就是它给的 "x0.79"；有促销时
-                         标成 "x0.17→x0.50"。上游没给（auto 这类浮动倍率、codewise
-                         这类专用模型）时明确写「未给」，不能回落到厂商名假装有值 -->
-                    <span
-                      v-if="modelRate(p, m)"
-                      class="rate-chip"
-                      :class="{ 'rate-free': isFreeModel(m) }"
-                      :title="m.rate_discounted
-                        ? `原价 ${modelRate(p, m)}，促销价 ${m.rate_discounted}——调用该模型按促销价扣积分`
-                        : `积分倍率 ${modelRate(p, m)}——调用该模型按此倍率扣积分`"
-                    >{{ rateText(m) }}</span>
                     <!-- 没有倍率的模型：realm 才是有用的那一维——厂商名在同一平台里
-                         每行都一样，而模型落在哪个网关决定调用时用哪个账号。
-                         标完 realm 仍要如实写「未给倍率」，不能让这一格看起来像有值。 -->
-                    <template v-else>
-                      <span
-                        v-if="m.realm"
-                        class="model-realm"
-                        :title="`该模型属于 ${realmLabel(m.realm)} 网关，调用时用对应版本的账号`"
-                      >{{ realmLabel(m.realm) }}</span>
-                      <span class="rate-none" title="上游未提供该模型的固定倍率（如浮动倍率或专用模型）">未给倍率</span>
-                    </template>
+                         每行都一样，而模型落在哪个网关决定调用时用哪个账号。 -->
+                    <span
+                      v-if="!modelRate(p, m) && m.realm"
+                      class="model-realm"
+                      :title="`该模型属于 ${realmLabel(m.realm)} 网关，调用时用对应版本的账号`"
+                    >{{ realmLabel(m.realm) }}</span>
                   </div>
                 </div>
                 <!-- 倍率是上游给的，不是网关内置：把取数时间标出来，
@@ -849,6 +854,35 @@ function rateText(m) {
 // 该模型的倍率是否免费：原价或促销价任一为 0 都算（夜间免费的活动很常见）。
 function isFreeModel(m) {
   return isFreeRate(m?.rate) || isFreeRate(m?.rate_discounted)
+}
+
+// 这个平台到底提不提供倍率。
+//
+// ⚠️ 只有上游真的给过倍率，才有资格对「没给倍率的模型」写「未给」。
+// 一个倍率都没拉到的平台（多数 OpenAI 兼容端点的 /models 只有 id/owned_by，
+// 压根不含倍率）整列留空 —— 写「未给倍率」是拿网关的判断冒充上游事实。
+function platformHasRates(p) {
+  if ((p?.models || []).some((m) => m?.rate || m?.rate_discounted)) return true
+  const table = p?.model_rates
+  if (!table || typeof table !== 'object') return false
+  // 新版按 realm 分表：{ cn: {...}, intl: {...} }；旧版是一张扁平表
+  return Object.values(table).some((t) => t && typeof t === 'object' && Object.keys(t).length)
+}
+
+// 上下文窗口：上游给了就显示长度，没给明说「未知」。
+//
+// 实测上游普遍不直接下发 contextWindow（国内 0/33 条有），后端会回落
+// 到 maxInputTokens 等写法；全都取不到时这里写「未知」——
+// 比留空白好，留白会让人以为是刷新失败了。
+function contextText(m) {
+  const n = Number(m?.context)
+  return Number.isFinite(n) && n > 0 ? fmtTokens(m.context) : '未知'
+}
+
+function contextTitle(m) {
+  const n = Number(m?.context)
+  if (Number.isFinite(n) && n > 0) return `上下文窗口 ${m.context} tokens`
+  return '上游未提供该模型的上下文窗口长度'
 }
 
 // 非对话模型（补全 / 生图）仍留在路由表里可点名，但在列表里淡化，
