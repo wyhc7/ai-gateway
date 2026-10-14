@@ -176,7 +176,7 @@
                     <span class="model-id" :title="m.description || m.id">
                       {{ m.id }}
                       <span v-if="m.name && m.name !== m.id" class="model-name">{{ m.name }}</span>
-                      <!-- 倍率直接写进模型名这一串文本里（型号 · 名字 · 倍率），
+                      <!-- 倍率跟在模型名后面、作为同一串文本（型号 名字 x0.79），
                            不做成独立气泡：扫列表时视线不用横向跳，
                            「这模型扣多少」紧跟型号读完，方便快速比对 -->
                       <span
