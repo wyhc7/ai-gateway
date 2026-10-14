@@ -4,7 +4,8 @@
 //
 // 订阅接入方案（subscription-plans.js）已整体下线，TEMPLATES 里也不再有
 // grok-oauth / codex-oauth 条目，所以这两个协议现在没有兜底、返回 null。
-// 目前只有 zen-free 仍命中（它留在 TEMPLATES 里，可用模型由白名单决定）。
+// OpenCode Zen 免费通道（zen-free）也已移除：它的准入判定落在出口 IP 上，
+// 数据中心 ASN 一律 403，服务器部署下这条通道无法工作。
 import { test, describe, before, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
@@ -20,13 +21,11 @@ let defaultModelsFor = null
 let refreshModels = null
 let autoHeaders = null
 let TEMPLATES = null
-let ZEN_FREE_MODELS = null
 
 before(async () => {
   ;({ state } = await import('../store.js'))
   ;({ defaultModelsFor, refreshModels, autoHeaders } = await import('../proxy.js'))
   ;({ TEMPLATES } = await import('../templates.js'))
-  ;({ ZEN_FREE_MODELS } = await import('../zen-lane.js'))
 })
 
 beforeEach(() => { globalThis.fetch = realFetch })
@@ -38,15 +37,6 @@ describe('defaultModelsFor', () => {
     // 而不是塞一份陈旧的、可能与当前订阅号可用模型对不上的名单。
     assert.equal(defaultModelsFor('grok-oauth'), null)
     assert.equal(defaultModelsFor('codex-oauth'), null)
-  })
-
-  test('免费通道仍走白名单兜底，且每项带 id/owned_by', () => {
-    const models = defaultModelsFor('zen-free')
-    assert.ok(Array.isArray(models) && models.length > 0)
-    assert.ok(models.every((m) => m.id && m.owned_by))
-    // 兜底必须全是白名单内的免费档：混进付费模型，用公共凭据调用一律 401
-    const curated = new Set(ZEN_FREE_MODELS)
-    assert.ok(models.every((m) => curated.has(m.id)))
   })
 
   test('openai-chat 等无默认模型的协议返回 null', () => {
@@ -73,32 +63,6 @@ describe('defaultModelsFor', () => {
 })
 
 describe('refreshModels 兜底', () => {
-  test('上游 /models 网络失败时退回内置默认列表并返回 ok', async () => {
-    // 免凭据通道没有 Key 也能刷：上游 /models 不可达时回退到白名单兜底
-    globalThis.fetch = async () => { throw new TypeError('fetch failed') }
-
-    const p = {
-      id: 'p-zen-1',
-      name: 'Zen 测试',
-      base_url: 'https://opencode.ai/zen/v1',
-      protocol: 'zen-free',
-      enabled: true,
-      models: [],
-      keys: [],
-      extra_headers: {}
-    }
-    state.providers.push(p)
-    try {
-      const r = await refreshModels(p.id)
-      assert.equal(r.ok, true)
-      assert.equal(r.fallback, true)
-      assert.ok(Array.isArray(p.models) && p.models.length > 0)
-      assert.equal(p.models_source, 'default')
-    } finally {
-      state.providers.length = 0
-    }
-  })
-
   test('订阅协议失败时不兜底：方案下线后没有可回退的名单，老实报错', async () => {
     // 兜底名单随订阅接入方案一起删掉了。此时若仍假装「拉取成功」，
     // 用户会以为模型是新的，实际一个都调不通，排查方向全错。

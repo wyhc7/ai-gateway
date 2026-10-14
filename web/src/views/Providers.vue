@@ -228,7 +228,6 @@
                 <el-option label="OpenAI Responses" value="openai-responses" />
                 <el-option label="Anthropic（OpenAI 兼容端点）" value="anthropic-openai" />
                 <el-option label="Anthropic 原生 Messages（需转换层）" value="anthropic" />
-                <el-option label="OpenCode Zen 免费通道（免凭据）" value="zen-free" />
                 <el-option label="WorkBuddy 订阅（OAuth，需导入登录态文件）" value="workbuddy-oauth" />
                 <el-option label="自定义调用方案" value="custom" />
               </el-select>
@@ -250,11 +249,6 @@
           <div class="oauth-hint">
             订阅账号的凭据不走 API Token，这个字段在这里填不了。保存后在平台列表里点
             「授权 {{ authLabel(providerForm) }} 账号」走网页授权，或点「导入 Token」粘贴已有凭据。
-          </div>
-        </el-form-item>
-        <el-form-item v-else-if="isCredentiallessProtocol(providerForm.protocol)" label="凭据">
-          <div class="oauth-hint">
-            该通道免凭据：上游按请求头与请求体指纹放行，平台创建后即可直接使用，无需填写 API Token。
           </div>
         </el-form-item>
         <el-form-item v-else :label="editingProvider ? 'API Token（留空则保持不变）' : 'API Token'" :required="!editingProvider">
@@ -309,7 +303,6 @@
           </el-button>
           <span class="muted" style="font-size: 12px; line-height: 1.7; padding-top: 4px">
             <template v-if="isOAuthProtocol(providerForm.protocol)">绑定订阅账号后可点「拉取列表」；订阅上游通常没有干净的 /models，<br />拉不到就按上游文档手动填写，或建完点平台列表里的「刷新」。</template>
-            <template v-else-if="isCredentiallessProtocol(providerForm.protocol)">该通道免凭据，直接点「拉取列表」即可获取可用模型（模型名称不预填，留空也行）；<br />拉取失败时按上游文档手动填写，建完后平台列表里的「刷新」同样管用。</template>
             <template v-else>输入 API Token 后可拉取可用模型列表选择，选择后填入「模型名称」；<br />拉取失败时按服务商文档手动填写。</template>
           </span>
         </div>
@@ -590,7 +583,6 @@ const PROTOCOL_LABELS = {
   'grok-oauth': 'Grok 订阅（OAuth）',
   'codex-oauth': 'Codex 订阅（OAuth）',
   'workbuddy-oauth': 'WorkBuddy 订阅（OAuth）',
-  'zen-free': 'OpenCode Zen 免费通道',
   anthropic: 'Anthropic 原生',
   custom: '自定义'
 }
@@ -638,7 +630,7 @@ function applyPreset(id) {
   // 写死一份默认清单有两个毛病：随上游版本演进很快过期，还会盖掉用户自己填的；
   // 且同一协议下各家厂商模型毫无交集，曾经正是它把 ChatGPT 的模型列表套到了
   // DeepSeek / 通义 / Gemini 平台上。
-  // 需要默认清单的平台（订阅、免凭据通道）靠 refreshModels 兜底拿——那是拉取失败时
+  // 需要默认清单的平台（订阅类）靠 refreshModels 兜底拿——那是拉取失败时
   // 才发生的事，不是创建时偷偷塞进去。
   if (t.auth_type || t.chat_path || t.models_path) advancedOpen.value = ['advanced']
 }
@@ -801,12 +793,10 @@ async function saveProvider() {
   if (!providerForm.value.name || !providerForm.value.base_url) {
     return ElMessage.warning('平台名称和模型 API 地址为必填项')
   }
-  // 订阅类平台没有静态 API Token 可言，凭据要创建后走 OAuth 授权或导入；
-  // 免凭据通道（OpenCode Zen）凭据是固定的公共放行，表单里压根没有这个输入框。
-  // 两者都得放行——否则表单把字段藏了、提交时却要求填，用户对着空白表单无从下手。
+  // 订阅类平台没有静态 API Token 可言，凭据要创建后走 OAuth 授权或导入。
+  // 它们都得放行——否则表单把字段藏了、提交时却要求填，用户对着空白表单无从下手。
   if (!editingProvider.value && !providerForm.value.api_key
-    && !isOAuthProtocol(providerForm.value.protocol)
-    && !isCredentiallessProtocol(providerForm.value.protocol)) {
+    && !isOAuthProtocol(providerForm.value.protocol)) {
     return ElMessage.warning('请输入 API Token')
   }
   let extra = {}
@@ -861,8 +851,7 @@ function parseExtraFromForm() {
 async function doPreview() {
   const { base_url, api_key } = providerForm.value
   if (!base_url) return ElMessage.warning('请先填写模型 API 地址')
-  // 免凭据通道没有 Token 可填，拦了它就永远拉不了列表——和上面的保存同一个洞
-  if (!editingProvider.value && !api_key && !isCredentiallessProtocol(providerForm.value.protocol)) {
+  if (!editingProvider.value && !api_key) {
     return ElMessage.warning('请先填写 API Token')
   }
   const payload = {
@@ -1105,12 +1094,6 @@ let pollTimer = null
 // 建平台表单、必填校验都要据此区分——否则选了 Grok / Codex 模板仍被拦住要填 API Token。
 function isOAuthProtocol(protocol) {
   return protocol === 'grok-oauth' || protocol === 'codex-oauth' || protocol === 'workbuddy-oauth'
-}
-
-// 免凭据通道（OpenCode Zen 免费档）：创建平台时不需要 API Token，
-// 也不能把空 Token 当普通 Key 提交，否则平台下会挂一个永远调不通的静态 Key。
-function isCredentiallessProtocol(protocol) {
-  return protocol === 'zen-free'
 }
 
 function isOAuthProvider(p) {
