@@ -63,24 +63,28 @@ describe('订阅接入方案', () => {
     assert.equal(cn.base_url, 'https://copilot.tencent.com')
     assert.equal(cn.region, 'cn')
 
-    assert.equal(intl.base_url, 'https://www.codebuddy.ai')
+    // 国际版入口已从 www.codebuddy.ai 迁到 www.workbuddy.ai：
+    // 前者在 8.8.8.8 / 1.1.1.1 / 114 / 223.5.5.5 上一致解析成 0.0.0.1（黑洞），
+    // 授权会卡满超时后报「This operation was aborted」。
+    assert.equal(intl.base_url, 'https://www.workbuddy.ai')
     assert.equal(intl.region, 'intl')
 
     assert.notEqual(cn.base_url, intl.base_url, '两条方案的接入地址必须不同')
 
-    // workbuddy.ai 是计费/成长域，谁都不能拿它当对话入口——
-    // 对调不会立刻报错，只会在第一次对话时拿到非 JSON 的 401，
-    // 报错是 "parse failed: invalid character '<'"，完全反推不出是域名选错了
     for (const p of WB_PLANS) {
-      assert.ok(!p.base_url.includes('workbuddy.ai'), `${p.id} 不能填成计费域`)
       assert.equal(p.protocol, 'workbuddy-oauth')
+      // 停服的域名不能留在任何方案里——填了它不会立刻报错，
+      // 只会在授权时卡满超时，用户看到的是一个无从下手的「aborted」
+      assert.ok(!p.base_url.includes('codebuddy.ai'), `${p.id} 指向了已停服的 codebuddy.ai`)
     }
   })
 
   test('region 与接入域互相印证，别让方案自己跟自己打架', () => {
     for (const p of WB_PLANS) {
       if (p.region === 'cn') assert.ok(p.base_url.includes('tencent.com'), `${p.id} 标了国内却没落国内域`)
-      if (p.region === 'intl') assert.ok(p.base_url.includes('codebuddy.ai'), `${p.id} 标了国际却没落国际域`)
+      // 国际版的接入地址现在是 workbuddy.ai（旧 codebuddy.ai 已停服）。
+      // realm 判据仍认 codebuddy.ai，但那是账号 X-Domain 的事，与接入地址无关。
+      if (p.region === 'intl') assert.ok(p.base_url.includes('workbuddy.ai'), `${p.id} 标了国际却没落可用入口`)
     }
   })
 
