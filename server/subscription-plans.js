@@ -34,7 +34,12 @@ export const SUBSCRIPTION_PLANS = [
     id: 'workbuddy-intl',
     name: 'WorkBuddy 国际版（CodeBuddy 国际）',
     protocol: 'workbuddy-oauth',
-    base_url: 'https://www.codebuddy.ai',
+    // ⚠️ 旧值是 https://www.codebuddy.ai，该域已整体停服：apex 与 www 在
+    // 8.8.8.8 / 1.1.1.1 / 114 / 223.5.5.5 上一致返回 0.0.0.1（黑洞），
+    // 授权会卡满超时后报「This operation was aborted」。
+    // 实测 www.workbuddy.ai 的 auth/state 0.49s 可用，且它同时接受
+    // X-Domain: codebuddy.ai，存量国际账号不必改凭据即可平滑迁移。
+    base_url: 'https://www.workbuddy.ai',
     region: 'intl',
     models: [],
     hint: '国际版的登录入口只认 IDE 客户端，授权框里会默认选好版本；对话、签到与额度都按账号自己的 realm 路由。'

@@ -56,6 +56,29 @@ describe('realm 与产品身份', () => {
     assert.equal(WORKBUDDY_REALMS.intl.base, WORKBUDDY_REALMS.intl.billingBase)
   })
 
+  // codebuddy.ai 整体停服：apex 与 www 在四个公共 DNS 上一致返回 0.0.0.1
+  // （黑洞），对话端点同样连不通。旧配置下国际版授权会卡满超时后报
+  // 「This operation was aborted」。接入地址必须指向 workbuddy.ai。
+  test('intl 的接入地址已迁离停服的 codebuddy.ai', () => {
+    for (const realm of ['intl', 'global']) {
+      const r = WORKBUDDY_REALMS[realm]
+      assert.equal(r.base, 'https://www.workbuddy.ai', `${realm} 的接入地址应指向 workbuddy.ai`)
+      assert.equal(r.billingBase, 'https://www.workbuddy.ai')
+      assert.equal(r.referer, 'https://www.workbuddy.ai')
+      assert.ok(!r.base.includes('codebuddy.ai'), `${realm} 不能再指向已停服的域名`)
+    }
+  })
+
+  // realm 的**判据**仍是 X-Domain，不能跟着接入地址一起改：
+  // 存量 intl 账号的 X-Domain 是 codebuddy.ai，把判据改成 workbuddy.ai 会让
+  // 它们被误判成 global，从而改变对话路由与计费归属。
+  test('realm 判据仍认 codebuddy.ai（存量账号的 X-Domain 没变）', () => {
+    assert.equal(workbuddyRealmFor('codebuddy.ai'), 'intl')
+    assert.equal(workbuddyRealmFor('www.codebuddy.ai'), 'intl')
+    assert.equal(workbuddyRealmFor('workbuddy.ai'), 'global')
+    assert.equal(workbuddyRealmFor('www.codebuddy.cn'), 'cn')
+  })
+
   // 登录入口的分水岭：国际版只认 IDE 客户端。发错 platform 会拿不到 state。
   test('平台标识随 realm 变：国际版是 ide，国内是 CLI', () => {
     assert.equal(WORKBUDDY_REALMS.cn.platform, 'CLI')

@@ -60,6 +60,24 @@ export const DEFAULT_PRODUCT = WORKBUDDY_PRODUCTS.codebuddy
 //
 // CN 的对话域与计费域是分开的两个站（copilot.tencent.com vs www.codebuddy.cn），
 // Global 与 Intl 则同域。realm 的归属由 X-Domain 判定，不由平台配置决定。
+//
+// ⚠️ **intl 的接入地址已迁移到 workbuddy.ai**（2026-10-14 实测）
+//
+// codebuddy.ai 这个域整体停服了：apex 与 www 在 8.8.8.8 / 1.1.1.1 /
+// 114.114.114.114 / 223.5.5.5 上**一致**返回 0.0.0.1（黑洞记录），对话端点
+// 同样连不通 —— 不是 DNS 抖动，是腾讯自己下发的废弃解析。旧配置下国际版
+// 授权会卡满超时后报「This operation was aborted」，而国内版一切正常。
+//
+// 迁移依据（同一台海外机器实测）：
+//   - www.workbuddy.ai 的 auth/state 0.49s 返回 state + authUrl，auth/token
+//     轮询正常回 11217「login ing」，对话端点回 401（正常的凭据校验）；
+//   - 它**同时接受** X-Domain: codebuddy.ai 与 X-Domain: workbuddy.ai（都 200），
+//     所以存量 intl 账号的 X-Domain 不必改，只换接入地址即可平滑迁移；
+//   - 两个域的 CNAME 都指向 *.eo.dnse2.com，本就是同一套边缘网络。
+//
+// 因此 realm 的**判据（X-Domain）仍是 codebuddy.ai**，只是接入地址改指
+// workbuddy.ai。把判据也一起改掉会让存量账号被误判成 global，那会改变
+// 它的对话路由与计费归属 —— 不是这次要动的东西。
 // ---------------------------------------------------------------------------
 export const WORKBUDDY_REALMS = {
   cn: {
@@ -77,9 +95,11 @@ export const WORKBUDDY_REALMS = {
     product: 'workbuddy'
   },
   intl: {
-    base: 'https://www.codebuddy.ai',
-    billingBase: 'https://www.codebuddy.ai',
-    referer: 'https://www.codebuddy.ai',
+    // 旧值 https://www.codebuddy.ai 已停服（解析成 0.0.0.1），见上面注释。
+    // 复用 global 的接入地址：它接受 codebuddy.ai 的 X-Domain，是同一套后端。
+    base: 'https://www.workbuddy.ai',
+    billingBase: 'https://www.workbuddy.ai',
+    referer: 'https://www.workbuddy.ai',
     platform: 'ide',
     product: 'workbuddy'
   }

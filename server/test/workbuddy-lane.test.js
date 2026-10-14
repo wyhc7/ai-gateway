@@ -59,10 +59,15 @@ describe('按 Key 注入的请求头', () => {
   test('三个 realm 各走各的网关，Referer 不串台', () => {
     assert.equal(workbuddyChatBaseFor('www.codebuddy.cn'), 'https://copilot.tencent.com')
     assert.equal(workbuddyChatBaseFor('workbuddy.ai'), 'https://www.workbuddy.ai')
-    assert.equal(workbuddyChatBaseFor('www.codebuddy.ai'), 'https://www.codebuddy.ai')
+    // intl 的接入地址已迁到 workbuddy.ai（旧 www.codebuddy.ai 解析成 0.0.0.1）。
+    // 注意 realm 判据仍是 codebuddy.ai —— 下面两行是「不同维度」的断言，
+    // 不要因为接入地址相同就以为判据也合并了。
+    assert.equal(workbuddyChatBaseFor('www.codebuddy.ai'), 'https://www.workbuddy.ai')
+    assert.equal(workbuddyRealmFor('www.codebuddy.ai'), 'intl')
     // CN 的计费域与对话域是分开的两个站，Global/Intl 则同域
     assert.equal(workbuddyBillingBaseFor('www.codebuddy.cn'), 'https://www.codebuddy.cn')
     assert.equal(workbuddyBillingBaseFor('workbuddy.ai'), 'https://www.workbuddy.ai')
+    assert.equal(workbuddyBillingBaseFor('www.codebuddy.ai'), 'https://www.workbuddy.ai')
     assert.equal(workbuddyBillingBaseFor(''), 'https://www.codebuddy.cn')
     assert.equal(workbuddyRealmFor('codebuddy.ai'), 'intl')
     assert.equal(workbuddyRealmFor('https://www.workbuddy.ai/x'), 'global')
