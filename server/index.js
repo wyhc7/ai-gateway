@@ -19,7 +19,7 @@ import {
 } from './api-keys.js'
 import { TEMPLATES } from './templates.js'
 import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
-import { startWorkbuddyLogin, pollWorkbuddyLogin, cancelWorkbuddyLogin } from './workbuddy-oauth.js'
+import { startWorkbuddyLogin, pollWorkbuddyLogin, cancelWorkbuddyLogin, refreshWorkbuddyToken } from './workbuddy-oauth.js'
 import { fetchWorkbuddyCheckinStatus, performWorkbuddyCheckin, beijingDayKey, fetchWorkbuddyCredits } from './workbuddy-checkin.js'
 import { addLog, getLogs, initLogger } from './logger.js'
 import { checkUpdate, applyUpdate } from './update.js'
@@ -923,6 +923,35 @@ app.post('/api/oauth/codex/accounts/:providerId/:keyId/refresh', api(async (req,
 app.get('/api/oauth/codex/defaults', (req, res) => {
   res.json({ base_url: CODEX_API_BASE_URL, protocol: 'codex-oauth', verification_uri: CODEX_VERIFICATION_URI })
 })
+
+// WorkBuddy 账号续期。
+//
+// 与 Grok / Codex 同一套语义（无条件续期，失败记 last_error 但不进冷却——续期失败
+// 只说明这一枚 refresh_token 的状态，不该让整个账号立刻不可用）。
+// 端点、参数、响应信封都在 workbuddy-oauth.js 里，这里只做路由与落盘。
+app.post('/api/oauth/workbuddy/accounts/:providerId/:keyId/refresh', api(async (req, res) => {
+  const p = getProvider(req.params.providerId)
+  if (!p) return res.status(404).json({ error: { message: '平台不存在' } })
+  const key = (p.keys || []).find((k) => k.id === req.params.keyId)
+  if (!key) return res.status(404).json({ error: { message: '账号不存在' } })
+  if (key.type !== 'oauth') {
+    return res.status(400).json({ error: { message: '该凭据不是 OAuth 账号，无需续期' } })
+  }
+  try {
+    const next = await refreshWorkbuddyToken(key)
+    Object.assign(key, next)
+    key.last_error = null
+    key.cooldown_until = 0
+    persistImmediate()
+    addLog({ type: 'oauth', action: 'refresh', provider_id: p.id, detail: `${key.name} 续期成功` })
+    res.json({ ok: true, provider: serializeProvider(p) })
+  } catch (err) {
+    key.last_error = err.message
+    key.last_error_at = Date.now()
+    persistImmediate()
+    res.status(400).json({ error: { message: err.message } })
+  }
+}))
 
 // ---------------------------------------------------------------------------
 // 客户端访问密钥管理
