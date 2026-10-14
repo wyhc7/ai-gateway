@@ -54,6 +54,11 @@
             <div class="name">
               {{ p.name }}
               <span class="badge badge-blue">{{ protocolLabel(p.protocol) }}</span>
+              <!-- WorkBuddy 两个版本是两个平台、两套登录入口。徽标从平台自己的
+                   workbuddy_region 来，不靠名字猜——名字是用户能改的 -->
+              <span v-if="isWorkbuddyProvider(p)" class="badge" :class="workbuddyRegion(p) === 'intl' ? 'badge-purple' : 'badge-green'">
+                {{ workbuddyVersionLabel(p) }}
+              </span>
               <span v-if="isCustomCallPlan(p)" class="badge badge-purple">自定义调用方案</span>
               <span :class="['badge', p.enabled ? 'badge-green' : 'badge-gray']">
                 <span class="badge-dot" :class="p.enabled ? 'green' : 'gray'"></span>{{ p.enabled ? '启用' : '停用' }}
@@ -80,7 +85,7 @@
                   <div class="head-actions">
                     <template v-if="isOAuthProvider(p)">
                       <el-button size="small" plain @click="openImportCredentialDialog(p)">导入 Token</el-button>
-                      <el-button size="small" plain @click="openGrokAuth(p)">授权 {{ authLabel(p) }} 账号</el-button>
+                      <el-button size="small" plain @click="openAuthDialog(p)">授权 {{ authLabel(p) }} 账号</el-button>
                     </template>
                     <el-button v-else size="small" plain @click="openAddKeyDialog(p)">添加 Key</el-button>
                   </div>
@@ -372,6 +377,14 @@
               <el-input v-model="subForm.name" placeholder="例如：WorkBuddy 订阅账号" />
             </el-form-item>
           </el-col>
+          <!-- 两个版本是两条独立方案：选了哪条，建出来的平台就属于哪个版本，
+               授权框与登录入口都跟着它走，之后不再提供切换 -->
+          <el-col v-if="currentPlan?.protocol === 'workbuddy-oauth'" :span="24">
+            <div class="oauth-hint" style="margin-top: -4px">
+              国内版与国际版是两条独立方案：登录入口不同，账号落到的网关也不同。
+              按你订阅的版本选；建成后该平台固定属于这个版本，要接另一个版本请另建一个平台。
+            </div>
+          </el-col>
         </el-row>
         <el-form-item label="模型 API 地址" required>
           <el-input v-model="subForm.base_url" :placeholder="subFormPlaceholder" />
@@ -433,79 +446,42 @@
       </template>
     </el-dialog>
 
+    <!-- Grok / Codex 订阅账号：设备码授权（上游给 user_code，用户去网页里填）。
+         WorkBuddy 不走这里——它是扫码/网页登录，没有可填的验证码，单独一个对话框。 -->
     <el-dialog
       v-model="grokDialog"
       :title="`授权 ${authLabel(authProvider)} 订阅账号`"
       width="520px"
       :close-on-click-modal="false"
-      @closed="closeGrokAuth"
+      @closed="closeAuthDialog"
     >
       <div v-if="!deviceFlow" class="grok-intro">
         <p v-if="isCodexProvider(authProvider)">
           用你的 ChatGPT Plus / Pro / Business 订阅账号授权，授权后这个账号的 Codex 额度即可通过网关调用。
-        </p>
-        <p v-else-if="isWorkbuddyProvider(authProvider)">
-          用你的 CodeBuddy 订阅账号扫码授权，授权后这个账号的额度即可通过网关调用。
-          uid、realm、token 由网关自动拿到并绑定，不用再去 CLI 里翻登录态文件。
         </p>
         <p v-else>用你的 SuperGrok / X Premium 订阅账号授权，授权后这个账号的额度即可通过网关调用。</p>
         <p class="grok-note">不需要 API Key，也不会保存你的登录密码。网关只拿到一枚可撤销的访问令牌。</p>
         <p v-if="isCodexProvider(authProvider)" class="grok-note">
           注意：需先在 ChatGPT → 设置 → 安全 中开启「允许设备码登录」（默认关闭），否则无法完成授权。
         </p>
-        <p v-else-if="isWorkbuddyProvider(authProvider)" class="grok-note">
-          授权会话 5 分钟过期，超时了重新点一次即可。
-        </p>
-        <!-- 登录起点只有两处：国内/全球版共用腾讯这边的入口（platform=CLI），
-             国际版从 codebuddy.ai 起（只认 IDE 客户端，platform=ide）。
-             账号落到哪个 realm 由上游签发的 domain 决定，这里选的只是入口。 -->
-        <div v-if="isWorkbuddyProvider(authProvider)" class="realm-pick">
-          <span class="realm-label">接入版本</span>
-          <el-radio-group v-model="loginRealm" size="small">
-            <el-radio-button value="cn">国内 / 全球版</el-radio-button>
-            <el-radio-button value="intl">国际版</el-radio-button>
-          </el-radio-group>
-          <p class="grok-note">
-            {{ loginRealm === 'intl'
-              ? '国际版账号从 codebuddy.ai 起登录；后续对话与签到都按账号自己的 realm 路由。'
-              : '国内与 WorkBuddy 全球版账号共用这个入口；拿不准就选它。' }}
-          </p>
-        </div>
       </div>
 
       <div v-else-if="deviceFlow.status === 'pending'" class="device-step">
-        <!-- WorkBuddy 没有验证码：上游给的是登录页地址，扫码或网页登录，没有可输入的 user_code -->
-        <template v-if="!deviceFlow.user_code">
-          <p class="device-hint">
-            用 CodeBuddy 手机端扫码，或直接在
-            <a :href="deviceFlow.verify_url" target="_blank" rel="noopener noreferrer">登录页</a>
-            上登录。完成后这里会自动绑定。
-          </p>
-          <div class="device-actions">
-            <el-button size="small" plain @click="openVerifyPage">打开授权登录页</el-button>
-            <el-button size="small" text @click="copyCode">复制链接</el-button>
-          </div>
-          <p class="device-status">
-            等待登录完成……页面会自动检查，无需手动刷新。
-          </p>
-        </template>
-        <template v-else>
-          <div class="device-code">{{ deviceFlow.user_code }}</div>
-          <p class="device-hint">
-            请在浏览器打开
-            <a :href="deviceFlow.verify_url" target="_blank" rel="noopener noreferrer">{{ deviceFlow.verify_url }}</a>
-            ，输入上面的验证码完成授权。
-          </p>
-          <div class="device-actions">
-            <el-button size="small" plain @click="copyCode">复制验证码</el-button>
-            <el-button v-if="deviceFlow.verify_url_complete" size="small" text @click="openVerifyPage">
-              直接打开验证页
-            </el-button>
-          </div>
-          <p class="device-status">
-            等待授权确认……页面会自动检查，无需手动刷新。
-          </p>
-        </template>
+        <div class="device-code">{{ deviceFlow.user_code }}</div>
+        <p class="device-hint">
+          请在浏览器打开
+          <a :href="deviceFlow.verify_url" target="_blank" rel="noopener noreferrer">{{ deviceFlow.verify_url }}</a>
+          ，输入上面的验证码完成授权。
+        </p>
+        <div class="device-actions">
+          <el-button size="small" plain @click="copyCode">复制验证码</el-button>
+          <el-button v-if="deviceFlow.verify_url_complete" size="small" text @click="openVerifyPage">
+            直接打开验证页
+          </el-button>
+        </div>
+        <p class="device-status">
+          等待授权确认……页面会自动检查，无需手动刷新。
+        </p>
       </div>
 
       <div v-else-if="deviceFlow.status === 'done'" class="device-done">
@@ -518,7 +494,69 @@
 
       <template #footer>
         <el-button @click="grokDialog = false">{{ deviceFlow?.status === 'done' ? '完成' : '取消' }}</el-button>
-        <el-button v-if="!deviceFlow" type="primary" :loading="startingAuth" @click="startGrokAuth">
+        <el-button v-if="!deviceFlow" type="primary" :loading="startingAuth" @click="startDeviceAuth">
+          开始授权
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- WorkBuddy 订阅账号：扫码 / 网页登录，上游给的是登录页地址，没有 user_code 可填。
+         版本由**平台**决定（建平台时选的方案），框内不再提供切换：
+         一个平台就是一个版本，混着切只会让「这个账号到底落在哪个网关」变得说不清。
+         要授权另一个版本，就建另一个版本的平台。 -->
+    <el-dialog
+      v-model="workbuddyDialog"
+      :title="`授权 WorkBuddy ${workbuddyVersionLabel(authProvider)}账号`"
+      width="520px"
+      :close-on-click-modal="false"
+      @closed="closeAuthDialog"
+    >
+      <div v-if="!deviceFlow" class="grok-intro">
+        <p>
+          用你的 CodeBuddy {{ workbuddyVersionLabel(authProvider) }}订阅账号扫码授权，
+          授权后这个账号的额度即可通过网关调用。
+          uid、realm、token 由网关自动拿到并绑定，不用再去 CLI 里翻登录态文件。
+        </p>
+        <!-- 版本是平台的属性，这里只如实标出它会去哪个登录入口，
+             不再给单选——选错入口的代价是拿不到凭据，而不是能顺手切回来 -->
+        <div class="realm-pick">
+          <span class="realm-label">登录入口</span>
+          <span class="realm-value">{{ workbuddyLoginHost(authProvider) }}</span>
+          <p class="grok-note">
+            该地址只用于发起登录；账号最终落在哪个 realm 由上游签发的 domain 决定，
+            对话、签到与额度都按账号自己的 realm 路由。
+          </p>
+        </div>
+        <p class="grok-note">不需要 API Key，也不会保存你的登录密码。网关只拿到一枚可撤销的访问令牌。</p>
+        <p class="grok-note">授权会话 5 分钟过期，超时了重新点一次即可。</p>
+      </div>
+
+      <div v-else-if="deviceFlow.status === 'pending'" class="device-step">
+        <p class="device-hint">
+          用 CodeBuddy 手机端扫码，或直接在
+          <a :href="deviceFlow.verify_url" target="_blank" rel="noopener noreferrer">登录页</a>
+          上登录。完成后这里会自动绑定。
+        </p>
+        <div class="device-actions">
+          <el-button size="small" plain @click="openVerifyPage">打开授权登录页</el-button>
+          <el-button size="small" text @click="copyCode">复制链接</el-button>
+        </div>
+        <p class="device-status">
+          等待登录完成……页面会自动检查，无需手动刷新。
+        </p>
+      </div>
+
+      <div v-else-if="deviceFlow.status === 'done'" class="device-done">
+        <p>授权成功，账号已绑定到该平台。</p>
+      </div>
+
+      <div v-else class="device-error">
+        <p>{{ deviceFlow.error || '授权失败' }}</p>
+      </div>
+
+      <template #footer>
+        <el-button @click="workbuddyDialog = false">{{ deviceFlow?.status === 'done' ? '完成' : '取消' }}</el-button>
+        <el-button v-if="!deviceFlow" type="primary" :loading="startingAuth" @click="startWorkbuddyAuth">
           开始授权
         </el-button>
       </template>
@@ -1151,7 +1189,7 @@ async function createSubscription() {
     ElMessage.success('订阅平台已创建，接下来绑定凭据')
     // 平台没有凭据就服务不了，所以建完直接进授权：WorkBuddy 扫码、Grok/Codex 设备码。
     // 想改走「导入 Token」关掉这个框，从平台列表里点即可
-    openGrokAuth(created)
+    openAuthDialog(created)
   } catch (e) {
     ElMessage.error(e?.message || '创建订阅平台失败')
   } finally {
@@ -1160,18 +1198,21 @@ async function createSubscription() {
 }
 
 // ---------------------------------------------------------------------------
-// Grok / Codex 订阅账号（OAuth 设备码授权）
+// 订阅账号授权
 //
-// 流程：服务端申请 user_code → 用户在浏览器确认 → 前端按服务端给的节奏轮询
-// 直到 done / error / expired。轮询间隔由服务端决定（含 slow_down 退避），
-// 前端不自己拍脑袋定频率。
-// Grok 与 Codex 走同一套 UI 与状态机，差异只在端点与文案，按协议分流。
+// 两套独立的对话框，不共用：
+//   grokDialog     —— Grok / Codex：设备码授权（上游给 user_code，用户去网页填）
+//   workbuddyDialog—— WorkBuddy：扫码 / 网页登录（上游给登录页地址，无验证码）
+//
+// 刻意不合成一个「按协议分支」的大框：两者的交互步骤本就不同（一个有验证码、
+// 一个没有），而且 WorkBuddy 的**版本**是平台属性，不该在框里给单选——
+// 一个平台就是一个版本，混着切只会让「这个账号落在哪个网关」变得说不清。
+//
+// 轮询节奏由服务端决定（含 slow_down 退避），前端不自己拍脑袋定频率。
 // ---------------------------------------------------------------------------
 const grokDialog = ref(false)
+const workbuddyDialog = ref(false)
 const startingAuth = ref(false)
-// 登录入口版本：cn = 国内/全球版共用入口，intl = codebuddy.ai。落地后的 realm
-// 由上游签发的 domain 决定，这里只决定去哪个网关起登录。
-const loginRealm = ref('cn')
 const deviceFlow = ref(null)
 const refreshingCred = ref(null)
 const authProvider = ref(null)
@@ -1206,6 +1247,24 @@ function authLabel(p) {
   if (isCodexProvider(p)) return 'Codex'
   if (isWorkbuddyProvider(p)) return 'WorkBuddy'
   return 'Grok'
+}
+
+// WorkBuddy 平台属于哪个版本。建平台时按所选方案写进 workbuddy_region，
+// 授权入口据此定，**不在对话框里给切换**。
+// 缺字段（旧数据）按国内版处理：国内与全球版共用同一个登录入口，
+// 猜错成国际版会去一个只认 IDE 客户端的入口，直接拿不到凭据。
+function workbuddyRegion(p) {
+  return p?.workbuddy_region === 'intl' ? 'intl' : 'cn'
+}
+
+function workbuddyVersionLabel(p) {
+  return workbuddyRegion(p) === 'intl' ? '国际版' : '国内版'
+}
+
+// 该版本从哪个域名起登录。国内与全球版共用腾讯这边（platform=CLI），
+// 国际版从 codebuddy.ai 起（只认 IDE 客户端）。
+function workbuddyLoginHost(p) {
+  return workbuddyRegion(p) === 'intl' ? 'www.codebuddy.ai' : 'copilot.tencent.com'
 }
 
 // 「导入 Token」直接粘贴 access_token / sso_token 作为订阅账号凭据
@@ -1316,15 +1375,17 @@ function credText(k) {
   return '凭据缺失'
 }
 
-function openGrokAuth(p) {
+// 打开授权框。WorkBuddy 与 Grok/Codex 是**两个独立的框**：
+// 前者扫码/网页登录（无验证码），后者设备码（要填 user_code）。
+// 版本不在这里选——它由平台的 workbuddy_region 决定。
+function openAuthDialog(p) {
   authProvider.value = p
   deviceFlow.value = null
-  // 版本预选跟随建平台时选的方案：国际版从 codebuddy.ai 起，国内版从
-  // copilot.tencent.com 起，选错了会去错登录入口
-  loginRealm.value = p?.workbuddy_region === 'intl' ? 'intl' : 'cn'
-  grokDialog.value = true
+  if (isWorkbuddyProvider(p)) workbuddyDialog.value = true
+  else grokDialog.value = true
 }
 
+// 兼容旧调用点（建完平台直接进授权）
 function stopPolling() {
   if (pollTimer) {
     clearTimeout(pollTimer)
@@ -1332,7 +1393,7 @@ function stopPolling() {
   }
 }
 
-function closeGrokAuth() {
+function closeAuthDialog() {
   stopPolling()
   const flow = deviceFlow.value
   // 用户中途放弃时通知服务端丢弃会话，别让它在那儿空转到过期——
@@ -1346,27 +1407,11 @@ function closeGrokAuth() {
   authProvider.value = null
 }
 
-async function startGrokAuth() {
+// Grok / Codex：设备码授权（上游给 user_code 与验证地址）
+async function startDeviceAuth() {
   startingAuth.value = true
   try {
     const kind = oauthKind(authProvider.value)
-    // WorkBuddy 不是设备码：上游给的是登录页地址（打开后扫码或网页登录），
-    // 凭据由网关侧轮询 auth/token 拿到，没有可以填的 user_code。
-    // session_id 存 state，轮询与取消沿用与设备码同一套节奏。
-    if (kind === 'workbuddy') {
-      const flow = await api.startWorkbuddyLogin({ provider_id: authProvider.value?.id, region: loginRealm.value })
-      deviceFlow.value = {
-        status: 'pending',
-        session_id: flow.state,
-        user_code: '',
-        verify_url: flow.auth_url,
-        verify_url_complete: flow.auth_url
-      }
-      // 扫码这件事发生在用户自己的浏览器里，直接开新标签，别让他再手动复制
-      window.open(flow.auth_url, '_blank', 'noopener')
-      schedulePoll(2000)
-      return
-    }
     const flow = kind === 'codex'
       ? await api.startCodexDevice({ provider_id: authProvider.value?.id })
       : await api.startGrokDevice({ provider_id: authProvider.value?.id })
@@ -1380,11 +1425,34 @@ async function startGrokAuth() {
     schedulePoll(2000)
   } catch (e) {
     // 最常见的失败原因是服务器访问不到上游授权服务器，提示要说到点子上
-    const host = kind === 'codex'
-      ? 'auth.openai.com'
-      : kind === 'workbuddy'
-        ? (loginRealm.value === 'intl' ? 'www.codebuddy.ai' : 'copilot.tencent.com')
-        : 'auth.x.ai'
+    const host = kind === 'codex' ? 'auth.openai.com' : 'auth.x.ai'
+    ElMessage.error(e?.message || `发起授权失败，请确认服务器可以访问 ${host}`)
+  } finally {
+    startingAuth.value = false
+  }
+}
+
+// WorkBuddy：扫码 / 网页登录。上游给的是登录页地址（打开后扫码或网页登录），
+// 凭据由网关侧轮询 auth/token 拿到，没有可以填的 user_code。
+// session_id 存 state，轮询与取消沿用与设备码同一套节奏。
+// region 取自**平台**，不是框里的单选——发错入口会拿不到凭据。
+async function startWorkbuddyAuth() {
+  startingAuth.value = true
+  const region = workbuddyRegion(authProvider.value)
+  try {
+    const flow = await api.startWorkbuddyLogin({ provider_id: authProvider.value?.id, region })
+    deviceFlow.value = {
+      status: 'pending',
+      session_id: flow.state,
+      user_code: '',
+      verify_url: flow.auth_url,
+      verify_url_complete: flow.auth_url
+    }
+    // 扫码这件事发生在用户自己的浏览器里，直接开新标签，别让他再手动复制
+    window.open(flow.auth_url, '_blank', 'noopener')
+    schedulePoll(2000)
+  } catch (e) {
+    const host = region === 'intl' ? 'www.codebuddy.ai' : 'copilot.tencent.com'
     ElMessage.error(e?.message || `发起授权失败，请确认服务器可以访问 ${host}`)
   } finally {
     startingAuth.value = false
@@ -1444,11 +1512,18 @@ function openVerifyPage() {
   window.open(deviceFlow.value.verify_url_complete || deviceFlow.value.verify_url, '_blank', 'noopener')
 }
 
+// 凭据续期。三家各有自己的端点与信封，必须按类型分流——
+// WorkBuddy 的续期走 /v2/plugin/auth/token/refresh（X-Refresh-Token 头 + 自家信封），
+// 打到 Grok 的端点上只会拿回一个无从分辨的 404/401。
 async function refreshCredential(p, k) {
   refreshingCred.value = k.id
   try {
     const kind = oauthKind(p)
-    await (kind === 'codex' ? api.refreshCodexAccount(p.id, k.id) : api.refreshGrokAccount(p.id, k.id))
+    const refresh = {
+      codex: api.refreshCodexAccount,
+      workbuddy: api.refreshWorkbuddyAccount
+    }[kind] || api.refreshGrokAccount
+    await refresh(p.id, k.id)
     ElMessage.success('凭据已续期')
     await load()
   } catch (e) {
@@ -1634,6 +1709,18 @@ onBeforeUnmount(() => {
 .realm-pick .realm-label {
   font-size: 13px;
   color: var(--ink-2);
+}
+
+/* 登录入口域名。只读展示（版本是平台属性，不在这里切换），
+   用等宽字体让它和正文区分开——这是个地址，不是一句话。 */
+.realm-pick .realm-value {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--ink);
+  padding: 2px 7px;
+  background: var(--surface-2);
+  border: 1px solid var(--rule-soft);
+  border-radius: 3px;
 }
 
 .realm-pick .grok-note {

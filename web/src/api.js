@@ -94,6 +94,7 @@ export const api = {
   startWorkbuddyLogin: (data) => request('/api/oauth/workbuddy/login/start', { method: 'POST', body: JSON.stringify(data || {}) }),
   pollWorkbuddyLogin: (state) => request(`/api/oauth/workbuddy/login/${encodeURIComponent(state)}/poll`, { method: 'POST' }),
   cancelWorkbuddyLogin: (state) => request(`/api/oauth/workbuddy/login/${encodeURIComponent(state)}`, { method: 'DELETE' }),
+  refreshWorkbuddyAccount: (providerId, keyId) => request(`/api/oauth/workbuddy/accounts/${providerId}/${keyId}/refresh`, { method: 'POST' }),
   getWorkbuddyCheckin: (providerId, keyId) => request(`/api/oauth/workbuddy/accounts/${providerId}/${keyId}/checkin`),
   workbuddyCheckin: (providerId, keyId) => request(`/api/oauth/workbuddy/accounts/${providerId}/${keyId}/checkin`, { method: 'POST' }),
   getWorkbuddyCredits: (providerId, keyId) => request(`/api/oauth/workbuddy/accounts/${providerId}/${keyId}/credits`),
