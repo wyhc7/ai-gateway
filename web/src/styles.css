@@ -930,6 +930,18 @@ body::before {
    realm 才是决定「用哪个账号调」的那一维。比 .muted 深一档，好认。 */
 .model-item .model-realm { flex-shrink: 0; font-size: 11px; color: var(--ink-2); }
 
+/* 非对话模型（补全/生图）与自动选择别名。它们仍留在路由表里可直接点名，
+   只是在列表里淡化 —— 不淡化会让用户以为选了就能对话。 */
+.model-item.model-non-chat .model-id { opacity: 0.7; }
+.model-non-chat-tag {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--ink-3);
+  padding: 0 4px;
+  border: 1px dashed var(--rule-soft);
+  border-radius: 3px;
+}
+
 /* 模型积分倍率。上游给的就是 "x0.79" 这种字符串，原样显示——
    自行换算成百分比只是多一层可能算错的地方。倍率为 0（如 hy3）用品牌色
    标出来：免费模型是这一列里最该被一眼看到的信息。 */

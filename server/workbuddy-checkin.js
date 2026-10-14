@@ -11,23 +11,29 @@
 //     "parse failed: invalid character '<'"，看不出是域名选错了。
 //  2. 字段命名两代并存（todayCheckedIn / today_checked_in），上游混着发。
 //     只认一种会在某些账号上永远显示「未签到」。
-import { WORKBUDDY_UA, workbuddyBillingBaseFor, workbuddyRealm, workbuddyRealmFor } from './workbuddy-lane.js'
+import {
+  CHECKIN_CLAIM_PATH,
+  CHECKIN_STATUS_PATH,
+  RESOURCE_PATH,
+  WORKBUDDY_BILLING_UA,
+  workbuddyBillingBaseFor,
+  workbuddyRealmFor
+} from './workbuddy-core.js'
 
-export const WORKBUDDY_CHECKIN_STATUS_PATH = '/v2/billing/meter/checkin-activity-status'
-export const WORKBUDDY_CHECKIN_CLAIM_PATH = '/v2/billing/meter/daily-checkin'
-export const WORKBUDDY_RESOURCE_PATH = '/v2/billing/meter/get-user-resource'
+export const WORKBUDDY_CHECKIN_STATUS_PATH = CHECKIN_STATUS_PATH
+export const WORKBUDDY_CHECKIN_CLAIM_PATH = CHECKIN_CLAIM_PATH
+export const WORKBUDDY_RESOURCE_PATH = RESOURCE_PATH
 
 // 计费面的头与对话面不同：UA 是简短的 "CodeBuddy"，还要带上企业/租户头。
 // 国际版（codebuddy.ai）网关只认 IDE 客户端头集且不要 X-Requested-With，
 // 少这几项请求会被当浏览器调用弹回 401。
 export function workbuddyBillingHeaders(key = {}) {
-  const realm = workbuddyRealm(key.domain)
   const headers = {
     'Content-Type': 'application/json',
     Accept: 'application/json',
     Authorization: `Bearer ${key.access_token || ''}`,
     'X-Domain': key.domain || 'www.codebuddy.cn',
-    'User-Agent': 'CodeBuddy'
+    'User-Agent': WORKBUDDY_BILLING_UA
   }
   if (key.uid) headers['X-User-Id'] = String(key.uid)
   if (key.enterprise_id) {
@@ -94,14 +100,14 @@ async function billingCall(key, path, body) {
 }
 
 export async function fetchWorkbuddyCheckinStatus(key) {
-  const payload = await billingCall(key, WORKBUDDY_CHECKIN_STATUS_PATH)
+  const payload = await billingCall(key, CHECKIN_STATUS_PATH)
   return parseCheckinStatus(payload)
 }
 
 // 领取当日签到奖励。上游已签到时会以业务码拒绝，这里如实抛出，让调用方按
 // 「今日已签到」处理，而不是把失败当成功记一笔。
 export async function performWorkbuddyCheckin(key) {
-  const payload = await billingCall(key, WORKBUDDY_CHECKIN_CLAIM_PATH, {})
+  const payload = await billingCall(key, CHECKIN_CLAIM_PATH, {})
   const body = payload && typeof payload === 'object' && 'data' in payload ? payload.data : payload
   const code = payload && typeof payload === 'object' ? Number(payload.code) : 0
   if (Number.isFinite(code) && code !== 0) {
@@ -190,7 +196,7 @@ export async function fetchWorkbuddyCredits(key) {
     PackageEndTimeRangeBegin: fmtStamp(now),
     PackageEndTimeRangeEnd: fmtStamp(new Date(now.getTime() + 101 * 365 * 24 * 3600 * 1000))
   }
-  const payload = await billingCall(key, WORKBUDDY_RESOURCE_PATH, body)
+  const payload = await billingCall(key, RESOURCE_PATH, body)
   const envelope = payload && typeof payload === 'object' && 'data' in payload ? payload.data : payload
   const accounts = Array.isArray(envelope?.Response?.Data?.Accounts) ? envelope.Response.Data.Accounts : []
   if (accounts.length === 0) {

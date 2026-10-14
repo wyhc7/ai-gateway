@@ -1,91 +1,36 @@
-// WorkBuddy / CodeBuddy（腾讯）订阅通道
+// WorkBuddy / CodeBuddy 请求整形层
 //
 // 上游是「长得像 OpenAI、但每条规矩都自己定」的接口：形态可以透传，前提条件不行。
-// 这个文件收拢所有与形态有关的整形，别让它们散落到 proxy.js 的主流程里。
+// 这个文件收拢所有与**对话请求形态**有关的整形，别让它们散落到 proxy.js 的主流程里。
 //
-// 事实来源：腾讯 CodeBuddy 的 CLI 接入端点。参考实现见
-// https://github.com/zidanefaqih/codebuddy-intl-cpa（MIT，其 workbuddy/ 插件）
-// —— 下面每条约束都对应那边 live-verified 过的实测记录，不是照着文档猜的。
+// 分层：常量与解析在 workbuddy-core.js（纯逻辑），目录在 workbuddy-catalog.js，
+// 凭据在 workbuddy-oauth.js，本文件只做「客户端请求 → 上游请求」的转换。
 //
-// 一句话概括这套上游：**可以照 OpenAI 发，但必须先抹掉所有「不像它家客户端」的痕迹**。
+// 每条约束都对应一个真实报错码（见 workbuddy-lane.test.js 的用例名），
+// 改回原样就会重新踩坑。
+import {
+  WORKBUDDY_UA,
+  normalizeWorkbuddyDomain,
+  workbuddyRealm,
+  workbuddyRealmFor
+} from './workbuddy-core.js'
+import { rewriteWorkbuddySystemFingerprints } from './workbuddy-fingerprint.js'
 
-// 三个 realm，各自的网关互不通用：同一枚 Bearer 发到别的 realm，网关按身份
-// 不匹配拒绝，且返回非 JSON 的 401 HTML —— 在网关里表现成
-// "parse failed: invalid character '<'"，极难从报错反推是 realm 选错了。
-//
-//   cn     X-Domain 是 www.codebuddy.cn（旧登录态文件里 domain 留空的也算）
-//   global X-Domain 是 workbuddy.ai
-//   intl   X-Domain 是 codebuddy.ai，登录入口只认 IDE 客户端（platform=ide）
-//
-// CN 的对话域与计费域是分开的两个站（copilot.tencent.com vs www.codebuddy.cn），
-// Global 与 Intl 则同域。realm 的归属由 X-Domain 判定，不由平台配置决定。
-export const WORKBUDDY_REALMS = {
-  cn: {
-    base: 'https://copilot.tencent.com',
-    billingBase: 'https://www.codebuddy.cn',
-    referer: 'https://www.codebuddy.cn',
-    platform: 'CLI'
-  },
-  global: {
-    base: 'https://www.workbuddy.ai',
-    billingBase: 'https://www.workbuddy.ai',
-    referer: 'https://www.workbuddy.ai',
-    platform: 'CLI'
-  },
-  intl: {
-    base: 'https://www.codebuddy.ai',
-    billingBase: 'https://www.codebuddy.ai',
-    referer: 'https://www.codebuddy.ai',
-    platform: 'ide'
-  }
-}
+// 常量与 realm 判定的唯一来源在 core，这里只做转发导出，
+// 免得调用方为了一个常量多 import 一个模块。
+export {
+  WORKBUDDY_UA,
+  WORKBUDDY_REALMS,
+  normalizeWorkbuddyDomain,
+  workbuddyRealm,
+  workbuddyRealmFor,
+  workbuddyChatBaseFor,
+  workbuddyBillingBaseFor,
+  workbuddyProductFor
+} from './workbuddy-core.js'
 
-// 旧常量名保留，避免外部引用静默失效；语义改为「按账号 realm 取」。
-export function workbuddyRealmFor(domain) {
-  const d = String(domain || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
-  if (d === 'workbuddy.ai' || d.endsWith('.workbuddy.ai')) return 'global'
-  if (d === 'codebuddy.ai' || d.endsWith('.codebuddy.ai')) return 'intl'
-  return 'cn'
-}
-
-export function workbuddyRealm(domain) {
-  return WORKBUDDY_REALMS[workbuddyRealmFor(domain)]
-}
-
-export function workbuddyChatBaseFor(domain) {
-  return workbuddyRealm(domain).base
-}
-
-export function workbuddyBillingBaseFor(domain) {
-  return workbuddyRealm(domain).billingBase
-}
-
-// 官方模型清单：**不再内置**。
-//
-// 曾经这里写死过 18 个模型，那是错的：写死的清单必然与上游演进脱节——
-// 实测（2026-10-14）上游 /v3/config 给 22 条、企业端点给 32 条，两份都在变，
-// 而写死的那份既漏掉了后来新增的（hy4-preview、space-bunny、step-5-preview），
-// 又留着上游早已下线的（gpt-5.6-luna、claude-opus-5、gpt-6-astra）。拿它兜底
-// 等于用假数据覆盖真数据。
-//
-// 现在模型清单只有一个来源：上游接口（workbuddy-catalog.js）。
-// 万一上游全挂，refreshModels 会退到空清单并标注 models_source='unavailable'
-// 让界面明确显示「取不到」，而不是端出一份看起来很真的过期名单。
 export function isWorkbuddyProtocol(protocol) {
   return protocol === 'workbuddy-oauth'
-}
-
-// 上游要求客户端自称是 CodeBuddy CLI。缺了这个头会被认成外部渠道，
-// 与 role:developer 那条 11128 是同一类拦截。
-export const WORKBUDDY_UA = 'CLI/2.63.2 CodeBuddy/2.63.2'
-
-// X-Domain 必须是账号所属的 realm。国际账号是 workbuddy.ai 或 codebuddy.ai，
-// 国内账号是 codebuddy.cn。选错 realm 的下文见文件头注释。
-// 留空按 CN 处理——参考实现对「domain 为空的旧登录态文件」就是这么兜底的，
-// 默认成国际域反而会把一个国内账号发到 workbuddy.ai 去。
-export function normalizeWorkbuddyDomain(domain) {
-  const d = String(domain || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
-  return d || 'www.codebuddy.cn'
 }
 
 // 按 Key 注入的请求头。三个值都随账号变化，不能收进平台级 extra_headers：
@@ -182,13 +127,36 @@ export function forceWorkbuddyMaxThinking(obj) {
   return true
 }
 
-// 单次 unmarshal/marshal 完成全部整形。上游拒绝非流式请求，所以 stream 一律强制打开。
-export function shapeWorkbuddyBody(body = {}) {
+// 上游对每个模型有各自的单次输出上限（maxOutputTokens），不下发就用网关默认值，
+// 长回答会被截断成 finish_reason: 'length'。客户端没显式要求时按该模型的
+// 上限下发 —— 这是「上游声明的能力」，不是网关编的默认值。
+//
+// 客户端显式给了 max_tokens 就不动它：用户可能刻意要短回答。
+export function applyWorkbuddyMaxOutput(obj, modelMeta) {
+  if (obj.max_tokens !== undefined && obj.max_tokens !== null) return false
+  const max = Number(modelMeta?.max_output)
+  if (!Number.isFinite(max) || max <= 0) return false
+  obj.max_tokens = Math.floor(max)
+  return true
+}
+
+// 单次整形完成全部改动。上游拒绝非流式请求，所以 stream 一律强制打开。
+//
+// 顺序有讲究：
+//  1. 先做 role 整形，把 developer 变成 system —— 否则第 4 步的内容指纹
+//     改写会漏掉那些本该是 system 的消息；
+//  2. 再补 system 消息，保证 Global 账号不会拿到纯 user 的请求；
+//  3. 然后才是内容指纹改写（只改 system，见 workbuddy-fingerprint.js）。
+export function shapeWorkbuddyBody(body = {}, modelMeta = null) {
   const obj = { ...body }
   obj.stream = true
   normalizeWorkbuddyTools(obj)
   normalizeWorkbuddyRoles(obj)
   ensureWorkbuddySystemMessage(obj)
   forceWorkbuddyMaxThinking(obj)
+  applyWorkbuddyMaxOutput(obj, modelMeta)
+  // 腾讯的内容级风控：system 里的已知模板句会被 400/11128 拦下。
+  // 放在最后，改的是「已经确定是 system」的那些消息。
+  rewriteWorkbuddySystemFingerprints(obj)
   return obj
 }

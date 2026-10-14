@@ -166,12 +166,19 @@
                   <template v-else>模型为空，点击「刷新」自动从平台拉取。</template>
                 </div>
                 <div v-else class="model-list">
-                  <div v-for="m in p.models" :key="m.id" class="model-item">
+                  <div v-for="m in p.models" :key="m.id" class="model-item" :class="{ 'model-non-chat': isNonChat(m) }">
                     <img v-if="m.icon" class="model-icon" :src="m.icon" :alt="m.name || m.id" loading="lazy" @error="($event.target.style.display = 'none')" />
                     <span class="model-id" :title="m.description || m.id">
                       {{ m.id }}
                       <span v-if="m.name && m.name !== m.id" class="model-name">{{ m.name }}</span>
                     </span>
+                    <!-- 非对话模型（补全/生图）或自动选择别名：上游确实接受这些名字，
+                         所以留在路由表里可点名，但在列表里标出来免得被当成常规对话模型 -->
+                    <span
+                      v-if="isNonChat(m)"
+                      class="model-non-chat-tag"
+                      :title="m.auto_select ? '上游的自动选择别名：由服务端挑一个后端，不是具体模型' : '非对话模型（补全或图像生成），仍可直接点名调用'"
+                    >{{ m.auto_select ? '自动' : '非对话' }}</span>
                     <!-- 厂商：上游 vendor 字段直接给，不在网关里映射成猜测的名字 -->
                     <span v-if="m.vendor" class="model-vendor">{{ m.vendor }}</span>
                     <!-- 上下文长度来自上游 maxInputTokens，单位换算是唯一一处必要的加工 -->
@@ -182,15 +189,17 @@
                       <span v-if="m.reasoning" title="支持推理">推理</span>
                       <span v-if="m.images" title="支持图像输入">视觉</span>
                     </span>
-                    <!-- 倍率来自上游 /v3/config，格式就是它给的 "x0.79"。
-                         上游没给（auto 这类浮动倍率、codewise 这类专用模型）时
-                         明确写「未给」，不能回落到厂商名假装有值 -->
+                    <!-- 倍率来自上游 /v3/config，格式就是它给的 "x0.79"；有促销时
+                         标成 "x0.17→x0.50"。上游没给（auto 这类浮动倍率、codewise
+                         这类专用模型）时明确写「未给」，不能回落到厂商名假装有值 -->
                     <span
                       v-if="modelRate(p, m)"
                       class="rate-chip"
-                      :class="{ 'rate-free': isFreeRate(modelRate(p, m)) }"
-                      :title="`积分倍率 ${modelRate(p, m)}——调用该模型按此倍率扣积分`"
-                    >{{ rateLabel(modelRate(p, m)) }}</span>
+                      :class="{ 'rate-free': isFreeModel(m) }"
+                      :title="m.rate_discounted
+                        ? `原价 ${modelRate(p, m)}，促销价 ${m.rate_discounted}——调用该模型按促销价扣积分`
+                        : `积分倍率 ${modelRate(p, m)}——调用该模型按此倍率扣积分`"
+                    >{{ rateText(m) }}</span>
                     <!-- 没有倍率的模型：realm 才是有用的那一维——厂商名在同一平台里
                          每行都一样，而模型落在哪个网关决定调用时用哪个账号。
                          标完 realm 仍要如实写「未给倍率」，不能让这一格看起来像有值。 -->
@@ -786,6 +795,28 @@ function rateLabel(rate) {
   const raw = String(rate ?? '').trim()
   const m = raw.match(/^[xX×]?(\d+(?:\.\d+)?)/)
   return m ? `x${m[1]}` : raw
+}
+
+// 有促销时标出促销价：`x0.17→x0.50`。用箭头而不是「（促销 …）」——
+// 这一列很窄，箭头更短且一眼看出折扣幅度。
+function rateText(m) {
+  const base = rateLabel(m?.rate)
+  const discounted = m?.rate_discounted
+  if (!discounted) return base
+  // 「免费」这类非数值促销价不能套 x 前缀
+  const shown = /^\d|^[xX×]/.test(String(discounted)) ? rateLabel(discounted) : String(discounted)
+  return `${base}→${shown}`
+}
+
+// 该模型的倍率是否免费：原价或促销价任一为 0 都算（夜间免费的活动很常见）。
+function isFreeModel(m) {
+  return isFreeRate(m?.rate) || isFreeRate(m?.rate_discounted)
+}
+
+// 非对话模型（补全 / 生图）仍留在路由表里可点名，但在列表里淡化，
+// 免得用户以为它们是常规对话模型。上游事实，不是网关的判断。
+function isNonChat(m) {
+  return m?.chat === false || m?.auto_select === true
 }
 
 // token 数按量级缩写。这是展示层唯一一处必要的换算，不参与任何判定。
