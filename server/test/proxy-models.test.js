@@ -15,11 +15,12 @@ let state = null
 let defaultModelsFor = null
 let refreshModels = null
 let autoHeaders = null
+let handleModels = null
 let TEMPLATES = null
 
 before(async () => {
   ;({ state } = await import('../store.js'))
-  ;({ defaultModelsFor, refreshModels, autoHeaders } = await import('../proxy.js'))
+  ;({ defaultModelsFor, refreshModels, autoHeaders, handleModels } = await import('../proxy.js'))
   ;({ TEMPLATES } = await import('../templates.js'))
 })
 
@@ -150,5 +151,82 @@ describe('autoHeaders（上游自动附加头）', () => {
     const h = autoHeaders({ base_url: 'https://api.x.ai/v1' })
     assert.equal(h['x-grok-client-version'], undefined)
     assert.equal(h['x-grok-client-surface'], undefined)
+  })
+})
+
+describe('上下文窗口：所有平台都从上游取', () => {
+  // 通用协议（openai-chat / anthropic / responses …）以前只取 id 与 owned_by，
+  // 其余字段全丢。现在统一走 normalizeUpstreamModel 认字段。
+  test('上游给了 context_length 就收下，没给就不带这个字段', async () => {
+    globalThis.fetch = async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        object: 'list',
+        data: [
+          { id: 'm-with-ctx', context_length: 128000, owned_by: 'acme' },
+          { id: 'm-no-ctx', owned_by: 'acme' }
+        ]
+      }),
+      body: { cancel: async () => {} }
+    })
+    const p = {
+      id: 'p-ctx-1',
+      name: '上下文测试',
+      base_url: 'https://api.example.com/v1',
+      protocol: 'openai-chat',
+      enabled: true,
+      models: [],
+      keys: [{ id: 'k-ctx', api_key: 'sk-ctx', enabled: true, cooldown_until: 0, last_error: null, last_error_at: null }],
+      extra_headers: {}
+    }
+    state.providers.push(p)
+    try {
+      const r = await refreshModels(p.id)
+      assert.equal(r.ok, true)
+      const byId = Object.fromEntries(p.models.map((m) => [m.id, m]))
+      assert.equal(byId['m-with-ctx'].context, 128000, '上游给了 context_length 就该收下')
+      assert.equal(byId['m-no-ctx'].context, undefined, '上游没给就不带这个字段，前端显示「未知」')
+    } finally {
+      state.providers.length = 0
+    }
+  })
+})
+
+describe('对外 /v1/models：带上倍率与上下文窗口', () => {
+  function fakeRes() {
+    let raw = null
+    return {
+      setHeader() {},
+      end(body) { raw = body },
+      get raw() { return raw }
+    }
+  }
+
+  test('有倍率的模型带 rate / rate_discounted，没有的不带字段', () => {
+    const p = {
+      id: 'p-models-1',
+      name: '对外模型测试',
+      enabled: true,
+      models: [
+        { id: 'glm-5.3', owned_by: 'zhipu', rate: 'x0.79', rate_discounted: 'x0.50', context: 200000 },
+        { id: 'plain-model', owned_by: 'zhipu' }
+      ]
+    }
+    state.providers.push(p)
+    try {
+      const res = fakeRes()
+      handleModels({}, res)
+      const body = JSON.parse(res.raw)
+      assert.equal(body.object, 'list')
+      const byId = Object.fromEntries(body.data.map((m) => [m.id, m]))
+      assert.equal(byId['glm-5.3'].rate, 'x0.79', '对外端点也要能看到倍率')
+      assert.equal(byId['glm-5.3'].rate_discounted, 'x0.50')
+      assert.equal(byId['glm-5.3'].context, 200000)
+      assert.equal(byId['plain-model'].rate, undefined, '上游没给倍率就不带这个字段')
+      assert.equal(byId['plain-model'].context, undefined)
+    } finally {
+      state.providers.length = 0
+    }
   })
 })

@@ -610,6 +610,38 @@ export function pickContextWindow(raw) {
 }
 
 /**
+ * 上游一条模型记录里的倍率写法。
+ *
+ * ⚠️ 只认 WorkBuddy 系那套 `credits`（"x0.79" / "x0.71 credits"）——倍率是它家
+ * 特有概念。通用 OpenAI /models 标准形态只有 id/object/created/owned_by，不含倍率；
+ * 其他中转站的 price/rate 字段语义各异且多为**价格**，误认成倍率会把价格当倍数
+ * 显示，比不显示更糟。所以宁缺勿滥：取不到就不带这个字段。
+ */
+function pickRate(raw) {
+  const v = raw?.credits
+  if (v === null || v === undefined) return null
+  const s = String(v).trim()
+  return s || null
+}
+
+/**
+ * 某个模型的积分倍率；上游没给过就返回 null。
+ *
+ * 优先用模型自带的 rate（目录刷新时就写好），旧数据回落到 provider 的
+ * model_rates 表（新版按 realm 分表，旧版是一张扁平表）。
+ *
+ * ⚠️ null 与 0 是两件事：0 是「免费」的语义，null 是「上游没说」。
+ * 把缺失塞成 0 等于把一个会扣费的模型标成免费。
+ */
+export function modelRateFor(provider, model) {
+  if (model?.rate) return model.rate
+  const table = provider?.model_rates
+  if (!table || typeof table !== 'object') return null
+  if (model?.realm) return table[model.realm]?.[model.id] || null
+  return table[model.id] || null
+}
+
+/**
  * 把通用协议上游的一条模型记录压成网关内部形状。
  *
  * 只做「认字段」，不做推断：id 有的上游叫 model_name、有的只给 name；
@@ -625,6 +657,9 @@ function normalizeUpstreamModel(raw, provider) {
   }
   const ctx = pickContextWindow(m)
   if (ctx !== null) out.context = ctx
+  // 倍率：只有上游按 WorkBuddy 那套 credits 写法给了才收，不给就不带这个字段
+  const rate = pickRate(m)
+  if (rate !== null) out.rate = rate
   return out
 }
 
@@ -1451,7 +1486,22 @@ export function handleModels(req, res) {
       if (seen.has(m.id)) continue
       if (!modelAllowed(req?.apiAuth, m.id).allowed) continue
       seen.add(m.id)
-      list.push({ id: m.id, object: 'model', owned_by: m.owned_by || p.name, provider: p.id, provider_name: p.name })
+      const item = {
+        id: m.id,
+        object: 'model',
+        owned_by: m.owned_by || p.name,
+        provider: p.id,
+        provider_name: p.name
+      }
+      // 倍率：上游给过才有。缺失就不带这个字段，由调用方自己决定是显示
+      // 「未给」还是留空——网关不替调用方编造。
+      const rate = modelRateFor(p, m)
+      if (rate) item.rate = rate
+      if (m.rate_discounted) item.rate_discounted = m.rate_discounted
+      // 上下文窗口：上游给就带，没给不带（标准 OpenAI /models 大多不含）
+      const ctx = Number(m.context)
+      if (Number.isFinite(ctx) && ctx > 0) item.context = Math.floor(ctx)
+      list.push(item)
     }
   }
   res.setHeader('Content-Type', 'application/json')
