@@ -73,6 +73,32 @@ describe('倍率取值', () => {
     assert.equal(workbuddyRateValue(undefined), null)
     assert.equal(workbuddyRateValue('n/a'), null)
   })
+
+  test('企业端点的倍率带 credits 单位后缀，也要能解析', () => {
+    // 实测两个端点写法不一致：/v3/config 给 "x0.79"，
+    // 企业端点给 "x0.71 credits"。只剥前缀的话后者是 NaN → null，
+    // 一条真实存在的倍率会被当成「上游没给」丢掉。
+    assert.equal(workbuddyRateValue('x2.20 credits'), 2.2)
+    assert.equal(workbuddyRateValue('x0.71 credits'), 0.71)
+    assert.equal(workbuddyRateValue('x5.00 credits'), 5)
+    assert.equal(workbuddyRateValue('x0.00 credits'), 0)
+    assert.equal(workbuddyRateValue('2.20 CREDITS'), 2.2)
+  })
+
+  test('带后缀的零倍率仍是免费，不能判成缺失', async () => {
+    const { server, base } = await startUpstream(({ res }) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ code: 0, data: { models: [{ id: 'hy3', credits: 'x0.00 credits' }] } }))
+    })
+    try {
+      const { rates, models } = await fetchWorkbuddyModelRates({ rates_base: base, access_token: 't', domain: 'www.codebuddy.cn' })
+      assert.equal(rates.hy3, 'x0.00 credits', '倍率要收下')
+      assert.equal(workbuddyRateValue(rates.hy3), 0, '判零要成立')
+      assert.equal(models[0].rate, 'x0.00 credits')
+    } finally {
+      server.close()
+    }
+  })
 })
 
 describe('v3/config：倍率与国际版清单', () => {
@@ -121,6 +147,93 @@ describe('v3/config：倍率与国际版清单', () => {
         () => fetchWorkbuddyModelRates({ rates_base: base, access_token: 'x', domain: 'workbuddy.ai' }),
         /非 JSON/
       )
+    } finally {
+      server.close()
+    }
+  })
+
+  test('401/403 标记为凭据失效，调用方据此摘掉失效账号', async () => {
+    // 凭据失效与「这个端点对本 realm 不可用」是两件事：
+    // 前者要告诉用户去处理账号，后者才是正常降级。混为一谈会让失效账号
+    // 静默留在库里，看起来一切正常。
+    const { server, base } = await startUpstream(({ res }) => {
+      res.writeHead(401, { 'Content-Type': 'text/html' })
+      res.end('<html>401 Authorization Required</html>')
+    })
+    try {
+      await assert.rejects(
+        () => fetchWorkbuddyModelRates({ rates_base: base, access_token: 'x', domain: 'www.codebuddy.cn' }),
+        (err) => {
+          assert.equal(err.auth_failed, true, '401 必须标记为凭据失效')
+          assert.equal(err.status, 401)
+          return true
+        }
+      )
+    } finally {
+      server.close()
+    }
+  })
+
+  test('上游给的能力与规格一并带出，不只取 id 与倍率', async () => {
+    // 上游每条模型带 20+ 字段（实测），全削成 id 是浪费：
+    // 调用方要靠这些判断能不能开 1M、能不能用多模态与工具。
+    const rich = {
+      code: 0,
+      data: {
+        models: [
+          {
+            id: 'glm-5.3',
+            credits: 'x0.79',
+            name: 'GLM-5.3',
+            descriptionZh: '旗舰模型',
+            vendor: 'zhipu',
+            maxInputTokens: 1000000,
+            maxOutputTokens: 131072,
+            contextWindow: { defaultLength: 300000, supportedLengths: [300000, 1000000] },
+            supportsImages: true,
+            supportsReasoning: true,
+            supportsToolCall: true,
+            iconUrl: 'https://x/icon.svg'
+          }
+        ]
+      }
+    }
+    const { server, base } = await startUpstream(({ res }) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(rich))
+    })
+    try {
+      const { models } = await fetchWorkbuddyModelRates({ rates_base: base, access_token: 't', domain: 'www.codebuddy.cn' }, { name: 'WB' })
+      const m = models[0]
+      assert.equal(m.id, 'glm-5.3')
+      assert.equal(m.rate, 'x0.79')
+      assert.equal(m.name, 'GLM-5.3')
+      assert.equal(m.description, '旗舰模型')
+      assert.equal(m.vendor, 'zhipu')
+      assert.equal(m.max_input, 1000000)
+      assert.equal(m.max_output, 131072)
+      assert.equal(m.context, 300000)
+      assert.equal(m.images, true)
+      assert.equal(m.reasoning, true)
+      assert.equal(m.tools, true)
+      assert.equal(m.icon, 'https://x/icon.svg')
+    } finally {
+      server.close()
+    }
+  })
+
+  test('上游没给的字段就不写，不拿默认值假装上游说过', async () => {
+    const { server, base } = await startUpstream(({ res }) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ code: 0, data: { models: [{ id: 'codewise-jump', credits: '' }] } }))
+    })
+    try {
+      const { models } = await fetchWorkbuddyModelRates({ rates_base: base, access_token: 't', domain: 'www.codebuddy.cn' }, { name: 'WB' })
+      const m = models[0]
+      assert.equal(m.id, 'codewise-jump')
+      assert.equal('rate' in m && m.rate !== null, false, '缺失倍率不能变成 0 或空串')
+      assert.equal('max_input' in m, false)
+      assert.equal('images' in m, false)
     } finally {
       server.close()
     }
@@ -180,8 +293,34 @@ describe('企业端点：国内版清单', () => {
     }
   })
 
-  test('国际版这条路是 500（生产实测 openresty 直接回 500 页），错误要能被调用方接住', async () => {
+  test('企业端点同样带倍率与规格，不能只取 id 就丢掉', async () => {
+    // 实测企业端点 32 条里绝大多数带 credits。只取 id 扔掉倍率，
+    // 等于把上游已经给出的答案扔了再让界面显示「未知」。
     const { server, base } = await startUpstream(({ res }) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        code: 0,
+        data: {
+          models: [
+            { id: 'glm-5.3', credits: 'x0.79', name: 'GLM-5.3', vendor: 'zhipu', maxInputTokens: 1000000 },
+            { id: 'hunyuan-image-alpha', credits: 'x5.00', name: 'Hunyuan Image Alpha', tags: ['text-to-image'] }
+          ]
+        }
+      }))
+    })
+    try {
+      const { models, rates } = await fetchWorkbuddyEnterpriseModels({ models_base: base, access_token: 't', domain: 'www.codebuddy.cn' }, { name: 'WB' })
+      assert.equal(rates['glm-5.3'], 'x0.79')
+      assert.equal(rates['hunyuan-image-alpha'], 'x5.00')
+      assert.equal(models[0].name, 'GLM-5.3')
+      assert.equal(models[0].max_input, 1000000)
+      assert.deepEqual(models[1].tags, ['text-to-image'])
+    } finally {
+      server.close()
+    }
+  })
+
+  test('国际版这条路是 500（生产实测 openresty 直接回 500 页），错误要能被调用方接住', async () => {    const { server, base } = await startUpstream(({ res }) => {
       res.writeHead(500, { 'Content-Type': 'text/html' })
       res.end('<html><body><h1>500 Internal Server Error</h1></body></html>')
     })
@@ -264,5 +403,50 @@ describe('两个 realm 的合并', () => {
     const { models, rates } = mergeWorkbuddyCatalogs([{ realm: 'cn', ids: [], rates: {} }, null])
     assert.deepEqual(models, [])
     assert.deepEqual(rates, { cn: {} })
+  })
+
+  test('元数据随模型一起合并：清单与倍率来自同一次抓取', () => {
+    // 真实场景：企业端点给全量清单（实测 32 条）但部分型号没有倍率，
+    // v3/config 给倍率（22 条）。refreshWorkbuddyCatalog 会先把企业端点的
+    // 倍率并进同一张表，所以这里模拟的是「同一 realm 的一份目录，
+    // 清单更全、倍率由两个端点合力凑齐」。
+    const ent = {
+      realm: 'cn',
+      ids: ['glm-5.3', 'hy3', 'legacy-model'],
+      rates: { 'glm-5.3': 'x0.79', hy3: 'x0.00' },
+      models: [
+        { id: 'glm-5.3', rate: 'x0.79', name: 'GLM-5.3', vendor: 'zhipu', max_input: 1000000 },
+        { id: 'hy3', rate: 'x0.00', name: 'Hy3' },
+        { id: 'legacy-model', rate: null, name: 'Legacy', vendor: 'old' }
+      ]
+    }
+    const { models, rates } = mergeWorkbuddyCatalogs([ent])
+    const byId = Object.fromEntries(models.map((m) => [m.id, m]))
+    assert.equal(models.length, 3, '清单条数照上游给的来，不因倍率缺失而缩水')
+    assert.equal(byId['glm-5.3'].rate, 'x0.79')
+    assert.equal(byId['glm-5.3'].max_input, 1000000, '规格要带出来')
+    assert.equal(byId['glm-5.3'].vendor, 'zhipu')
+    assert.equal(byId.hy3.rate, 'x0.00')
+    assert.equal(byId['legacy-model'].rate, null, '上游没给倍率就是没有，不填 0')
+    assert.equal(rates.cn['glm-5.3'], 'x0.79')
+  })
+
+  test('主 realm 先到，后来者只补缺项，不覆盖已有值', () => {
+    const a = { realm: 'cn', ids: ['glm-5.3'], rates: { 'glm-5.3': 'x0.79' }, models: [{ id: 'glm-5.3', rate: 'x0.79', name: 'GLM-5.3' }] }
+    const b = { realm: 'intl', ids: ['glm-5.3'], rates: { 'glm-5.3': 'x0.79' }, models: [{ id: 'glm-5.3', rate: 'x0.79', vendor: 'zhipu', max_input: 1000000 }] }
+    const { models } = mergeWorkbuddyCatalogs([a, b])
+    assert.equal(models.length, 1, '倍率相同就并成一个模型')
+    const m = models[0]
+    assert.equal(m.name, 'GLM-5.3', '先到的名称保留')
+    assert.equal(m.vendor, 'zhipu', '后到的缺项要补上')
+    assert.equal(m.max_input, 1000000)
+  })
+
+  test('倍率为 0 是有效值，不能被当成缺失而覆盖', () => {
+    const a = { realm: 'cn', ids: ['hy3'], rates: { hy3: 'x0.00' }, models: [{ id: 'hy3', rate: 'x0.00', name: 'Hy3' }] }
+    const b = { realm: 'intl', ids: ['hy3'], rates: { hy3: 'x0.00' }, models: [{ id: 'hy3', rate: 'x0.00', vendor: 'tencent' }] }
+    const { models } = mergeWorkbuddyCatalogs([a, b])
+    assert.equal(models.length, 1)
+    assert.equal(models[0].rate, 'x0.00', 'x0.00 是「免费」，不是「没给」')
   })
 })

@@ -163,25 +163,43 @@
                     刷新
                   </el-button>
                 </div>
-                <div v-if="p.models.length === 0" class="key-empty">模型为空，点击「刷新」自动从平台拉取。</div>
+                <div v-if="p.models.length === 0" class="key-empty">
+                  <template v-if="p.models_source === 'unavailable'">上游取不到模型清单，请检查账号凭据或网络后点「刷新」。</template>
+                  <template v-else>模型为空，点击「刷新」自动从平台拉取。</template>
+                </div>
                 <div v-else class="model-list">
                   <div v-for="m in p.models" :key="m.id" class="model-item">
-                    <span class="model-id">{{ m.id }}</span>
-                    <!-- 倍率来自上游 /v3/config，格式就是它给的 "x0.79"；
-                         没有倍率的（如倍率浮动的 auto）回落到厂商名 -->
+                    <img v-if="m.icon" class="model-icon" :src="m.icon" :alt="m.name || m.id" loading="lazy" @error="($event.target.style.display = 'none')" />
+                    <span class="model-id" :title="m.description || m.id">
+                      {{ m.id }}
+                      <span v-if="m.name && m.name !== m.id" class="model-name">{{ m.name }}</span>
+                    </span>
+                    <!-- 厂商：上游 vendor 字段直接给，不在网关里映射成猜测的名字 -->
+                    <span v-if="m.vendor" class="model-vendor">{{ m.vendor }}</span>
+                    <!-- 上下文长度来自上游 maxInputTokens，单位换算是唯一一处必要的加工 -->
+                    <span v-if="m.max_input" class="model-ctx" :title="`最大输入 ${m.max_input} tokens${m.max_output ? ` / 输出 ${m.max_output} tokens` : ''}`">{{ fmtTokens(m.max_input) }}</span>
+                    <!-- 能力标记同样是上游事实，不猜 -->
+                    <span v-if="m.images || m.reasoning || m.tools" class="model-caps">
+                      <span v-if="m.tools" title="支持工具调用">工具</span>
+                      <span v-if="m.reasoning" title="支持推理">推理</span>
+                      <span v-if="m.images" title="支持图像输入">视觉</span>
+                    </span>
+                    <!-- 倍率来自上游 /v3/config，格式就是它给的 "x0.79"。
+                         上游没给（auto 这类浮动倍率、codewise 这类专用模型）时
+                         明确写「未给」，不能回落到厂商名假装有值 -->
                     <span
                       v-if="modelRate(p, m)"
                       class="rate-chip"
                       :class="{ 'rate-free': isFreeRate(modelRate(p, m)) }"
                       :title="`积分倍率 ${modelRate(p, m)}——调用该模型按此倍率扣积分`"
-                    >{{ modelRate(p, m) }}</span>
-                    <span v-else class="muted">{{ m.owned_by }}</span>
+                    >{{ rateLabel(modelRate(p, m)) }}</span>
+                    <span v-else class="rate-none" title="上游未提供该模型的固定倍率（如浮动倍率或专用模型）">未给倍率</span>
                   </div>
                 </div>
                 <!-- 倍率是上游给的，不是网关内置：把取数时间标出来，
                      过没过期一眼能看出来，不用猜这个数还准不准 -->
                 <div v-if="p.model_rates_at" class="muted" style="margin-top: 8px">
-                  倍率取自上游 /v3/config · {{ formatTime(p.model_rates_at) }}
+                  模型与倍率取自上游 · {{ formatTime(p.model_rates_at) }}
                   <span v-if="p.model_rates_error">（{{ p.model_rates_error }}）</span>
                 </div>
                 <div v-if="p.models_updated_at" class="muted" style="margin-top: 8px">最近更新：{{ formatTime(p.models_updated_at) }}</div>
@@ -742,10 +760,33 @@ function modelRate(p, m) {
 }
 
 // 上游写成 "x0.79" 这种带前缀的字符串，去掉前缀再判零。
+// 企业端点的倍率还会带单位后缀（"x2.20 credits"），一并剥掉——
+// 不剥的话 Number() 得到 NaN，0 倍率的免费模型会判不出来。
 // 倍率为 0 的模型走免费配色——hy3 就是 0，别和 0.79 一个待遇。
+function rateNumber(rate) {
+  const n = Number(String(rate ?? '').trim().replace(/^[xX×]/, '').replace(/\s*credits\s*$/i, ''))
+  return Number.isFinite(n) ? n : null
+}
+
 function isFreeRate(rate) {
-  const n = Number(String(rate).trim().replace(/^[xX×]/, ''))
-  return Number.isFinite(n) && n === 0
+  return rateNumber(rate) === 0
+}
+
+// 展示时只留数值部分（"x2.20 credits" → "x2.20"）。
+// 单位由 rate-chip 的样式与 title 表达，不必塞进这一列的窄格里。
+function rateLabel(rate) {
+  const raw = String(rate ?? '').trim()
+  const m = raw.match(/^[xX×]?(\d+(?:\.\d+)?)/)
+  return m ? `x${m[1]}` : raw
+}
+
+// token 数按量级缩写。这是展示层唯一一处必要的换算，不参与任何判定。
+function fmtTokens(n) {
+  const v = Number(n)
+  if (!Number.isFinite(v)) return ''
+  if (v >= 1000000) return `${Math.round(v / 100000) / 10}M`
+  if (v >= 1000) return `${Math.round(v / 100) / 10}K`
+  return String(v)
 }
 
 // WorkBuddy 账号属于哪个 realm。由 token 的 X-Domain 判定，不是平台配置——

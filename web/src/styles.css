@@ -855,6 +855,16 @@ body::before {
   font-size: 12px;
   align-items: center;
 }
+/* 左段（型号+厂商+规格+能力）与右段（倍率）分头靠边，中间留白自动吸收剩余宽度。
+   不用 space-between 平摊——那会把每个标记都甩到不同的位置上，读不成一行。 */
+.model-item > .model-id {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
 .model-item:last-child { border-bottom: none; }
 .model-item:hover { background: var(--surface-2); }
 .model-id {
@@ -864,6 +874,58 @@ body::before {
   color: var(--ink);
 }
 .model-item .muted { flex-shrink: 0; font-size: 11px; }
+
+/* 上游给的模型图标。加载失败就隐藏（onerror 里置 display:none），
+   不留一个破图占位。 */
+.model-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  object-fit: contain;
+  border-radius: 2px;
+}
+/* 上游 name 字段：给人看的名字。id 才是调用时用的，所以两者并存。 */
+.model-name {
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.model-vendor {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  color: var(--ink-3);
+  padding: 0 5px;
+  border: 1px solid var(--rule-soft);
+  border-radius: 3px;
+}
+.model-ctx {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--ink-3);
+}
+/* 能力标记：全部来自上游的能力开关字段，不是网关推断的 */
+.model-caps {
+  flex-shrink: 0;
+  display: inline-flex;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--ink-3);
+}
+.model-caps span {
+  padding: 0 4px;
+  border: 1px solid var(--rule-soft);
+  border-radius: 3px;
+}
+
+/* 上游没给固定倍率时如实说明。
+   原来这里回落到厂商名，看起来像有值——那是网关编的，不是上游说的。 */
+.rate-none {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  color: var(--ink-3);
+  opacity: 0.75;
+}
 
 /* 模型积分倍率。上游给的就是 "x0.79" 这种字符串，原样显示——
    自行换算成百分比只是多一层可能算错的地方。倍率为 0（如 hy3）用品牌色
