@@ -19,6 +19,7 @@ const {
   normalizeWorkbuddyTools,
   ensureWorkbuddySystemMessage
 } = await import('../workbuddy-lane.js')
+const { defaultModelsFor } = await import('../proxy.js')
 
 describe('WorkBuddy 协议识别', () => {
   test('只认 workbuddy-oauth，别把腾讯和别家搞混', () => {
@@ -135,15 +136,15 @@ describe('请求体整形', () => {
 })
 
 describe('模型清单', () => {
-  test('隐藏模型必须在清单里，否则等于白接半个通道', () => {
-    // 上游 /models 不回报这 8 个，但直调一律可用 —— 少了它们，可用面直接腰斩
-    const hidden = ['gpt-5.6-luna', 'claude-opus-5', 'gpt-5.6-sol', 'glm-5.3', 'gpt-5.6-terra', 'deepseek-v4.1-flash', 'glm-5.3-flash', 'gpt-6-astra']
-    const ids = new Set(WORKBUDDY_CURATED_MODELS.map((m) => m.id))
-    for (const id of hidden) assert.ok(ids.has(id), `${id} 不在清单里`)
+  test('不再内置写死清单：模型只能来自上游', () => {
+    // 曾经这里有一份写死的 18 个模型。它既漏掉了上游新增的型号，又留着
+    // 上游早已下线的，拿它兜底等于用过期数据覆盖上游的真实数据。
+    // 清单现在只有一个来源：上游接口（workbuddy-catalog.js）。
+    assert.equal(WORKBUDDY_CURATED_MODELS, undefined, '不应再导出写死的模型清单')
   })
 
-  test('每项都带 id 与 owned_by', () => {
-    assert.ok(WORKBUDDY_CURATED_MODELS.length >= 19)
-    assert.ok(WORKBUDDY_CURATED_MODELS.every((m) => m.id && m.owned_by))
+  test('取不到模型时不得回落到写死清单', () => {
+    // 上游全挂 → defaultModelsFor 返回空 → refreshModels 标注 unavailable 并清空
+    assert.equal(defaultModelsFor('workbuddy-oauth'), null)
   })
 })

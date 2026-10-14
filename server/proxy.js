@@ -6,7 +6,7 @@ import { ensureAccessToken as ensureCodexToken, refreshAccessToken as refreshCod
 import { ensureWorkbuddyToken, refreshWorkbuddyToken } from './workbuddy-oauth.js'
 import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexAccountHeader } from './codex-responses.js'
 import { TEMPLATES } from './templates.js'
-import { isWorkbuddyProtocol, workbuddyHeaders, workbuddyChatBaseFor, shapeWorkbuddyBody, WORKBUDDY_CURATED_MODELS, workbuddyRealmFor } from './workbuddy-lane.js'
+import { isWorkbuddyProtocol, workbuddyHeaders, workbuddyChatBaseFor, shapeWorkbuddyBody, workbuddyRealmFor } from './workbuddy-lane.js'
 import { fetchWorkbuddyModelRates, fetchWorkbuddyEnterpriseModels, mergeWorkbuddyCatalogs } from './workbuddy-catalog.js'
 
 // 允许「协议级默认模型」兜底的协议白名单。
@@ -38,14 +38,12 @@ const PROTOCOLS_WITH_CURATED_MODELS = new Set()
 // 订阅接入方案已经整体下线，TEMPLATES 里不再有 grok-oauth / codex-oauth 条目，
 // 因此这两个协议现在查不到兜底、返回 null——这是预期，不是漏改。
 // 协议自带、且与模板无关的模型清单。
-// WorkBuddy 的 19 个模型属于这一类：它们是该协议对上游的事实描述，
-// 不随用户怎么建平台而变，挂在模板上反而多一层查不到的风险。
-const PROTOCOL_CURATED_MODELS = {
-  'workbuddy-oauth': WORKBUDDY_CURATED_MODELS
-}
-
+//
+// 这里曾经挂着 WORKBUDDY_CURATED_MODELS（写死的 18 个模型），现已删除：
+// 那份清单既漏掉了上游新增的型号，又留着上游已下线的，拿它兜底等于用
+// 过期数据覆盖上游的真实数据。WorkBuddy 的模型清单现在只有一个来源——
+// 上游接口（refreshWorkbuddyCatalog）。取不到就是取不到，界面如实显示。
 export function defaultModelsFor(protocol) {
-  if (PROTOCOL_CURATED_MODELS[protocol]) return PROTOCOL_CURATED_MODELS[protocol].map((m) => ({ ...m }))
   if (!PROTOCOLS_WITHOUT_MODELS_ENDPOINT.has(protocol) && !PROTOCOLS_WITH_CURATED_MODELS.has(protocol)) return null
   for (const t of TEMPLATES) {
     if (t.protocol === protocol && Array.isArray(t.default_models) && t.default_models.length) {
@@ -521,33 +519,59 @@ export async function refreshWorkbuddyCatalog(provider) {
   const entries = []
   const notes = []
   for (const [realm, key] of byRealm) {
+    let v3
     try {
-      const { rates, ids: v3Ids } = await fetchWorkbuddyModelRates(key)
-      let ids = v3Ids
-      try {
-        const ent = await fetchWorkbuddyEnterpriseModels(key)
-        ids = ent.ids
-      } catch (err) {
-        // 企业端点失败不是致命的：国际版这条路本来就是 500，v3/config 的
-        // 清单照样可用，只是少了几个隐藏型号
+      v3 = await fetchWorkbuddyModelRates(key, provider)
+    } catch (err) {
+      // 凭据失效是硬失败：这个账号不该再被当成数据来源，
+      // 如实记下来让用户去处理，不能降级成「这个 realm 没数据」后装作无事发生
+      if (err.auth_failed) {
+        notes.push(`${realm}：账号「${key.name || '未命名'}」凭据失效（${err.message}），该 realm 的目录未更新`)
+        provider.model_rates_error = `${realm} 账号凭据失效：${err.message}`
+        continue
+      }
+      notes.push(`${realm}：模型配置不可用（${err.message}）`)
+      continue
+    }
+
+    // 清单优先取企业端点（给得最全），失败再退回 v3/config 的清单。
+    // 企业端点不可用是常态而非异常：国际版这条路本来就 500。
+    let models = v3.models
+    try {
+      const ent = await fetchWorkbuddyEnterpriseModels(key, provider)
+      // 企业端点给得更全，且同样带倍率——用整份换掉 v3 清单
+      models = ent.models
+    } catch (err) {
+      if (err.auth_failed) {
+        notes.push(`${realm}：企业端点凭据失效（${err.message}），清单退回 v3/config`)
+      } else {
         notes.push(`${realm}：企业端点不可用（${err.message}），清单退回 v3/config`)
       }
-      entries.push({ realm, ids, rates })
-    } catch (err) {
-      notes.push(`${realm}：${err.message}`)
     }
+    entries.push({ realm, ids: models.map((m) => m.id), models, rates: v3.rates })
   }
   if (entries.length === 0) return null
 
+  // 企业端点也带倍率，与 v3/config 的倍率并表——上游给过答案就别浪费，
+  // 但 v3/config 是倍率的权威来源，同 id 冲突时以它为准。
+  for (const entry of entries) {
+    for (const m of entry.models) {
+      if (m.rate && !entry.rates[m.id]) entry.rates[m.id] = m.rate
+    }
+  }
+
   const { models, rates, upstream, realmById } = mergeWorkbuddyCatalogs(entries)
-  provider.models = models.map((m) => ({ id: m.id, owned_by: provider.name, realm: m.realm, rate: m.rate }))
+  provider.models = models
   provider.model_rates = rates
   provider.model_rates_at = Date.now()
   provider.model_upstream_id = upstream
   provider.model_realm = realmById
   provider.models_updated_at = Date.now()
   provider.models_source = 'workbuddy'
-  delete provider.model_rates_error
+  // 只有这一轮真的取到了倍率才算成功；否则把上一轮的取数时间留着，
+  // 好让界面显示的「取数时间」不会被一次失败刷新成现在（骗人说刚取过）
+  const gotRates = Object.values(rates).some((t) => t && Object.keys(t).length)
+  if (gotRates) delete provider.model_rates_error
   persistImmediate()
   for (const note of notes) addLog({ type: 'system', detail: `WorkBuddy 模型目录：${note}` })
   return { ok: true, count: provider.models.length, provider }
@@ -619,8 +643,8 @@ export async function refreshModels(providerId) {
       applyCooldown(provider, key, 'network')
     }
   }
-  // 全部 Key 均不可用：若该协议有内置默认模型（Grok 订阅账号常见），
-  // 退回默认列表并标注来源，避免平台因为拉不到 /models 而完全不可用。
+  // 全部 Key 均不可用：若该协议有内置默认模型，退回默认列表并标注来源，
+  // 避免平台因为拉不到 /models 而完全不可用。
   const fallback = defaultModelsFor(provider.protocol)
   if (fallback && fallback.length) {
     provider.models = fallback
@@ -629,6 +653,13 @@ export async function refreshModels(providerId) {
     persistImmediate()
     return { ok: true, count: fallback.length, provider, fallback: true }
   }
+  // 没有可兜底的清单：如实把清单清空并标注「取不到」。
+  // 保留上一轮的清单看起来更友好，但那是拿过期数据冒充现状——
+  // 上游已经全挂了，界面上继续显示旧型号会让人以为还能用。
+  provider.models = []
+  provider.models_updated_at = Date.now()
+  provider.models_source = 'unavailable'
+  persistImmediate()
   return { ok: false, error: `所有 Key 均不可用，最后错误: ${lastError}` }
 }
 

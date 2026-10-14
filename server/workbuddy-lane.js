@@ -60,43 +60,24 @@ export function workbuddyBillingBaseFor(domain) {
   return workbuddyRealm(domain).billingBase
 }
 
-// 上游要求客户端自称是 CodeBuddy CLI。缺了这个头会被认成外部渠道，
-// 与 role:developer 那条 11128 是同一类拦截。
-export const WORKBUDDY_UA = 'CLI/2.63.2 CodeBuddy/2.63.2'
-
-// 官方模型清单。
+// 官方模型清单：**不再内置**。
 //
-// 为什么不完全依赖上游 /models：
-//  1. 上游返回的是 {code,msg,data} 信封，不是 OpenAI 的 {data:[]}；
-//  2. 更关键的是它会漏报 —— 下面 8 个「隐藏模型」上游其实照收不误，
-//     只是自己的客户端界面不展示。少了这批就等于白接了半个通道。
-// 其中 gpt-6-astra 是 2026-09-29 在 Global 账号上实测 200 的（按 gpt-6-astra 计费 0.04 分）。
-export const WORKBUDDY_CURATED_MODELS = [
-  { id: 'glm-5.2', owned_by: 'workbuddy' },
-  { id: 'glm-5.1', owned_by: 'workbuddy' },
-  { id: 'glm-5v-turbo', owned_by: 'workbuddy' },
-  { id: 'kimi-k2.7', owned_by: 'workbuddy' },
-  { id: 'kimi-k3', owned_by: 'workbuddy' },
-  { id: 'minimax-m3', owned_by: 'workbuddy' },
-  { id: 'hy3', owned_by: 'workbuddy' },
-  { id: 'hy3-preview', owned_by: 'workbuddy' },
-  { id: 'hy3-preview-agent', owned_by: 'workbuddy' },
-  { id: 'deepseek-v4-pro', owned_by: 'workbuddy' },
-  { id: 'deepseek-v4-flash', owned_by: 'workbuddy' },
-  // —— 以下为上游漏报的隐藏模型 ——
-  { id: 'gpt-5.6-luna', owned_by: 'workbuddy' },
-  { id: 'claude-opus-5', owned_by: 'workbuddy' },
-  { id: 'gpt-5.6-sol', owned_by: 'workbuddy' },
-  { id: 'glm-5.3', owned_by: 'workbuddy' },
-  { id: 'gpt-5.6-terra', owned_by: 'workbuddy' },
-  { id: 'deepseek-v4.1-flash', owned_by: 'workbuddy' },
-  { id: 'glm-5.3-flash', owned_by: 'workbuddy' },
-  { id: 'gpt-6-astra', owned_by: 'workbuddy' }
-]
-
+// 曾经这里写死过 18 个模型，那是错的：写死的清单必然与上游演进脱节——
+// 实测（2026-10-14）上游 /v3/config 给 22 条、企业端点给 32 条，两份都在变，
+// 而写死的那份既漏掉了后来新增的（hy4-preview、space-bunny、step-5-preview），
+// 又留着上游早已下线的（gpt-5.6-luna、claude-opus-5、gpt-6-astra）。拿它兜底
+// 等于用假数据覆盖真数据。
+//
+// 现在模型清单只有一个来源：上游接口（workbuddy-catalog.js）。
+// 万一上游全挂，refreshModels 会退到空清单并标注 models_source='unavailable'
+// 让界面明确显示「取不到」，而不是端出一份看起来很真的过期名单。
 export function isWorkbuddyProtocol(protocol) {
   return protocol === 'workbuddy-oauth'
 }
+
+// 上游要求客户端自称是 CodeBuddy CLI。缺了这个头会被认成外部渠道，
+// 与 role:developer 那条 11128 是同一类拦截。
+export const WORKBUDDY_UA = 'CLI/2.63.2 CodeBuddy/2.63.2'
 
 // X-Domain 必须是账号所属的 realm。国际账号是 workbuddy.ai 或 codebuddy.ai，
 // 国内账号是 codebuddy.cn。选错 realm 的下文见文件头注释。
