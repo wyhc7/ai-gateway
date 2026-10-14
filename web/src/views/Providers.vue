@@ -173,29 +173,10 @@
                 <div v-else class="model-list">
                   <div v-for="m in p.models" :key="m.id" class="model-item" :class="{ 'model-non-chat': isNonChat(m) }">
                     <img v-if="m.icon" class="model-icon" :src="m.icon" :alt="m.name || m.id" loading="lazy" @error="($event.target.style.display = 'none')" />
-                    <span class="model-id" :title="m.description || m.id">
-                      {{ m.id }}
-                      <span v-if="m.name && m.name !== m.id" class="model-name">{{ m.name }}</span>
-                      <!-- 倍率跟在模型名后面、作为同一串文本（型号 名字 x0.79），
-                           不做成独立气泡：扫列表时视线不用横向跳，
-                           「这模型扣多少」紧跟型号读完，方便快速比对 -->
-                      <span
-                        v-if="modelRate(p, m)"
-                        class="rate-inline"
-                        :class="{ 'rate-free': isFreeModel(m) }"
-                        :title="m.rate_discounted
-                          ? `原价 ${modelRate(p, m)}，促销价 ${m.rate_discounted}——调用该模型按促销价扣积分`
-                          : `积分倍率 ${modelRate(p, m)}——调用该模型按此倍率扣积分`"
-                      >{{ rateText(m) }}</span>
-                      <!-- 平台提供倍率、但这个模型恰好没给：如实写「未给倍率」。
-                           整个平台一个倍率都没拉到时下面这格不显示——那说明这个上游
-                           根本不提供倍率，写「未给」是拿网关的判断冒充上游事实。 -->
-                      <span
-                        v-else-if="platformHasRates(p)"
-                        class="rate-none"
-                        title="上游未提供该模型的固定倍率（如浮动倍率或专用模型）"
-                      >未给倍率</span>
-                    </span>
+                    <!-- 倍率直接写进模型名这一整串文本：`型号 · 名字 · x0.79`。
+                         它不是独立气泡、也不是单独一列 —— 扫列表时
+                         「这模型扣多少」紧跟型号读完，视线不用横向跳 -->
+                    <span class="model-id" :title="m.description || m.id">{{ modelLabel(p, m) }}</span>
                     <!-- 非对话模型（补全/生图）或自动选择别名：上游确实接受这些名字，
                          所以留在路由表里可点名，但在列表里标出来免得被当成常规对话模型 -->
                     <span
@@ -868,6 +849,24 @@ function platformHasRates(p) {
   if (!table || typeof table !== 'object') return false
   // 新版按 realm 分表：{ cn: {...}, intl: {...} }；旧版是一张扁平表
   return Object.values(table).some((t) => t && typeof t === 'object' && Object.keys(t).length)
+}
+
+/**
+ * 模型这一行的完整显示文本：`型号 · 名字 · 倍率`。
+ *
+ * 倍率直接作为名字的一部分拼进来 —— 不是独立气泡、也不放在行尾单独一列。
+ * 这样扫列表时「这模型扣多少」紧跟型号读完，视线不用横向跳着比对。
+ *
+ * ⚠️ 整个平台一个倍率都没拉到时，文本里**不出现**任何倍率字样
+ * （不写「未给倍率」）—— 那说明这个上游根本不提供倍率，写「未给」
+ * 等于拿网关的判断冒充上游事实。
+ */
+function modelLabel(p, m) {
+  const parts = [m?.id].filter(Boolean)
+  if (m?.name && m.name !== m.id) parts.push(m.name)
+  const rate = modelRate(p, m) ? rateText(m) : (platformHasRates(p) ? '未给倍率' : '')
+  if (rate) parts.push(rate)
+  return parts.join(' · ')
 }
 
 // 上下文窗口：上游给了就显示长度，没给明说「未知」。
