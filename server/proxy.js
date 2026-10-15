@@ -406,11 +406,12 @@ function resolveTarget(body) {
     }
   }
   // 客户端按 /v1/models 下发的 id 点名，而那个 id 形如「GLM-5.3 · x0.79」
-  // （倍率拼在 id 里，因为客户端一律拿 id 当显示名）。这里剥掉倍率后缀、
-  // 再按显示名找回平台里的真实 id——路由、权限、日志全部按真实 id 走，
-  // 客户端传什么样子它都认。
-  const canonical = canonicalModelId(model)
-  if (canonical !== model) model = canonical
+  // （倍率拼在 id 里，因为客户端一律拿 id 当显示名）。这里归一成平台真实
+  // id——路由、权限、日志全部按真实 id 走，客户端传什么样子它都认。
+  // 完整 label（含倍率）命中时还带上平台，同名不同倍率精确路由。
+  const target = lookupModel(model)
+  if (target.id !== model) model = target.id
+  if (target.providerId && !providerIdHint) providerIdHint = target.providerId
   if (body && body.model !== model) body = { ...body, model }
   return { model, providerIdHint, body }
 }
@@ -424,30 +425,44 @@ export function stripRateSuffix(name) {
 }
 
 /**
- * 把客户端传来的模型名归一成平台里的真实 id。
+ * 把客户端传来的模型名归一成平台里的真实 id（带平台定位）。
  *
  * 客户端可能传：真实 id（glm-5.3）、显示名（GLM-5.3，大小写不同）、
- * 或带倍率后缀的显示名（GLM-5.3 · x0.79）。三级都尝试，先后顺序：
- * 剥后缀 → 全平台按 id 精确找 → 按 name 找。找不到原样返回，
- * 让下游的模型匹配去报 404，不猜。
+ * 或带倍率后缀的显示名（GLM-5.3 · x0.79）。先按完整 label 精确反查
+ * ——国内外平台同名 id 不同倍率时（国际版 deepseek-v4.1-flash 是 x0.00、
+ * 国内版同名是 x0.11），用户点名哪条倍率就路由到哪条，此时带上平台 id
+ * 做精确定位；完整 label 查不到再剥后缀按 id/name 找（此时多个平台都在
+ * 候选里，由 matchProvider 轮询，不带平台）。都找不到原样返回，不猜。
  */
-export function canonicalModelId(name) {
+export function lookupModel(name) {
   const raw = String(name ?? '').trim()
-  if (!raw) return raw
-  const lower = stripRateSuffix(raw).toLowerCase()
+  if (!raw) return { id: raw, providerId: null }
+  const lower = raw.toLowerCase()
   for (const p of state.providers) {
     if (!p.enabled) continue
     for (const m of p.models) {
-      if (String(m.id).toLowerCase() === lower) return m.id
+      if (publicModelName(m).toLowerCase() === lower) return { id: m.id, providerId: p.id }
+    }
+  }
+  const stripped = stripRateSuffix(raw).toLowerCase()
+  for (const p of state.providers) {
+    if (!p.enabled) continue
+    for (const m of p.models) {
+      if (String(m.id).toLowerCase() === stripped) return { id: m.id, providerId: null }
     }
   }
   for (const p of state.providers) {
     if (!p.enabled) continue
     for (const m of p.models) {
-      if (String(m.name || '').toLowerCase() === lower) return m.id
+      if (String(m.name || '').toLowerCase() === stripped) return { id: m.id, providerId: null }
     }
   }
-  return raw
+  return { id: raw, providerId: null }
+}
+
+/** 只要归一后的真实 id；平台定位用 lookupModel。 */
+export function canonicalModelId(name) {
+  return lookupModel(name).id
 }
 
 // OAuth 账号的凭据会过期（xAI 的 access_token 寿命约 6 小时），
@@ -1526,9 +1541,7 @@ function publicRateText(rate, discounted) {
   return `${base}→${shown}`
 }
 
-// 一条模型输出的信息完整度：同名 id 在多个平台都有时（商汤的
-// deepseek-v4.1-flash 是裸 id，国际版的同名模型带 name 和 x0.00 倍率），
-// 保留信息最全的那条——先遍历到的裸记录不能把带倍率的挤掉。
+// 一条模型输出的信息完整度：同名 label 重复时（极少见），保留信息最全的。
 function modelEntryScore(m, label) {
   let s = 0
   if (publicRateText(m?.rate, m?.rate_discounted)) s += 2
@@ -1541,8 +1554,10 @@ function modelEntryScore(m, label) {
 // 若把没授权的模型也列出来，用户只会得到一串必然 403 的名字，
 // 而且从调用方视角根本看不出是权限问题还是平台问题。
 export function handleModels(req, res) {
-  // 按真实 id 去重（OpenAI 协议一个 id 一项），但同 id 多条时保留
-  // 信息最全的：倍率 > 名字 > 先到先得
+  // 按**输出 label**（`GLM-5.3 · x0.79`）去重，不按真实 id：国内外平台
+  // 常有同名 id 不同倍率的模型（国际版 deepseek-v4.1-flash 是 x0.00，
+  // 国内版同名是 x0.11），按真实 id 去重会把其中一条整条吞掉，
+  // 用户直接拉不到。倍率不同就是两个可选项，都该出现在列表里。
   const best = new Map()
   for (const p of state.providers) {
     if (!p.enabled) continue
@@ -1553,8 +1568,8 @@ export function handleModels(req, res) {
       // 把后缀剥掉、按显示名找回真实 id，路由不受影响。
       const label = publicModelName(m)
       const entry = { id: label, object: 'model', owned_by: m.owned_by || p.name, provider: p.id, provider_name: p.name, name: label }
-      const prev = best.get(m.id)
-      if (!prev || modelEntryScore(m, label) > prev.score) best.set(m.id, { ...entry, score: modelEntryScore(m, label) })
+      const prev = best.get(label)
+      if (!prev || modelEntryScore(m, label) > prev.score) best.set(label, { ...entry, score: modelEntryScore(m, label) })
     }
   }
   const list = [...best.values()].map(({ score, ...e }) => e)
