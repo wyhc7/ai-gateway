@@ -82,7 +82,9 @@ const filteredModels = computed(() => {
   const list = providerId.value ? allModels.value.filter((m) => m.provider === providerId.value) : allModels.value
   return list.map((m) => ({
     key: `${m.provider}-${m.id}`,
-    label: providerId.value ? m.id : `${m.id} · ${m.provider_name}`,
+    // label 用 /v1/models 下发的 name（已把倍率拼进名字：`GLM-5.3 · x0.79`），
+    // 没有 name 的老数据才退回 id
+    label: providerId.value ? (m.name || m.id) : `${m.name || m.id} · ${m.provider_name}`,
     value: providerId.value ? m.id : `provider:${m.provider}/${m.id}`
   }))
 })
