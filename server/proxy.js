@@ -1456,6 +1456,35 @@ export async function handleImages(req, res) {
   })
 }
 
+/**
+ * 对外模型名：`GLM-5.3 · x0.79`。
+ *
+ * 倍率是上游（WorkBuddy 系 credits）给的事实，直接拼进名字文本——
+ * 不是独立字段。名字只取一个：优先上游给的 name，没有才退回 id。
+ * 上游没给倍率（多数 OpenAI 兼容 /models 只有 id/owned_by）就光名字，
+ * 不写「未给倍率」——那是拿网关的判断冒充上游事实。
+ */
+function publicModelName(m) {
+  const base = String(m?.name || m?.id || '').trim()
+  const rate = publicRateText(m?.rate, m?.rate_discounted)
+  return rate ? `${base} · ${rate}` : base
+}
+
+/** 倍率展示文本：剥掉 credits 单位只留数值（"x2.20 credits" → "x2.20"），
+ *  有促销价时用箭头标出（x0.17→x0.50）。取不到返回空串。 */
+function publicRateText(rate, discounted) {
+  const label = (v) => {
+    const raw = String(v ?? '').trim()
+    const mm = raw.match(/^[xX×]?(\d+(?:\.\d+)?)/)
+    return mm ? `x${mm[1]}` : raw
+  }
+  const base = rate === null || rate === undefined || rate === '' ? '' : label(rate)
+  if (!base) return ''
+  if (discounted === null || discounted === undefined || discounted === '') return base
+  const shown = /^\d|^[xX×]/.test(String(discounted)) ? label(discounted) : String(discounted)
+  return `${base}→${shown}`
+}
+
 // 模型聚合列表。
 // 必须按调用方的 Key 权限裁剪：这份列表是客户端挑选模型的唯一依据，
 // 若把没授权的模型也列出来，用户只会得到一串必然 403 的名字，
@@ -1469,7 +1498,7 @@ export function handleModels(req, res) {
       if (seen.has(m.id)) continue
       if (!modelAllowed(req?.apiAuth, m.id).allowed) continue
       seen.add(m.id)
-      list.push({ id: m.id, object: 'model', owned_by: m.owned_by || p.name, provider: p.id, provider_name: p.name })
+      list.push({ id: m.id, object: 'model', owned_by: m.owned_by || p.name, provider: p.id, provider_name: p.name, name: publicModelName(m) })
     }
   }
   res.setHeader('Content-Type', 'application/json')
