@@ -403,10 +403,51 @@ function resolveTarget(body) {
     if (slash > prefix.length) {
       providerIdHint = model.slice(prefix.length, slash)
       model = model.slice(slash + 1)
-      body = { ...body, model }
     }
   }
+  // 客户端按 /v1/models 下发的 id 点名，而那个 id 形如「GLM-5.3 · x0.79」
+  // （倍率拼在 id 里，因为客户端一律拿 id 当显示名）。这里剥掉倍率后缀、
+  // 再按显示名找回平台里的真实 id——路由、权限、日志全部按真实 id 走，
+  // 客户端传什么样子它都认。
+  const canonical = canonicalModelId(model)
+  if (canonical !== model) model = canonical
+  if (body && body.model !== model) body = { ...body, model }
   return { model, providerIdHint, body }
+}
+
+// /v1/models 下发的 id 里倍率后缀的写法：` · x0.79`、` · x0.17→x0.50`。
+// 只剥这一种——别把模型名里本来就带 ` · ` 的上游名误伤。
+const RATE_SUFFIX_RE = /\s*·\s*x\d+(?:\.\d+)?(?:→x\d+(?:\.\d+)?)?\s*$/
+
+export function stripRateSuffix(name) {
+  return String(name ?? '').replace(RATE_SUFFIX_RE, '')
+}
+
+/**
+ * 把客户端传来的模型名归一成平台里的真实 id。
+ *
+ * 客户端可能传：真实 id（glm-5.3）、显示名（GLM-5.3，大小写不同）、
+ * 或带倍率后缀的显示名（GLM-5.3 · x0.79）。三级都尝试，先后顺序：
+ * 剥后缀 → 全平台按 id 精确找 → 按 name 找。找不到原样返回，
+ * 让下游的模型匹配去报 404，不猜。
+ */
+export function canonicalModelId(name) {
+  const raw = String(name ?? '').trim()
+  if (!raw) return raw
+  const lower = stripRateSuffix(raw).toLowerCase()
+  for (const p of state.providers) {
+    if (!p.enabled) continue
+    for (const m of p.models) {
+      if (String(m.id).toLowerCase() === lower) return m.id
+    }
+  }
+  for (const p of state.providers) {
+    if (!p.enabled) continue
+    for (const m of p.models) {
+      if (String(m.name || '').toLowerCase() === lower) return m.id
+    }
+  }
+  return raw
 }
 
 // OAuth 账号的凭据会过期（xAI 的 access_token 寿命约 6 小时），
@@ -1498,7 +1539,11 @@ export function handleModels(req, res) {
       if (seen.has(m.id)) continue
       if (!modelAllowed(req?.apiAuth, m.id).allowed) continue
       seen.add(m.id)
-      list.push({ id: m.id, object: 'model', owned_by: m.owned_by || p.name, provider: p.id, provider_name: p.name, name: publicModelName(m) })
+      // id 直接带倍率（`GLM-5.3 · x0.79`）：客户端拉清单一律拿 id 当
+      // 显示名，倍率写在 name 里它们根本不看。调用时 resolveTarget 会
+      // 把后缀剥掉、按显示名找回真实 id，路由不受影响。
+      const label = publicModelName(m)
+      list.push({ id: label, object: 'model', owned_by: m.owned_by || p.name, provider: p.id, provider_name: p.name, name: label })
     }
   }
   res.setHeader('Content-Type', 'application/json')
