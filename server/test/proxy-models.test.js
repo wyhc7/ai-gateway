@@ -16,11 +16,13 @@ let defaultModelsFor = null
 let refreshModels = null
 let autoHeaders = null
 let handleModels = null
+let canonicalModelId = null
+let stripRateSuffix = null
 let TEMPLATES = null
 
 before(async () => {
   ;({ state } = await import('../store.js'))
-  ;({ defaultModelsFor, refreshModels, autoHeaders, handleModels } = await import('../proxy.js'))
+  ;({ defaultModelsFor, refreshModels, autoHeaders, handleModels, canonicalModelId, stripRateSuffix } = await import('../proxy.js'))
   ;({ TEMPLATES } = await import('../templates.js'))
 })
 
@@ -184,16 +186,16 @@ describe('handleModels：倍率直接写进模型名', () => {
     try {
       const list = callModels()
       const byId = Object.fromEntries(list.map((m) => [m.id, m]))
-      assert.equal(byId['hy4-preview'].name, 'Hy4 preview · x0.29')
-      assert.equal(byId['glm-5.3'].name, 'GLM-5.3 · x0.79')
-      // 路由仍按 id 点名，name 只是展示文本
-      assert.equal(byId['glm-5.3'].id, 'glm-5.3')
+      assert.equal(byId['Hy4 preview · x0.29'].name, 'Hy4 preview · x0.29')
+      assert.equal(byId['GLM-5.3 · x0.79'].name, 'GLM-5.3 · x0.79')
+      // 路由仍按真实 id 点名（客户端拿这个 id 请求，网关剥后缀找回 glm-5.3）
+      assert.equal(byId['GLM-5.3 · x0.79'].id, 'GLM-5.3 · x0.79')
     } finally {
       state.providers.length = 0
     }
   })
 
-  test('无倍率：name 就是名字本身，不出现「未给倍率」', () => {
+  test('无倍率：id 与 name 就是原名，不出现「未给倍率」', () => {
     seed([
       { id: 'gpt-4o', owned_by: 'openai' },
       { id: 'auto', name: 'Auto', owned_by: 'wb' }
@@ -202,7 +204,7 @@ describe('handleModels：倍率直接写进模型名', () => {
       const list = callModels()
       const byId = Object.fromEntries(list.map((m) => [m.id, m]))
       assert.equal(byId['gpt-4o'].name, 'gpt-4o', '上游没给 name 时退回 id')
-      assert.equal(byId['auto'].name, 'Auto')
+      assert.equal(byId['Auto'].name, 'Auto', '有 name 时 id 就是 name')
       assert.ok(!list.some((m) => String(m.name).includes('未给倍率')))
     } finally {
       state.providers.length = 0
@@ -228,7 +230,50 @@ describe('handleModels：倍率直接写进模型名', () => {
       keys: []
     })
     try {
-      assert.ok(!callModels().some((m) => m.id === 'hidden'))
+      assert.ok(!callModels().some((m) => m.id === 'Hidden'))
+    } finally {
+      state.providers.length = 0
+    }
+  })
+})
+
+describe('canonicalModelId：调用名归一', () => {
+  // 客户端拿 /v1/models 下发的 id（带倍率后缀）点名，网关必须能剥掉后缀、
+  // 按显示名找回平台里的真实 id，否则路由全 404。
+  test('带倍率后缀的显示名 → 真实 id', () => {
+    state.providers.push({
+      id: 'p-canon-1',
+      name: '归一测试',
+      enabled: true,
+      models: [
+        { id: 'glm-5.3', name: 'GLM-5.3', owned_by: 'wb', rate: 'x0.79' },
+        { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', owned_by: 'wb', rate: 'x0.06' }
+      ],
+      keys: []
+    })
+    try {
+      assert.equal(canonicalModelId('GLM-5.3 · x0.79'), 'glm-5.3')
+      assert.equal(canonicalModelId('GLM-5.3-Flash · x0.06'), 'glm-5.3-flash')
+      assert.equal(canonicalModelId('GLM-5.3'), 'glm-5.3', '裸显示名（大小写不同）也认')
+      assert.equal(canonicalModelId('glm-5.3'), 'glm-5.3', '真实 id 原样返回')
+      assert.equal(canonicalModelId('M · x0.17→x0.50'), 'M · x0.17→x0.50', '查不到原样返回，交给下游报 404')
+      assert.equal(stripRateSuffix('GLM-5.3 · x0.79'), 'GLM-5.3')
+      assert.equal(stripRateSuffix('GLM-5.3'), 'GLM-5.3', '无后缀不动')
+    } finally {
+      state.providers.length = 0
+    }
+  })
+
+  test('停用平台里的模型不参与归一', () => {
+    state.providers.push({
+      id: 'p-canon-off',
+      name: '停用平台',
+      enabled: false,
+      models: [{ id: 'glm-5.3', name: 'GLM-5.3', owned_by: 'wb' }],
+      keys: []
+    })
+    try {
+      assert.equal(canonicalModelId('GLM-5.3'), 'GLM-5.3')
     } finally {
       state.providers.length = 0
     }
