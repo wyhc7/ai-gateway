@@ -18,11 +18,12 @@ let autoHeaders = null
 let handleModels = null
 let canonicalModelId = null
 let stripRateSuffix = null
+let lookupModel = null
 let TEMPLATES = null
 
 before(async () => {
   ;({ state } = await import('../store.js'))
-  ;({ defaultModelsFor, refreshModels, autoHeaders, handleModels, canonicalModelId, stripRateSuffix } = await import('../proxy.js'))
+  ;({ defaultModelsFor, refreshModels, autoHeaders, handleModels, canonicalModelId, stripRateSuffix, lookupModel } = await import('../proxy.js'))
   ;({ TEMPLATES } = await import('../templates.js'))
 })
 
@@ -242,9 +243,12 @@ describe('handleModels：倍率直接写进模型名', () => {
     try {
       const list = callModels()
       const hit = list.filter((m) => m.name.includes('Deepseek-V4.1-Flash') || m.id === 'deepseek-v4.1-flash')
-      assert.equal(hit.length, 1, '同一真实 id 只输出一项')
-      assert.equal(hit[0].id, 'Deepseek-V4.1-Flash · x0.00', '该保留带倍率的那条')
-      assert.equal(hit[0].provider, 'p-dup-b')
+      // 按输出 label 去重：商汤的裸 id 与带倍率的国际版各是一条，
+      // 关键是带倍率的那条不能再被裸记录吞掉
+      assert.equal(hit.length, 2)
+      const byProvider = Object.fromEntries(hit.map((m) => [m.provider, m]))
+      assert.equal(byProvider['p-dup-a'].id, 'deepseek-v4.1-flash')
+      assert.equal(byProvider['p-dup-b'].id, 'Deepseek-V4.1-Flash · x0.00', '带倍率的不能被裸 id 挤掉')
     } finally {
       state.providers.length = 0
     }
@@ -288,6 +292,45 @@ describe('canonicalModelId：调用名归一', () => {
       assert.equal(canonicalModelId('M · x0.17→x0.50'), 'M · x0.17→x0.50', '查不到原样返回，交给下游报 404')
       assert.equal(stripRateSuffix('GLM-5.3 · x0.79'), 'GLM-5.3')
       assert.equal(stripRateSuffix('GLM-5.3'), 'GLM-5.3', '无后缀不动')
+    } finally {
+      state.providers.length = 0
+    }
+  })
+
+  test('国内外同名不同倍率：两条都输出，点名倍率精确路由', () => {
+    // 线上实例：国际版 deepseek-v4.1-flash 是 x0.00，国内版同名是 x0.11。
+    // 按输出 label 去重，两条都该出现在 /v1/models；点名 x0.00 那条时
+    // 必须路由到国际版，不能轮询到国内版去。
+    state.providers.push({
+      id: 'p-cn',
+      name: '国内版',
+      enabled: true,
+      models: [{ id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash', owned_by: 'wb', rate: 'x0.11' }],
+      keys: []
+    })
+    state.providers.push({
+      id: 'p-intl',
+      name: '国际版',
+      enabled: true,
+      models: [{ id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash', owned_by: 'wb', rate: 'x0.00' }],
+      keys: []
+    })
+    try {
+      let body = null
+      const res = { setHeader() {}, end(s2) { body = JSON.parse(s2) } }
+      handleModels({}, res)
+      const labels = body.data.map((m) => m.id).filter((id) => id.includes('Deepseek-V4.1-Flash'))
+      assert.deepEqual(labels.sort(), ['Deepseek-V4.1-Flash · x0.00', 'Deepseek-V4.1-Flash · x0.11'])
+
+      // 点名 x0.00 → 精确定位国际版
+      const t = lookupModel('Deepseek-V4.1-Flash · x0.00')
+      assert.equal(t.id, 'deepseek-v4.1-flash')
+      assert.equal(t.providerId, 'p-intl')
+      // 点名 x0.11 → 国内版
+      assert.equal(lookupModel('Deepseek-V4.1-Flash · x0.11').providerId, 'p-cn')
+      // 裸 id / 裸显示名 → 不锁平台，matchProvider 轮询
+      assert.equal(lookupModel('deepseek-v4.1-flash').providerId, null)
+      assert.equal(lookupModel('Deepseek-V4.1-Flash').providerId, null)
     } finally {
       state.providers.length = 0
     }
