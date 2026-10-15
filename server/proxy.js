@@ -1526,26 +1526,38 @@ function publicRateText(rate, discounted) {
   return `${base}→${shown}`
 }
 
+// 一条模型输出的信息完整度：同名 id 在多个平台都有时（商汤的
+// deepseek-v4.1-flash 是裸 id，国际版的同名模型带 name 和 x0.00 倍率），
+// 保留信息最全的那条——先遍历到的裸记录不能把带倍率的挤掉。
+function modelEntryScore(m, label) {
+  let s = 0
+  if (publicRateText(m?.rate, m?.rate_discounted)) s += 2
+  if (m?.name && m.name !== m.id) s += 1
+  return s
+}
+
 // 模型聚合列表。
 // 必须按调用方的 Key 权限裁剪：这份列表是客户端挑选模型的唯一依据，
 // 若把没授权的模型也列出来，用户只会得到一串必然 403 的名字，
 // 而且从调用方视角根本看不出是权限问题还是平台问题。
 export function handleModels(req, res) {
-  const list = []
-  const seen = new Set()
+  // 按真实 id 去重（OpenAI 协议一个 id 一项），但同 id 多条时保留
+  // 信息最全的：倍率 > 名字 > 先到先得
+  const best = new Map()
   for (const p of state.providers) {
     if (!p.enabled) continue
     for (const m of p.models) {
-      if (seen.has(m.id)) continue
       if (!modelAllowed(req?.apiAuth, m.id).allowed) continue
-      seen.add(m.id)
       // id 直接带倍率（`GLM-5.3 · x0.79`）：客户端拉清单一律拿 id 当
       // 显示名，倍率写在 name 里它们根本不看。调用时 resolveTarget 会
       // 把后缀剥掉、按显示名找回真实 id，路由不受影响。
       const label = publicModelName(m)
-      list.push({ id: label, object: 'model', owned_by: m.owned_by || p.name, provider: p.id, provider_name: p.name, name: label })
+      const entry = { id: label, object: 'model', owned_by: m.owned_by || p.name, provider: p.id, provider_name: p.name, name: label }
+      const prev = best.get(m.id)
+      if (!prev || modelEntryScore(m, label) > prev.score) best.set(m.id, { ...entry, score: modelEntryScore(m, label) })
     }
   }
+  const list = [...best.values()].map(({ score, ...e }) => e)
   res.setHeader('Content-Type', 'application/json')
   res.end(JSON.stringify({ object: 'list', data: list }))
 }

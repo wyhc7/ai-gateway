@@ -221,6 +221,35 @@ describe('handleModels：倍率直接写进模型名', () => {
     }
   })
 
+  test('同名 id 多平台：保留带倍率的那条，别被裸 id 挤掉', () => {
+    // 线上实例：商汤有裸 id 的 deepseek-v4.1-flash，国际版有带 name 和
+    // x0.00 倍率的同名模型。先遍历到商汤的，国际版整条被 seen 吞掉——
+    // 用户拉不到 0.00 的 Deepseek V4.1 Flash。
+    state.providers.push({
+      id: 'p-dup-a',
+      name: '商汤',
+      enabled: true,
+      models: [{ id: 'deepseek-v4.1-flash', owned_by: 'deepseek' }],
+      keys: []
+    })
+    state.providers.push({
+      id: 'p-dup-b',
+      name: 'WorkBuddy 国际版',
+      enabled: true,
+      models: [{ id: 'deepseek-v4.1-flash', name: 'Deepseek-V4.1-Flash', owned_by: 'wb', rate: 'x0.00' }],
+      keys: []
+    })
+    try {
+      const list = callModels()
+      const hit = list.filter((m) => m.name.includes('Deepseek-V4.1-Flash') || m.id === 'deepseek-v4.1-flash')
+      assert.equal(hit.length, 1, '同一真实 id 只输出一项')
+      assert.equal(hit[0].id, 'Deepseek-V4.1-Flash · x0.00', '该保留带倍率的那条')
+      assert.equal(hit[0].provider, 'p-dup-b')
+    } finally {
+      state.providers.length = 0
+    }
+  })
+
   test('停用的平台不出现在列表里', () => {
     state.providers.push({
       id: 'p-off',
