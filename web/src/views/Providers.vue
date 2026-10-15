@@ -173,9 +173,9 @@
                 <div v-else class="model-list">
                   <div v-for="m in p.models" :key="m.id" class="model-item" :class="{ 'model-non-chat': isNonChat(m) }">
                     <img v-if="m.icon" class="model-icon" :src="m.icon" :alt="m.name || m.id" loading="lazy" @error="($event.target.style.display = 'none')" />
-                    <!-- 倍率直接写进模型名这一整串文本：`型号 · 名字 · x0.79`。
-                         它不是独立气泡、也不是单独一列 —— 扫列表时
-                         「这模型扣多少」紧跟型号读完，视线不用横向跳 -->
+                    <!-- 倍率直接写进模型名这一整串文本：`GLM-5.3 · x0.79`。
+                         名字只出现一次，倍率跟在名字后面；上游没给倍率就
+                         只留名字，不补「未给倍率」这种网关自己的判断 -->
                     <span class="model-id" :title="m.description || m.id">{{ modelLabel(p, m) }}</span>
                     <!-- 非对话模型（补全/生图）或自动选择别名：上游确实接受这些名字，
                          所以留在路由表里可点名，但在列表里标出来免得被当成常规对话模型 -->
@@ -838,33 +838,16 @@ function isFreeModel(m) {
   return isFreeRate(m?.rate) || isFreeRate(m?.rate_discounted)
 }
 
-// 这个平台到底提不提供倍率。
-//
-// ⚠️ 只有上游真的给过倍率，才有资格对「没给倍率的模型」写「未给」。
-// 一个倍率都没拉到的平台（多数 OpenAI 兼容端点的 /models 只有 id/owned_by，
-// 压根不含倍率）整列留空 —— 写「未给倍率」是拿网关的判断冒充上游事实。
-function platformHasRates(p) {
-  if ((p?.models || []).some((m) => m?.rate || m?.rate_discounted)) return true
-  const table = p?.model_rates
-  if (!table || typeof table !== 'object') return false
-  // 新版按 realm 分表：{ cn: {...}, intl: {...} }；旧版是一张扁平表
-  return Object.values(table).some((t) => t && typeof t === 'object' && Object.keys(t).length)
-}
-
 /**
- * 模型这一行的完整显示文本：`型号 · 名字 · 倍率`。
+ * 模型这一行的完整显示文本：`GLM-5.3 · x0.79`。
  *
- * 倍率直接作为名字的一部分拼进来 —— 不是独立气泡、也不放在行尾单独一列。
- * 这样扫列表时「这模型扣多少」紧跟型号读完，视线不用横向跳着比对。
- *
- * ⚠️ 整个平台一个倍率都没拉到时，文本里**不出现**任何倍率字样
- * （不写「未给倍率」）—— 那说明这个上游根本不提供倍率，写「未给」
- * 等于拿网关的判断冒充上游事实。
+ * 名字只出现一次（优先用上游给的名字，没有才退回 id），倍率紧跟其后，
+ * 用「 · 」隔开。倍率是上游事实，有就拼、没有就不拼 ——
+ * 不写「未给倍率」，那是拿网关的判断冒充上游事实。
  */
 function modelLabel(p, m) {
-  const parts = [m?.id].filter(Boolean)
-  if (m?.name && m.name !== m.id) parts.push(m.name)
-  const rate = modelRate(p, m) ? rateText(m) : (platformHasRates(p) ? '未给倍率' : '')
+  const parts = [m?.name || m?.id].filter(Boolean)
+  const rate = modelRate(p, m) ? rateText(m) : ''
   if (rate) parts.push(rate)
   return parts.join(' · ')
 }
