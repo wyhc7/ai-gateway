@@ -15,11 +15,12 @@ let state = null
 let defaultModelsFor = null
 let refreshModels = null
 let autoHeaders = null
+let handleModels = null
 let TEMPLATES = null
 
 before(async () => {
   ;({ state } = await import('../store.js'))
-  ;({ defaultModelsFor, refreshModels, autoHeaders } = await import('../proxy.js'))
+  ;({ defaultModelsFor, refreshModels, autoHeaders, handleModels } = await import('../proxy.js'))
   ;({ TEMPLATES } = await import('../templates.js'))
 })
 
@@ -150,6 +151,87 @@ describe('autoHeaders（上游自动附加头）', () => {
     const h = autoHeaders({ base_url: 'https://api.x.ai/v1' })
     assert.equal(h['x-grok-client-version'], undefined)
     assert.equal(h['x-grok-client-surface'], undefined)
+  })
+})
+
+describe('handleModels：倍率直接写进模型名', () => {
+  // 调用方拿 /v1/models 选模型，倍率是上游（WorkBuddy 系 credits）给的
+  // 事实，必须跟在名字后面出现：`GLM-5.3 · x0.79`。上游没给倍率的
+  // 平台（标准 OpenAI /models 只有 id）就光名字，不写「未给倍率」——
+  // 那是拿网关的判断冒充上游事实。
+  function callModels() {
+    let body = null
+    const res = { setHeader() {}, end(s) { body = JSON.parse(s) } }
+    handleModels({}, res)
+    return body.data
+  }
+
+  function seed(models) {
+    state.providers.push({
+      id: 'p-pub-1',
+      name: '发布测试',
+      enabled: true,
+      models,
+      keys: []
+    })
+  }
+
+  test('有倍率：name = 名字 · x0.79（剥掉 credits 单位），id 不变', () => {
+    seed([
+      { id: 'hy4-preview', name: 'Hy4 preview', owned_by: 'wb', rate: 'x0.29 credits' },
+      { id: 'glm-5.3', name: 'GLM-5.3', owned_by: 'wb', rate: 'x0.79' }
+    ])
+    try {
+      const list = callModels()
+      const byId = Object.fromEntries(list.map((m) => [m.id, m]))
+      assert.equal(byId['hy4-preview'].name, 'Hy4 preview · x0.29')
+      assert.equal(byId['glm-5.3'].name, 'GLM-5.3 · x0.79')
+      // 路由仍按 id 点名，name 只是展示文本
+      assert.equal(byId['glm-5.3'].id, 'glm-5.3')
+    } finally {
+      state.providers.length = 0
+    }
+  })
+
+  test('无倍率：name 就是名字本身，不出现「未给倍率」', () => {
+    seed([
+      { id: 'gpt-4o', owned_by: 'openai' },
+      { id: 'auto', name: 'Auto', owned_by: 'wb' }
+    ])
+    try {
+      const list = callModels()
+      const byId = Object.fromEntries(list.map((m) => [m.id, m]))
+      assert.equal(byId['gpt-4o'].name, 'gpt-4o', '上游没给 name 时退回 id')
+      assert.equal(byId['auto'].name, 'Auto')
+      assert.ok(!list.some((m) => String(m.name).includes('未给倍率')))
+    } finally {
+      state.providers.length = 0
+    }
+  })
+
+  test('促销价拼成 x0.17→x0.50', () => {
+    seed([{ id: 'm-promo', name: 'M', owned_by: 'wb', rate: 'x0.17', rate_discounted: 'x0.50' }])
+    try {
+      const list = callModels()
+      assert.equal(list[0].name, 'M · x0.17→x0.50')
+    } finally {
+      state.providers.length = 0
+    }
+  })
+
+  test('停用的平台不出现在列表里', () => {
+    state.providers.push({
+      id: 'p-off',
+      name: '停用平台',
+      enabled: false,
+      models: [{ id: 'hidden', name: 'Hidden', owned_by: 'x' }],
+      keys: []
+    })
+    try {
+      assert.ok(!callModels().some((m) => m.id === 'hidden'))
+    } finally {
+      state.providers.length = 0
+    }
   })
 })
 
