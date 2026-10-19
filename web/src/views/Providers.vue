@@ -1598,7 +1598,9 @@ async function exportProviders() {
     a.download = `providers_${new Date().toISOString().slice(0, 10)}.json`
     a.click()
     URL.revokeObjectURL(url)
-    ElMessage.success('导出成功（含 Key 和模型）')
+    // Key 在导出时已脱敏（只留前后 4 位）——备份文件常被转手，
+    // 明文凭据等于把账号送人。要迁移凭据得回页面里逐个复制。
+    ElMessage.success('导出成功（Key 已脱敏，仅留前后 4 位）')
   } catch (e) {
     ElMessage.error(e?.message || '导出失败')
   }
@@ -1636,6 +1638,16 @@ async function importProviders(event) {
     ).then(async () => {
       const result = await api.importProviders(data)
       ElMessage.success(`成功导入 ${result.imported} 个平台`)
+      // 脱敏文件再导入：凭据被置空的 Key 逐个点名，
+      // 别让用户以为导入完就能用，一调用全是空 Key 报错
+      const masked = result.masked_keys || []
+      if (masked.length > 0) {
+        ElMessage.warning({
+          message: `以下 ${masked.length} 个 Key 的凭据在导出时已脱敏，需重新填写：${masked.join('、')}`,
+          duration: 10000,
+          showClose: true
+        })
+      }
       await load()
     }).catch(() => {
       ElMessage.info('已取消导入')

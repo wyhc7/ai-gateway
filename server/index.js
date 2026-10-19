@@ -1034,10 +1034,66 @@ app.get('/api/v1/models/:providerId', (req, res) => {
   res.json({ object: 'list', data: filterModelsForAuth(p.models, req.apiAuth) })
 })
 
+// ---------------------------------------------------------------------------
+// 导入导出
+//
+// 导出脱敏：凭据（api_key / access_token / refresh_token）只留前后各 4 位、
+// 中间打码——备份文件常在群里/网盘里转，明文 Key 等于把账号送人。
+// last_error / last_error_at 是运行时状态，不进备份。
+// 订阅平台（OAuth 账号）的模型目录、倍率表、签到/额度状态按字段白名单
+// 整体还原：只挑固定字段重建会把它们全弄丢，导入后订阅平台直接残废。
+// ---------------------------------------------------------------------------
+
+const SECRET_FIELDS = ['api_key', 'access_token', 'refresh_token']
+
+// 平台级订阅状态：导入时原样带回（倍率表不重建，省得导入后全员重新刷新）
+const PROVIDER_RUNTIME_FIELDS = [
+  'model_rates', 'model_rates_at', 'model_rates_error', 'models_source',
+  'models_updated_at', 'model_realm', 'model_upstream_id'
+]
+
+// 订阅 Key 的运行时状态：额度与签到进度跟着账号走，重建时丢掉就等于
+// 把用户攒的额度和连续签到记录清零
+const KEY_RUNTIME_FIELDS = [
+  'credits_size', 'credits_remain', 'credits_used', 'credits_unit', 'credits_at',
+  'checkin_date', 'checkin_last_attempt_at'
+]
+
+// 模型记录整体保留：倍率、名字、上下文窗口、realm 都是上游事实，
+// normalizeModels 那种只留 id/owned_by 的压法会把倍率表打回裸 id
+const IMPORT_MODEL_FIELDS = [
+  'id', 'name', 'owned_by', 'rate', 'rate_discounted', 'context', 'realm',
+  'chat', 'auto_select', 'vendor', 'icon', 'description'
+]
+
+function maskSecret(v) {
+  const s = String(v ?? '')
+  if (!s) return s
+  // 短值全打码：前后各留 4 位对短 Key 等于没脱敏
+  if (s.length <= 8) return '*'.repeat(8)
+  return `${s.slice(0, 4)}${'*'.repeat(8)}${s.slice(-4)}`
+}
+
+function isMasked(v) {
+  return typeof v === 'string' && v.includes('*')
+}
+
+function sanitizeKeyForExport(k) {
+  const out = { ...k }
+  for (const f of SECRET_FIELDS) if (f in out) out[f] = maskSecret(out[f])
+  delete out.last_error
+  delete out.last_error_at
+  return out
+}
+
 app.get('/api/providers/export', (req, res) => {
+  const payload = state.providers.map((p) => ({
+    ...p,
+    keys: Array.isArray(p.keys) ? p.keys.map(sanitizeKeyForExport) : []
+  }))
   res.setHeader('Content-Type', 'application/json')
   res.setHeader('Content-Disposition', `attachment; filename="providers_${todayKey()}.json"`)
-  res.end(JSON.stringify(state.providers, null, 2))
+  res.end(JSON.stringify(payload, null, 2))
 })
 
 app.post('/api/providers/import', (req, res) => {
@@ -1047,6 +1103,7 @@ app.post('/api/providers/import', (req, res) => {
   }
   const imported = []
   const skipped = []
+  const maskedKeys = []
   for (const item of data) {
     if (!item.name || !item.base_url) {
       skipped.push(item.name || '未知平台')
@@ -1058,35 +1115,68 @@ app.post('/api/providers/import', (req, res) => {
       base_url: item.base_url,
       protocol: item.protocol || DEFAULT_PROTOCOL,
       enabled: item.enabled !== undefined ? item.enabled : true,
-      models: normalizeModels(item.models, item.name),
-      keys: Array.isArray(item.keys) ? item.keys.map((k) => ({
-        id: genId(),
-        type: k.type === 'oauth' ? 'oauth' : undefined,
-        provider: k.provider || 'grok',
-        name: k.name || 'Key 1',
-        api_key: k.api_key || '',
-        access_token: k.access_token || '',
-        refresh_token: k.refresh_token || '',
-        account_id: k.account_id,
-        email: k.email,
-        token_type: k.token_type || 'Bearer',
-        expires_at: k.expires_at || 0,
-        enabled: k.enabled !== undefined ? k.enabled : true,
-        cooldown_until: 0,
-        last_error: null,
-        last_error_at: null,
-        created_at: Date.now()
-      })) : [],
+      models: restoreModels(item.models, item.name),
+      keys: [],
       extra_headers: item.extra_headers || {},
       ...pickCallPlan(item),
       created_at: Date.now()
+    }
+    for (const f of PROVIDER_RUNTIME_FIELDS) {
+      if (item[f] !== undefined) provider[f] = item[f]
+    }
+    if (Array.isArray(item.keys)) {
+      for (const k of item.keys) {
+        const key = {
+          id: genId(),
+          type: k.type === 'oauth' ? 'oauth' : undefined,
+          provider: k.provider || 'grok',
+          name: k.name || 'Key 1',
+          // 脱敏值（含 *）视为占位符：置空并在结果里点名，
+          // 提醒用户这把 Key 得重新填，别让它静默变成一把空 Key
+          api_key: isMasked(k.api_key) ? '' : (k.api_key || ''),
+          access_token: isMasked(k.access_token) ? '' : (k.access_token || ''),
+          refresh_token: isMasked(k.refresh_token) ? '' : (k.refresh_token || ''),
+          account_id: k.account_id,
+          email: k.email,
+          token_type: k.token_type || 'Bearer',
+          expires_at: k.expires_at || 0,
+          enabled: k.enabled !== undefined ? k.enabled : true,
+          cooldown_until: 0,
+          last_error: null,
+          last_error_at: null,
+          created_at: Date.now()
+        }
+        for (const f of KEY_RUNTIME_FIELDS) {
+          if (k[f] !== undefined) key[f] = k[f]
+        }
+        if (isMasked(k.api_key) || isMasked(k.access_token) || isMasked(k.refresh_token)) {
+          maskedKeys.push(`${item.name} / ${key.name}`)
+        }
+        provider.keys.push(key)
+      }
     }
     state.providers.push(provider)
     imported.push(item.name)
   }
   persistImmediate()
-  res.json({ ok: true, imported: imported.length, names: imported, skipped })
+  res.json({ ok: true, imported: imported.length, names: imported, skipped, masked_keys: maskedKeys })
 })
+
+// 模型记录整体还原：字符串形态（旧导出/手工编辑）兼容成 { id, owned_by }，
+// 对象形态按白名单保留倍率、上下文、realm 等上游事实。
+function restoreModels(models, name) {
+  if (!Array.isArray(models)) return []
+  return models
+    .map((m) => {
+      if (typeof m === 'string') return { id: m, owned_by: name }
+      const out = {}
+      for (const f of IMPORT_MODEL_FIELDS) if (m?.[f] !== undefined) out[f] = m[f]
+      if (!out.id) return null
+      if (!out.owned_by) out.owned_by = name
+      return out
+    })
+    .filter(Boolean)
+}
 
 app.get('/api/health', (req, res) => res.json({ ok: true, uptime: process.uptime() }))
 
