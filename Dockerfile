@@ -3,13 +3,18 @@ FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# 复制清单文件，利用构建缓存
+# 复制清单文件（含 lock），利用构建缓存。
+# lock 必须一起进镜像：无锁的 npm install 会现场重新解析依赖树，
+# 除了构建不可重复，还会撞上 npm 10.8 的 arborist bug
+# （Cannot read properties of null (reading 'edgesOut')，CI 上挂过）。
 COPY package.json ./
-COPY server/package.json server/
-COPY web/package.json web/
+COPY server/package.json server/package-lock.json server/
+COPY web/package.json web/package-lock.json web/
 
-# 安装后端 + 前端依赖（含 vite 等构建依赖）
-RUN npm install --prefix server && npm install --prefix web
+# 安装后端 + 前端依赖（含 vite 等构建依赖）。
+# 用 npm ci：按 lock 确定性安装，且 lock 与 package.json 不同步会直接
+# 报错——那种"能装但装出另一套依赖"的静默偏差比构建失败更难发现。
+RUN npm ci --prefix server && npm ci --prefix web
 
 # 复制源码并构建前端
 COPY server server
@@ -26,10 +31,10 @@ ENV DATA_DIR=/data
 WORKDIR /app
 
 COPY package.json ./
-COPY server/package.json server/
+COPY server/package.json server/package-lock.json server/
 
-# 仅安装后端生产依赖
-RUN npm install --prefix server --omit=dev
+# 仅安装后端生产依赖（同样按 lock 确定性安装）
+RUN npm ci --prefix server --omit=dev
 
 # 复制后端源码与前端构建产物
 COPY server server
