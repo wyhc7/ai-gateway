@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import crypto from 'node:crypto'
 import { state, persist, persistImmediate, getProvider, genId, todayKey, getAdminKey } from './store.js'
 import { handleChat, handleImages, handleModels, refreshModels, previewModels, refreshWorkbuddyCatalog, DEFAULT_PROTOCOL } from './proxy.js'
+import { autoRefreshModelsTick } from './model-auto-refresh.js'
 import {
   createApiKey,
   updateApiKey,
@@ -895,6 +896,16 @@ const workbuddyRatesTimer = setInterval(() => {
   workbuddyRefreshRates().catch(() => {})
 }, WORKBUDDY_RATES_TTL_MS)
 workbuddyRatesTimer.unref?.()
+
+// —— 凌晨自动刷新模型 ——
+//
+// 每分钟 tick 一次，到点（默认 05:00，配置项 auto_refresh_models_at 可改）
+// 且今天没跑过就开刷。判断与执行都在 model-auto-refresh.js，这里只挂钟。
+const AUTO_REFRESH_TICK_MS = 60 * 1000
+const autoRefreshModelsTimer = setInterval(() => {
+  autoRefreshModelsTick().catch(() => {})
+}, AUTO_REFRESH_TICK_MS)
+autoRefreshModelsTimer.unref?.()
 
 app.post('/api/oauth/codex/accounts/:providerId/:keyId/refresh', api(async (req, res) => {
   const p = getProvider(req.params.providerId)
