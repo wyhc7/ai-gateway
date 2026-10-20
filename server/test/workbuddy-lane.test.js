@@ -17,7 +17,7 @@ const {
   workbuddyRealmFor,
   shapeWorkbuddyBody,
   normalizeWorkbuddyTools,
-  ensureWorkbuddySystemMessage
+  ensureWorkbuddySystemFirst
 } = await import('../workbuddy-lane.js')
 const { defaultModelsFor } = await import('../proxy.js')
 
@@ -73,6 +73,35 @@ describe('按 Key 注入的请求头', () => {
     assert.equal(workbuddyRealmFor('https://www.workbuddy.ai/x'), 'global')
     assert.equal(workbuddyRealmFor('codebuddy.cn'), 'cn')
   })
+
+  // 国际版渠道校验（2026-10-20 上线）：旧路由缺这三个会话头中任意一个即
+  // 400 code 11128 "request illegal"。只查存在性，UA/Origin/X-Product 均无效。
+  test('三个会话头必须存在，否则国际版 11128 拒绝', () => {
+    const h = workbuddyHeaders({ uid: 'u-1', domain: 'workbuddy.ai' })
+    for (const name of ['X-Conversation-ID', 'X-Conversation-Request-ID', 'X-Conversation-Message-ID']) {
+      assert.equal(typeof h[name], 'string', `${name} 缺失或不是字符串`)
+      assert.ok(h[name].length > 0, `${name} 是空串，等于没发`)
+      assert.match(h[name], /^[0-9a-f-]{36}$/, `${name} 不是 UUID 形态`)
+    }
+    // 形状照官方桌面端：Request-ID 与 Message-ID 同值，Conversation-ID 独立
+    assert.equal(h['X-Conversation-Request-ID'], h['X-Conversation-Message-ID'])
+    assert.notEqual(h['X-Conversation-ID'], h['X-Conversation-Request-ID'])
+  })
+
+  test('会话头每请求新生成（网关无状态，不复用不串话）', () => {
+    const a = workbuddyHeaders({ uid: 'u-1', domain: 'workbuddy.ai' })
+    const b = workbuddyHeaders({ uid: 'u-1', domain: 'workbuddy.ai' })
+    assert.notEqual(a['X-Conversation-ID'], b['X-Conversation-ID'])
+    assert.notEqual(a['X-Conversation-Request-ID'], b['X-Conversation-Request-ID'])
+  })
+
+  test('国内版也发会话头（官方桌面端同样发，实测 200 不踩雷）', () => {
+    const h = workbuddyHeaders({ uid: 'u-1', domain: 'www.codebuddy.cn' })
+    assert.ok(h['X-Conversation-ID'])
+    assert.ok(h['X-Conversation-Request-ID'])
+    assert.ok(h['X-Conversation-Message-ID'])
+    assert.equal(h['X-Domain'], 'www.codebuddy.cn')
+  })
 })
 
 describe('请求体整形', () => {
@@ -117,12 +146,63 @@ describe('请求体整形', () => {
     assert.equal(out.messages[0].role, 'system')
   })
 
-  test('Global 账号没有 system 消息会报 11101，整形时补一条', () => {
+  // 国际版渠道校验要求首条消息必须是 system：纯 user 消息报 11101，
+  // [user, system] 这种「有 system 但不在第一条」报 11128 first message is
+  // not system prompt。本组钉的就是「首条一定是 system」这条硬约束。
+  test('没有 system 消息时补一条默认的（纯 user 上游 11101）', () => {
     const obj = { messages: [{ role: 'user', content: 'hi' }] }
-    assert.equal(ensureWorkbuddySystemMessage(obj), true)
+    assert.equal(ensureWorkbuddySystemFirst(obj), true)
     assert.equal(obj.messages[0].role, 'system')
-    // 已有 system 消息时不重复插入
-    assert.equal(ensureWorkbuddySystemMessage(obj), false)
+    assert.equal(obj.messages[0].content, 'You are a helpful assistant.')
+    // 再调一次不动：首条已经是 system
+    assert.equal(ensureWorkbuddySystemFirst(obj), false)
+  })
+
+  test('system 不在首条时提到最前，保留客户端原话', () => {
+    const obj = { messages: [
+      { role: 'user', content: 'hi' },
+      { role: 'system', content: '你是客服' },
+      { role: 'user', content: 'again' }
+    ] }
+    assert.equal(ensureWorkbuddySystemFirst(obj), true)
+    assert.equal(obj.messages[0].role, 'system')
+    assert.equal(obj.messages[0].content, '你是客服', '不能把客户端的 system 内容换成默认值')
+    assert.equal(obj.messages.length, 3, '只移动不删减')
+    assert.equal(obj.messages[1].content, 'hi')
+    assert.equal(obj.messages[2].content, 'again')
+  })
+
+  test('首条已是 system 时什么都不做', () => {
+    const obj = { messages: [
+      { role: 'system', content: 'ok' },
+      { role: 'user', content: 'hi' }
+    ] }
+    assert.equal(ensureWorkbuddySystemFirst(obj), false)
+    assert.equal(obj.messages[0].content, 'ok')
+    assert.equal(obj.messages.length, 2)
+  })
+
+  test('空消息列表不炸，也没有可移动的东西', () => {
+    assert.equal(ensureWorkbuddySystemFirst({ messages: [] }), false)
+    assert.equal(ensureWorkbuddySystemFirst({}), false)
+  })
+
+  test('整形入口端到端：[user, system] 出来首条是 system', () => {
+    const out = shapeWorkbuddyBody({
+      model: 'glm-5.3',
+      messages: [{ role: 'user', content: 'hi' }, { role: 'system', content: '规则' }]
+    })
+    assert.equal(out.messages[0].role, 'system')
+    assert.equal(out.messages[0].content, '规则')
+  })
+
+  test('developer 占首条时：先改写角色再保证首位（顺序不能反）', () => {
+    const out = shapeWorkbuddyBody({
+      model: 'glm-5.3',
+      messages: [{ role: 'developer', content: 'x' }, { role: 'user', content: 'hi' }]
+    })
+    assert.equal(out.messages[0].role, 'system')
+    assert.equal(out.messages[0].content, 'x')
   })
 
   test('hy3 系锁死 reasoning_effort=high，否则上游退化成不思考', () => {

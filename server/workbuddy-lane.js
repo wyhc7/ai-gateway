@@ -8,6 +8,7 @@
 //
 // 每条约束都对应一个真实报错码（见 workbuddy-lane.test.js 的用例名），
 // 改回原样就会重新踩坑。
+import { randomUUID } from 'node:crypto'
 import {
   WORKBUDDY_UA,
   normalizeWorkbuddyDomain,
@@ -33,15 +34,32 @@ export function isWorkbuddyProtocol(protocol) {
   return protocol === 'workbuddy-oauth'
 }
 
-// 按 Key 注入的请求头。三个值都随账号变化，不能收进平台级 extra_headers：
-// 换一个 Key 就换一个 uid 与 realm，放平台级会让多账号轮换时用错身份。
-// Referer 也跟着 realm 走：跨 realm 引用会被网关当成外部渠道。
+// 按 Key 注入的请求头。uid 与 realm（X-Domain）都随账号变化，不能收进平台级
+// extra_headers：换一个 Key 就换一个 uid 与 realm，放平台级会让多账号轮换时
+// 用错身份。Referer 也跟着 realm 走：跨 realm 引用会被网关当成外部渠道。
+//
+// 另有一组**会话头**与账号无关，但同样是上游渠道校验的硬条件：
+//   X-Conversation-ID / X-Conversation-Request-ID / X-Conversation-Message-ID
+// ⚠️ 实测（2026-10-20，直连 www.workbuddy.ai）：国际版网关加了一道渠道校验，
+// 旧路由 /v2/chat/completions 缺这三个头中任意一个即回
+// 400 code 11128 "request illegal"（提示「可能不是官方客户端发出的」）。
+// 该校验**只查存在性**，不校验格式与关联关系——换 UA、补 Origin/X-Product 等
+// 头均无效（逐项实测），只有这三个头（或改走新路由 /console/chat/completions）
+// 能放行。网关是无状态的，每请求生成新 UUID 即可；多轮对话复用同一
+// X-Conversation-ID 也实测正常。官方桌面端本来就发这三个头，国内版
+// （copilot.tencent.com）没有这道闸门但同样接受（实测 200），故无差别加上，
+// 不按 realm 拆分。值的形状照参考实现（workbuddy-bridge）：
+// Request-ID 与 Message-ID 同值，Conversation-ID 独立。
 export function workbuddyHeaders(key = {}) {
+  const messageId = randomUUID()
   return {
     'X-User-Id': String(key.uid || ''),
     'X-Domain': normalizeWorkbuddyDomain(key.domain),
     'User-Agent': WORKBUDDY_UA,
-    Referer: `${workbuddyRealm(key.domain).referer}/`
+    Referer: `${workbuddyRealm(key.domain).referer}/`,
+    'X-Conversation-ID': randomUUID(),
+    'X-Conversation-Request-ID': messageId,
+    'X-Conversation-Message-ID': messageId
   }
 }
 
@@ -107,12 +125,26 @@ export function normalizeWorkbuddyRoles(obj) {
   return changed
 }
 
-// Global 账号收到纯 user 消息会报 11101 "Parse message failed"。补一条无害的
-// system 消息把两边路径统一 —— CN 不要求但容忍，所以无脑补不会踩雷。
-export function ensureWorkbuddySystemMessage(obj) {
+// 国际版渠道校验要求**首条消息必须是 system**，缺了或被别的角色占了首位即回
+// 400 code 11128 "first message is not system prompt"（实测 [user, system] 这种
+// 「有 system 但不在第一条」的形态同样被拒）。纯 user 消息则报 11101
+// "Parse message failed"。
+// 本函数保证 messages[0] 一定是 system：
+//  - 不在首位但存在的 system 消息**提到最前**（保留客户端原话，不替换成默认值）；
+//  - 一条都没有才补一条无害的默认 system。
+// CN 不要求但容忍，所以无脑执行不会踩雷；顺序上必须排在 developer→system
+// 改写之后（见 shapeWorkbuddyBody），否则刚改写出来的 system 还没就位。
+export function ensureWorkbuddySystemFirst(obj) {
   const msgs = obj.messages
   if (!Array.isArray(msgs) || msgs.length === 0) return false
-  if (msgs.some((m) => m && String(m.role || '').toLowerCase() === 'system')) return false
+  const isSystem = (m) => m && typeof m === 'object' && String(m.role || '').toLowerCase() === 'system'
+  if (isSystem(msgs[0])) return false
+  const idx = msgs.findIndex(isSystem)
+  if (idx > 0) {
+    const [sys] = msgs.splice(idx, 1)
+    msgs.unshift(sys)
+    return true
+  }
   msgs.unshift({ role: 'system', content: 'You are a helpful assistant.' })
   return true
 }
@@ -145,14 +177,14 @@ export function applyWorkbuddyMaxOutput(obj, modelMeta) {
 // 顺序有讲究：
 //  1. 先做 role 整形，把 developer 变成 system —— 否则第 4 步的内容指纹
 //     改写会漏掉那些本该是 system 的消息；
-//  2. 再补 system 消息，保证 Global 账号不会拿到纯 user 的请求；
+//  2. 再保证首条是 system（渠道校验硬条件，缺了或被占首位都 11128）；
 //  3. 然后才是内容指纹改写（只改 system，见 workbuddy-fingerprint.js）。
 export function shapeWorkbuddyBody(body = {}, modelMeta = null) {
   const obj = { ...body }
   obj.stream = true
   normalizeWorkbuddyTools(obj)
   normalizeWorkbuddyRoles(obj)
-  ensureWorkbuddySystemMessage(obj)
+  ensureWorkbuddySystemFirst(obj)
   forceWorkbuddyMaxThinking(obj)
   applyWorkbuddyMaxOutput(obj, modelMeta)
   // 腾讯的内容级风控：system 里的已知模板句会被 400/11128 拦下。

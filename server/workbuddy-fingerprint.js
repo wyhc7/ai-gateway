@@ -16,7 +16,7 @@
 // 1. **只改 system**：user / tool 里同一句不拦。改写它们只会白白破坏用户原话与
 //    工具输出，且换不来任何收益。
 // 2. **改写所有 system 消息**，不只 messages[0]：非首位的 system 同样被拦。
-//    （WorkBuddy 网关那条「首条必须是 system」是另一回事，见 ensureWorkbuddySystemMessage。）
+//    （WorkBuddy 网关那条「首条必须是 system」是另一回事，见 workbuddy-lane.js 的 ensureWorkbuddySystemFirst。）
 // 3. **大小写不敏感的精确字面量匹配**：全小写与全大写都被拦，但只差一个词
 //    （usually → normally）或多一个空格就不拦 —— 服务端认的是逐字符的字面量，
 //    **不能**把它泛化成正则或关键词匹配。
