@@ -56,6 +56,8 @@ export const api = {
   previewModels: (data) => request('/api/providers/preview-models', { method: 'POST', body: JSON.stringify(data) }),
   refreshModels: (id) => request(`/api/providers/${id}/models/refresh`, { method: 'POST' }),
   addKey: (id, data) => request(`/api/providers/${id}/keys`, { method: 'POST', body: JSON.stringify(data) }),
+  // WorkBuddy 登录态 JSON 批量导入：按域名分流到国内版/国际版平台，同 uid 去重更新
+  importWorkbuddyJson: (data) => request('/api/providers/import-workbuddy-json', { method: 'POST', body: JSON.stringify(data) }),
   updateKey: (id, keyId, data) => request(`/api/providers/${id}/keys/${keyId}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteKey: (id, keyId) => request(`/api/providers/${id}/keys/${keyId}`, { method: 'DELETE' }),
   resetKey: (id, keyId) => request(`/api/providers/${id}/keys/${keyId}/reset`, { method: 'POST' }),

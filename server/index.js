@@ -21,6 +21,7 @@ import {
 import { TEMPLATES } from './templates.js'
 import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
 import { startWorkbuddyLogin, pollWorkbuddyLogin, cancelWorkbuddyLogin, refreshWorkbuddyToken } from './workbuddy-oauth.js'
+import { workbuddyRealmFor } from './workbuddy-core.js'
 import { fetchWorkbuddyCheckinStatus, performWorkbuddyCheckin, beijingDayKey, fetchWorkbuddyCredits } from './workbuddy-checkin.js'
 import { addLog, getLogs, initLogger } from './logger.js'
 import { checkUpdate, applyUpdate } from './update.js'
@@ -538,6 +539,104 @@ app.delete('/api/providers/:id/keys/:keyId', (req, res) => {
   persistImmediate()
   res.json(serializeProvider(p))
 })
+
+// WorkBuddy 登录态 JSON 批量导入（两个版本平台通用）。
+//
+// 与「导入 Token」（单个粘贴）的分工：那个面向一个账号的手工粘贴；这个面向
+// 用户手里成沓的 workbuddy-<uid>.json —— 选文件或粘数组，一次导入多个账号。
+//
+// 三条设计约束，都有对应的真实失败形态：
+//  1. **按域名分流，不按用户在对话框里选的平台**：登录态自己的 domain 决定
+//     归属 realm（workbuddyRealmFor）。国内域名进国内版平台、国际域名进国际版
+//     平台。混着两个域的数组能一次导入——用户手里就是一个文件一个账号，
+//     不会替网关分好类。没有对应版本的平台时该账号失败，其它账号照常导入。
+//  2. **同一 uid 重复导入 = 更新，不堆重复 Key**：登录态文件是会轮换的，
+//     重新导入应当是换 token。匹配只看 uid 不看 domain——重新登录后 domain
+//     也可能变，身份是 uid。更新时顺手清掉冷却与 last_error：留着旧账会让
+//     账号刚导入就先背一个过期的 401 冷却，用户看不出是旧账。
+//  3. **单条失败不拖垮整批**：坏条目不 return，记 failed 继续下一条。
+app.post('/api/providers/import-workbuddy-json', api(async (req, res) => {
+  const entries = Array.isArray(req.body?.entries) ? req.body.entries : []
+  if (entries.length === 0) {
+    return res.status(400).json({ error: { message: 'entries 不能为空：至少导入一个账号' } })
+  }
+  // 目标平台按「版本」分组：workbuddy_region 建平台时就定死了（缺省按国内版）。
+  // 一个版本有多个平台时取第一个启用的——多平台是用户自己的编排，导入只认
+  // 第一个，结果里写明落点，用户看得见自己导去了哪。
+  const wbPlatforms = state.providers.filter((p) => p.protocol === 'workbuddy-oauth' && p.enabled)
+  const providerFor = (region) => wbPlatforms.find((p) => (p.workbuddy_region === 'intl' ? 'intl' : 'cn') === region) || null
+
+  const results = []
+  let added = 0
+  let updated = 0
+  for (const entry of entries) {
+    const access_token = String(entry?.access_token || '').trim()
+    const uid = String(entry?.uid || '').trim()
+    if (!access_token || !uid) {
+      results.push({ status: 'failed', error: '读不到 access_token 或 uid，请确认导入的是完整的登录态文件' })
+      continue
+    }
+    const domain = String(entry?.domain || '').trim()
+    const realm = workbuddyRealmFor(domain)
+    const region = realm === 'cn' ? 'cn' : 'intl'
+    const target = providerFor(region)
+    if (!target) {
+      results.push({
+        status: 'failed', realm, uid,
+        error: region === 'intl' ? '没有可用的国际版 WorkBuddy 平台（请先创建一个）' : '没有可用的国内版 WorkBuddy 平台（请先创建一个）'
+      })
+      continue
+    }
+    const expiresIn = Number(entry?.expires_in)
+    const expires_at = Number.isFinite(expiresIn) && expiresIn > 0 ? Date.now() + expiresIn * 1000 : 0
+    const refresh_token = String(entry?.refresh_token || '').trim()
+
+    const existing = (target.keys || []).find(
+      (k) => k.type === 'oauth' && k.provider === 'workbuddy' && String(k.uid || '') === uid
+    )
+    if (existing) {
+      existing.access_token = access_token
+      if (refresh_token) existing.refresh_token = refresh_token
+      if (domain) existing.domain = domain
+      if (expires_at) existing.expires_at = expires_at
+      if (entry?.name) existing.name = String(entry.name)
+      // 新 token 到位，旧的失败记录与冷却一并清零：留着会让账号刚导入
+      // 就先背一个过期的 401 冷却，用户看不出是旧账。
+      existing.cooldown_until = 0
+      existing.last_error = null
+      existing.last_error_at = null
+      updated++
+      results.push({ status: 'updated', realm, provider: target.name, provider_id: target.id, uid, name: existing.name })
+      continue
+    }
+
+    const key = {
+      id: genId(),
+      type: 'oauth',
+      provider: 'workbuddy',
+      name: String(entry?.name || '').trim() || `WorkBuddy 账号 ${(target.keys || []).length + 1}`,
+      enabled: true,
+      cooldown_until: 0,
+      last_error: null,
+      last_error_at: null,
+      created_at: Date.now(),
+      access_token,
+      token_type: 'Bearer',
+      uid
+    }
+    if (refresh_token) key.refresh_token = refresh_token
+    if (domain) key.domain = domain
+    if (expires_at) key.expires_at = expires_at
+    target.keys = target.keys || []
+    target.keys.push(key)
+    added++
+    results.push({ status: 'added', realm, provider: target.name, provider_id: target.id, uid, name: key.name })
+  }
+  if (added + updated > 0) persistImmediate()
+  const failed = results.filter((r) => r.status === 'failed').length
+  addLog({ type: 'system', detail: `WorkBuddy 登录态 JSON 导入：新增 ${added}、更新 ${updated}、失败 ${failed}` })
+  res.json({ results, added, updated, failed })
+}))
 
 app.post('/api/providers/:id/keys/:keyId/reset', (req, res) => {
   const p = getProvider(req.params.id)

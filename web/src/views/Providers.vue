@@ -84,6 +84,7 @@
                   <span class="section-title">{{ isOAuthProvider(p) ? '订阅账号' : 'API Keys' }} · {{ p.keys.length }}</span>
                   <div class="head-actions">
                     <template v-if="isOAuthProvider(p)">
+                      <el-button v-if="isWorkbuddyProvider(p)" size="small" plain @click="openWbJsonDialog(p)">导入 JSON</el-button>
                       <el-button size="small" plain @click="openImportCredentialDialog(p)">导入 Token</el-button>
                       <el-button size="small" plain @click="openAuthDialog(p)">授权 {{ authLabel(p) }} 账号</el-button>
                     </template>
@@ -594,6 +595,64 @@
       <template #footer>
         <el-button @click="importDialog = false">取消</el-button>
         <el-button type="primary" :loading="importingCred" @click="saveImportCredential">导入</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- WorkBuddy 登录态 JSON 批量导入。国内版/国际版两个平台共用同一个入口：
+         账号归哪个平台由它自己的域名决定，不是由用户从哪个平台点进来决定——
+         用户手里就是一个文件一个账号，不会替网关分好类。 -->
+    <el-dialog v-model="wbJsonDialog" title="导入 WorkBuddy 登录态 JSON" width="680px" :close-on-click-modal="false">
+      <div class="grok-intro">
+        <p>粘贴或上传 CodeBuddy CLI 的登录态文件 <code>workbuddy-&lt;uid&gt;.json</code>，单个账号或账号数组都可以，uid、realm、token 网关自己解析。</p>
+        <p>
+          按每个账号自己的域名分流：<span class="badge realm-cn">国内</span>进国内版平台，<span class="badge realm-intl">国际</span><span class="badge realm-global">全球</span>进国际版平台——混着两个域的数组也能一次导入。
+          同一账号重复导入会更新 token，不会堆出重复 Key；没有对应版本的平台时该账号失败，其它账号不受影响。
+        </p>
+      </div>
+      <div class="wb-json-toolbar">
+        <el-button size="small" plain @click="wbJsonFileInput?.click()">选择 .json 文件</el-button>
+        <input ref="wbJsonFileInput" type="file" accept=".json,.txt" multiple style="display: none" @change="onWbJsonFiles" />
+        <span v-if="wbJsonFiles.length" class="wb-json-files">{{ wbJsonFiles.join('、') }}</span>
+      </div>
+      <el-input
+        v-model="wbJsonText"
+        type="textarea"
+        :rows="5"
+        placeholder='也可以直接粘贴：[{"auth":{"accessToken":"...","domain":"workbuddy.ai"},"account":{"uid":"..."}}]'
+      />
+      <div class="wb-json-actions">
+        <el-button size="small" @click="parseWbJsonText" :disabled="!wbJsonText.trim()">解析粘贴内容</el-button>
+        <el-button v-if="wbJsonEntries.length" size="small" text type="danger" @click="wbJsonEntries = []">清空列表</el-button>
+      </div>
+      <div v-if="wbJsonParseError" class="wb-json-error">{{ wbJsonParseError }}</div>
+      <div v-if="wbJsonEntries.length" class="wb-json-preview">
+        <div class="section-title">解析出 {{ wbJsonEntries.length }} 个账号</div>
+        <div v-for="(e, i) in wbJsonEntries" :key="i" class="wb-json-entry">
+          <span class="badge" :class="wbRealmBadge(e.realm).cls">{{ wbRealmBadge(e.realm).label }}</span>
+          <span class="key-name">{{ e.name || e.uid.slice(0, 8) + '…' }}</span>
+          <span class="mask">{{ e.domain || '域名未填（按国内版处理）' }}</span>
+          <span class="mask">token {{ e.access_token.slice(0, 6) }}…{{ e.access_token.slice(-4) }}</span>
+          <el-button size="small" text type="danger" @click="wbJsonEntries.splice(i, 1)">移除</el-button>
+        </div>
+      </div>
+      <div v-if="wbJsonResults" class="wb-json-results">
+        <div class="section-title">
+          导入结果：新增 {{ wbJsonResults.added }} · 更新 {{ wbJsonResults.updated }} · 失败 {{ wbJsonResults.failed }}
+        </div>
+        <div v-for="(r, i) in wbJsonResults.results" :key="i" class="wb-json-entry">
+          <span class="badge" :class="r.status === 'failed' ? 'badge-red' : (r.status === 'updated' ? 'badge-amber' : 'badge-green')">
+            {{ r.status === 'added' ? '已新增' : r.status === 'updated' ? '已更新' : '失败' }}
+          </span>
+          <span class="key-name">{{ r.name || (r.uid || '').slice(0, 8) }}</span>
+          <span class="mask">{{ r.provider || wbRealmBadge(r.realm).label || '' }}</span>
+          <span v-if="r.error" class="wb-json-error">{{ r.error }}</span>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="wbJsonDialog = false">关闭</el-button>
+        <el-button type="primary" :loading="wbJsonImporting" :disabled="!wbJsonEntries.length" @click="submitWbJsonImport">
+          导入 {{ wbJsonEntries.length }} 个账号
+        </el-button>
       </template>
     </el-dialog>
   </div>
@@ -1299,6 +1358,27 @@ function openImportCredentialDialog(p) {
 // 与服务端 workbuddy-oauth.js 的 parseWorkbuddyAuthFile 同源：解析 CodeBuddy CLI
 // 的登录态文件。字段是驼峰，网关内部统一用下划线。嵌套（CLI 实际写盘的形状）
 // 与扁平两种都收，用户手工改过文件也不至于认不出来。
+// 拆成对象版 + 文本版两层：批量导入要吃「一个或一串」登录态，对象版是共用的
+// 那一半，文本版只是包一层 JSON.parse。
+function parseWorkbuddyAuthObject(obj) {
+  if (!obj || typeof obj !== 'object') return null
+  const auth = obj.auth || obj
+  const account = obj.account || obj
+  const access_token = auth.accessToken || auth.access_token || ''
+  const uid = account.uid || account.UID || auth.uid || ''
+  if (!access_token || !uid) return null
+  // 昵称：文件里常为空，真值在 access_token 的 JWT 声明里（与服务端一致）
+  const nickname = account.nickname || jwtClaim(access_token, 'nickname') || jwtClaim(access_token, 'preferred_username') || ''
+  return {
+    access_token,
+    refresh_token: auth.refreshToken || auth.refresh_token || '',
+    uid,
+    domain: auth.domain || account.domain || '',
+    expires_at: auth.expiresAt || auth.expires_at || 0,
+    name: nickname
+  }
+}
+
 function parseWorkbuddyAuthFile(raw) {
   let obj
   try {
@@ -1306,17 +1386,135 @@ function parseWorkbuddyAuthFile(raw) {
   } catch {
     return null
   }
-  const auth = obj.auth || obj
-  const account = obj.account || obj
-  const access_token = auth.accessToken || auth.access_token || ''
-  const uid = account.uid || account.UID || auth.uid || ''
-  if (!access_token || !uid) return null
-  return {
-    access_token,
-    refresh_token: auth.refreshToken || auth.refresh_token || '',
-    uid,
-    domain: auth.domain || account.domain || '',
-    expires_at: auth.expiresAt || auth.expires_at || 0
+  return parseWorkbuddyAuthObject(obj)
+}
+
+// 读 JWT 里的一个字符串声明（不验签，仅用于展示昵称）
+function jwtClaim(token, key) {
+  try {
+    const part = String(token).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')
+    const padded = part + '='.repeat((4 - (part.length % 4)) % 4)
+    const payload = JSON.parse(atob(padded))
+    const v = payload?.[key]
+    return typeof v === 'string' ? v.trim() : ''
+  } catch {
+    return ''
+  }
+}
+
+// 批量版：一个账号（对象）或一串账号（数组）都收。坏条目跳过并报出序号，
+// 不让一个文件里的坏账号拖垮整批——用户手里就是一个文件一个账号，格式
+// 五花八门，逐条容错比整体拒绝好用。
+function parseWorkbuddyAuthEntries(raw) {
+  let obj
+  try {
+    obj = JSON.parse(String(raw || '').trim())
+  } catch {
+    return { entries: [], error: '不是合法的 JSON，请确认粘贴/上传的是登录态文件内容' }
+  }
+  const list = Array.isArray(obj) ? obj : [obj]
+  if (list.length === 0) return { entries: [], error: 'JSON 里没有账号' }
+  const entries = []
+  const bad = []
+  list.forEach((item, i) => {
+    const parsed = parseWorkbuddyAuthObject(item)
+    if (!parsed) {
+      bad.push(i + 1)
+      return
+    }
+    parsed.realm = wbEntryRealm(parsed.domain)
+    entries.push(parsed)
+  })
+  return { entries, error: bad.length ? `第 ${bad.join('、')} 条读不到 access_token 与 uid，已跳过` : '' }
+}
+
+// 与服务端 workbuddyRealmFor 同源：域名归 realm，空域名按国内兜底。
+// 分流是路由问题，服务端会按同一判据再判一次（见 import-workbuddy-json），
+// 前端这里只用于预览展示。
+function wbEntryRealm(domain) {
+  const d = String(domain || '').toLowerCase()
+  if (d.includes('workbuddy.ai')) return 'global'
+  if (d.includes('codebuddy.ai')) return 'intl'
+  return 'cn'
+}
+
+function wbRealmBadge(realm) {
+  if (realm === 'global') return { label: '全球', cls: 'realm-global' }
+  if (realm === 'intl') return { label: '国际', cls: 'realm-intl' }
+  return { label: '国内', cls: 'realm-cn' }
+}
+
+// WorkBuddy 登录态 JSON 批量导入。分流（域名→平台）与去重（同 uid 更新）
+// 都在服务端做，前端只管解析预览与展示结果。
+const wbJsonDialog = ref(false)
+const wbJsonImporting = ref(false)
+const wbJsonText = ref('')
+const wbJsonEntries = ref([])
+const wbJsonFiles = ref([])
+const wbJsonFileInput = ref(null)
+const wbJsonParseError = ref('')
+const wbJsonResults = ref(null)
+
+function openWbJsonDialog() {
+  wbJsonText.value = ''
+  wbJsonEntries.value = []
+  wbJsonFiles.value = []
+  wbJsonParseError.value = ''
+  wbJsonResults.value = null
+  if (wbJsonFileInput.value) wbJsonFileInput.value.value = ''
+  wbJsonDialog.value = true
+}
+
+function parseWbJsonText() {
+  const { entries, error } = parseWorkbuddyAuthEntries(wbJsonText.value)
+  wbJsonParseError.value = error
+  if (entries.length) wbJsonEntries.value.push(...entries)
+}
+
+// 多文件：逐个读、逐个解析，坏文件只报错不影响好文件。读完全部清掉 input 的
+// value，否则同一个文件第二次选不触发 change。
+async function onWbJsonFiles(e) {
+  const files = [...(e.target.files || [])]
+  const errors = []
+  for (const f of files) {
+    try {
+      const { entries, error } = parseWorkbuddyAuthEntries(await f.text())
+      if (error) errors.push(`${f.name}：${error}`)
+      wbJsonEntries.value.push(...entries)
+    } catch {
+      errors.push(`${f.name}：读取失败`)
+    }
+  }
+  wbJsonFiles.value = files.map((f) => f.name)
+  wbJsonParseError.value = errors.join('；')
+  e.target.value = ''
+}
+
+async function submitWbJsonImport() {
+  if (!wbJsonEntries.value.length) return
+  wbJsonImporting.value = true
+  try {
+    // 字段形状与 addKey 的 oauth 分支对齐（expires_in 是剩余秒数）
+    const entries = wbJsonEntries.value.map((e) => ({
+      name: e.name || '',
+      access_token: e.access_token,
+      refresh_token: e.refresh_token || '',
+      uid: e.uid,
+      domain: e.domain || '',
+      expires_in: e.expires_at ? Math.max(0, Math.floor((e.expires_at - Date.now()) / 1000)) : 0
+    }))
+    const r = await api.importWorkbuddyJson({ entries })
+    wbJsonResults.value = r
+    if (r.added + r.updated > 0) {
+      ElMessage.success(`导入完成：新增 ${r.added}、更新 ${r.updated}${r.failed ? `、失败 ${r.failed}` : ''}`)
+      await load()
+    } else {
+      ElMessage.warning('没有账号导入成功，请看下方原因')
+    }
+  } catch (err) {
+    ElMessage.error(err?.message || '导入失败')
+  } finally {
+    wbJsonImporting.value = false
   }
 }
 
@@ -1833,5 +2031,53 @@ onBeforeUnmount(() => {
   .tool-row { flex-wrap: wrap; }
   .tool-actions { margin-left: 0; flex-basis: 100%; }
   .tool-actions .el-button { flex: 1; }
+}
+
+/* WorkBuddy 登录态 JSON 批量导入：工具条 / 预览列表 / 结果列表。
+   条目布局复用 key-item 的视觉语法（徽章 + 名称 + 灰色备注 + 尾部操作），
+   让「预览」和「结果」看起来就是即将进入 / 已经进入 Key 列表的那些行。 */
+.wb-json-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0 10px;
+}
+.wb-json-files {
+  font-size: 12.5px;
+  color: var(--ink-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wb-json-actions {
+  display: flex;
+  gap: 8px;
+  margin: 10px 0 4px;
+}
+.wb-json-preview,
+.wb-json-results {
+  margin-top: 12px;
+  border-top: 1px solid var(--rule-soft);
+  padding-top: 10px;
+}
+.wb-json-preview .section-title,
+.wb-json-results .section-title {
+  margin-bottom: 8px;
+}
+.wb-json-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+.wb-json-entry .key-name { font-weight: 600; }
+.wb-json-entry .mask { font-size: 12px; }
+.wb-json-error {
+  width: 100%;
+  font-size: 12.5px;
+  color: var(--danger, #c0392b);
+  margin-top: 2px;
 }
 </style>
