@@ -207,6 +207,94 @@ test('持续 400 时最多重试一次，并把上游 400 透传给客户端', a
   assert.equal(res.json().error.message, 'bad request body', '上游错误体应透传')
 })
 
+// 2026-10-21 线上故障：国内版（copilot.tencent.com）放 11128 渠道校验，
+// 灰度命中时单个请求连撞多个账号，只换一个 Key 挡不住，400 直接透传给客户端。
+test('上游账号级拒绝 11128 连换多个 Key，换到好 Key 后正常返回', async (t) => {
+  let calls = 0
+  const { server, port } = await startUpstream(({ res }) => {
+    calls++
+    if (calls <= 3) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({
+        code: 11128, msg: 'request illegal',
+        displayMsg: { zh: '请求被拦截，请重新发送' },
+        displayTips: { zh: '这次调用没通过渠道校验，可能不是官方客户端发出的' }
+      }))
+      return
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }))
+  })
+  t.after(() => server.close())
+
+  const keys = [makeKey('a'), makeKey('b'), makeKey('c'), makeKey('d')]
+  const provider = makeProvider({ port, keys })
+  const res = fakeRes()
+  await handleChat({ body: { model: provider.testModel, messages: [{ role: 'user', content: 'hi' }] } }, res)
+
+  assert.equal(calls, 4, '11128 应连换 3 个 Key，第 4 个成功')
+  assert.equal(res.statusCode, 200, '换到好 Key 后应正常返回')
+  assert.equal(res.json().choices[0].message.content, 'ok')
+  const rejected = keys.filter((k) => k.last_error && k.last_error.includes('11128'))
+  assert.equal(rejected.length, 3, '每个被 11128 拒的 Key 都应记下真实 code，而不是干巴巴的 HTTP 400')
+  assert.ok(provider.keys.every((k) => !k.cooldown_until), '400 不应给 Key 施加冷却')
+})
+
+test('账号级拒绝 11140（风控）同样连换 Key，撞满预算后透传上游错误体', async (t) => {
+  let calls = 0
+  const { server, port } = await startUpstream(({ res }) => {
+    calls++
+    res.writeHead(400, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({
+      code: 11140, msg: 'request illegal',
+      displayMsg: { zh: '账号存在异常行为，已被限制使用' }
+    }))
+  })
+  t.after(() => server.close())
+
+  const keys = [makeKey('a'), makeKey('b'), makeKey('c'), makeKey('d'), makeKey('e')]
+  const provider = makeProvider({ port, keys })
+  const res = fakeRes()
+  await handleChat({ body: { model: provider.testModel, messages: [{ role: 'user', content: 'hi' }] } }, res)
+
+  // 1 次首发 + 3 次账号级拒绝重试预算，第 5 个 Key 不再尝试
+  assert.equal(calls, 4, '账号级拒绝最多换 3 个 Key，之后直接透传')
+  assert.equal(res.statusCode, 400, '全线拒绝时应透传上游状态')
+  assert.equal(res.json().code, 11140, '上游错误体应原样透传，客户端看得到真实 code')
+  const rejected = keys.filter((k) => k.last_error && k.last_error.includes('11140'))
+  assert.equal(rejected.length, 4, '每个被试的 Key 都应记下 11140')
+})
+
+test('账号级拒绝后跟着普通 400，不读第二次错误体也继续换 Key', async (t) => {
+  // 混合批次：第一个 Key 被 11128 拒，第二个 Key 返普通 400（无 code 信封），
+  // 第三个 Key 成功。第二轮不能再读错误体（保住透传路径的流），沿用策略重试。
+  let calls = 0
+  const { server, port } = await startUpstream(({ res }) => {
+    calls++
+    if (calls === 1) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ code: 11128, msg: 'request illegal' }))
+      return
+    }
+    if (calls === 2) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: { message: 'plain bad request' } }))
+      return
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }))
+  })
+  t.after(() => server.close())
+
+  const provider = makeProvider({ port, keys: [makeKey('a'), makeKey('b'), makeKey('c')] })
+  const res = fakeRes()
+  await handleChat({ body: { model: provider.testModel, messages: [{ role: 'user', content: 'hi' }] } }, res)
+
+  assert.equal(calls, 3, '11128 后的普通 400 也应继续换 Key，直到成功或撞满预算')
+  assert.equal(res.statusCode, 200)
+  assert.equal(res.json().choices[0].message.content, 'ok')
+})
+
 test('上游拒绝 temperature 时剥掉该字段重试，客户端不必迁就模型改参数', async (t) => {
   // 商汤 kimi-k3：temperature 只允许 1，面板默认发 0.7 会被直接 400 拒掉。
   let calls = 0

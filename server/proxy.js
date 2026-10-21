@@ -141,6 +141,17 @@ const COOLDOWN_MS = {
 // 上游抖动时若已有一半以上 Key 在冷却，剩余冷却时间压到很短，避免整站被一次性冻死
 const UPSTREAM_CROWD_COOLDOWN_MS = 5000
 
+// 上游「账号级拒绝」错误码（HTTP 400 信封里的 code）：
+//   11128 渠道校验没通过（「可能不是官方客户端发出的」）
+//   11140 账号被风控（「账号存在异常行为，已被限制使用」）
+// 2026-10-21 实测：国内版（copilot.tencent.com）也开始放 11128 闸门，灰度
+// 命中时单个请求会连续撞上多个账号（线上复现：连撞后把 400 透传给了客户端）。
+// 这类错换 Key 大概率就好——闸门/风控是按账号挑的，不换就只能干等透传。
+const UPSTREAM_ACCOUNT_REJECT_CODES = new Set([11128, 11140])
+// 账号级拒绝最多换几个 Key：灰度按批次挑账号，3 个足够跨过一批；
+// 撞满还失败说明是全线闸门，换了也白换，直接透传让客户端看到真实错误。
+const ACCOUNT_REJECT_RETRY_MAX = 3
+
 // 超时分两段：连接阶段（含等待响应头）用短超时快速失败，
 // 拿到响应后切换为长超时。此前连接与总时长共用一个 30 分钟超时，
 // 上游半开连接时客户端会一直挂到超时，期间该 Key 也不会被冷却。
@@ -972,6 +983,10 @@ async function forwardWithFailover(provider, kind, body, res) {
   const authRetried = new Set()
   // 记录实际使用的 Key 名称，供日志使用（不再通过响应头暴露给客户端）
   let usedKeyName = null
+  // 账号级拒绝（11128/11140）的 code/msg：本轮第一次读到后存到这里，
+  // 后续轮不再读上游错误体（要保住透传路径的响应流），沿用这组值
+  let rejectCode = null
+  let rejectMsg = ''
   // 生图不走对话的时间预算：图片生成动辄几十秒甚至数分钟，
   // 用 token 数推算时长对它毫无意义，直接给独立的固定预算。
   const totalTimeoutMs = kind === 'images' ? IMAGES_TOTAL_TIMEOUT_MS : jsonTotalTimeout(body?.max_tokens, body?.stream)
@@ -1053,29 +1068,67 @@ async function forwardWithFailover(provider, kind, body, res) {
       // 特殊情形：不同模型的 max_tokens 上限不同（商汤 65536，有的模型更小），
       // 65536 的统一收敛可能仍超个别模型上限。若上游 400 报错里带范围
       // （"should be in [1, N]"），按该范围重新收敛 max_tokens 后再重试一次。
-      if (resp.status === 400 && attempts.length < 1) {
+      //
+      // 账号级拒绝（11128/11140）例外：换 Key 大概率就好，重试预算放宽到
+      // ACCOUNT_REJECT_RETRY_MAX 次，并把上游 code/msg 写进每个被拒 Key 的
+      // last_error（不冷却）——只记「HTTP 400」的话 11128 与 11140 在界面上
+      // 无法区分，排查时无从下手。错误体只在本轮第一次读（判断 + 记录 + 自适应
+      // 都用它），读到的 code/msg 存到循环外供后续轮沿用：同一批闸门/风控
+      // 拒绝的 code 相同，不必每轮再读。后续轮不读 body，预算用尽那次、
+      // 以及普通 400 的第二次，响应流都没被消费过，下面 started=true 的
+      // 透传路径（流式/非流式）行为与原逻辑完全一致。
+      const sawAccountReject = attempts.some((a) => a.includes('账号级拒绝'))
+      const rejectTried = attempts.filter((a) => a.includes('账号级拒绝')).length
+      const rejectBudgetLeft = rejectTried < ACCOUNT_REJECT_RETRY_MAX
+      if (resp.status === 400 && (attempts.length < 1 || (sawAccountReject && rejectBudgetLeft))) {
+        const firstRead = !sawAccountReject
+        let errText = ''
+        if (firstRead) {
+          try {
+            let readTimer
+            errText = await Promise.race([
+              resp.text(),
+              new Promise((_, rej) => { readTimer = setTimeout(() => rej(new Error('读取错误体超时')), 5000) })
+            ]).finally(() => clearTimeout(readTimer))
+            try {
+              const ej = JSON.parse(errText)
+              const code = Number(ej?.code) || null
+              if (UPSTREAM_ACCOUNT_REJECT_CODES.has(code)) {
+                rejectCode = code
+                rejectMsg = String(ej?.msg || ej?.displayMsg?.zh || '')
+              }
+            } catch { /* 非 JSON 错误体，按普通 400 处理 */ }
+          } catch { /* 读不到错误体则按普通瞬时 400 重试 */ }
+        }
+        const accountReject = firstRead
+          ? rejectCode !== null
+          : true // 上一轮已确认是账号级拒绝，本轮沿用同样策略继续换 Key
+        if (accountReject) {
+          // 真实原因落到这个 Key 上（不冷却：400 不是凭据失效，下一轮还会轮到它，
+          // 持续命中时界面上能看到，而不是每次都被覆盖成干巴巴的「HTTP 400」）
+          key.last_error = `HTTP 400 code=${rejectCode} ${rejectMsg}`.slice(0, 200)
+          key.last_error_at = Date.now()
+          persist()
+          const codeHint = firstRead ? ` code=${rejectCode}` : ''
+          attempts.push(`${key.name || key.id.slice(0, 8)}: HTTP 400（账号级拒绝${codeHint}，换 Key 重试）`)
+          bumpFailover()
+          continue
+        }
         let clamped = null
         let droppedTemperature = false
-        try {
-          let readTimer
-          const text = await Promise.race([
-            resp.text(),
-            new Promise((_, rej) => { readTimer = setTimeout(() => rej(new Error('读取错误体超时')), 5000) })
-          ]).finally(() => clearTimeout(readTimer))
-          const m = text?.match(/should be in\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]/)
-          const cur = body?.max_tokens
-          if (m && Number.isFinite(cur)) {
-            clamped = Math.min(Math.max(Math.floor(cur), +m[1]), +m[2])
-            if (clamped !== cur) body.max_tokens = clamped
-          }
-          // 有的模型只接受 temperature=1（商汤 kimi-k3 直接 400 拒掉其他取值，
-          // 而测试面板默认发 0.7）。剥掉该字段再试一次——省略时上游用自身默认值，
-          // 实测 kimi-k3 放行。客户端无感知，不必为了迁就单个模型改自己的参数。
-          if (body && typeof body.temperature !== 'undefined' && TEMPERATURE_REJECTED_RE.test(text || '')) {
-            delete body.temperature
-            droppedTemperature = true
-          }
-        } catch { /* 读不到错误体则按普通瞬时 400 重试 */ }
+        const m = errText?.match(/should be in\s*\[\s*(\d+)\s*,\s*(\d+)\s*\]/)
+        const cur = body?.max_tokens
+        if (m && Number.isFinite(cur)) {
+          clamped = Math.min(Math.max(Math.floor(cur), +m[1]), +m[2])
+          if (clamped !== cur) body.max_tokens = clamped
+        }
+        // 有的模型只接受 temperature=1（商汤 kimi-k3 直接 400 拒掉其他取值，
+        // 而测试面板默认发 0.7）。剥掉该字段再试一次——省略时上游用自身默认值，
+        // 实测 kimi-k3 放行。客户端无感知，不必为了迁就单个模型改自己的参数。
+        if (body && typeof body.temperature !== 'undefined' && TEMPERATURE_REJECTED_RE.test(errText || '')) {
+          delete body.temperature
+          droppedTemperature = true
+        }
         if (clamped != null) {
           console.warn(`[max_tokens 自适应] 模型 ${body?.model} 上限 ${clamped}，按上游报错范围收敛后重试`)
         }
@@ -1092,6 +1145,13 @@ async function forwardWithFailover(provider, kind, body, res) {
         attempts.push(`${key.name || key.id.slice(0, 8)}: HTTP 400${retryReason}`)
         bumpFailover()
         continue
+      }
+      // 账号级拒绝撞满预算：透传给客户端前，把真实原因也记到这个 Key 上
+      // （code/msg 沿用之前轮次读到的值，不再读本次 body——透传路径的响应流要保住）
+      if (resp.status === 400 && sawAccountReject && rejectCode !== null) {
+        key.last_error = `HTTP 400 code=${rejectCode} ${rejectMsg}`.slice(0, 200)
+        key.last_error_at = Date.now()
+        persist()
       }
       started = true
       usedKeyName = key.name || key.id.slice(0, 8)
