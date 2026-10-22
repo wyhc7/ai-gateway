@@ -283,6 +283,66 @@ describe('内容指纹改写接入', () => {
   })
 })
 
+describe('CN 整段 prompt 匹配闸门：零宽打散', () => {
+  // 2026-10-22/23 实测（见 workbuddy-lane.js 的长注释）：国内版按 n-gram
+  // 召回率把 system 与已知客户端 prompt 库做整段匹配，覆盖率过阈值即 11128。
+  // 修法是 CN realm 下给所有 system 消息插零宽字符打碎 n-gram。
+  // 这组测试钉住三件事：CN 才打散、打散可逆（剥掉零宽=原文）、其他角色不动。
+  const ZWC = '\u200B'
+  const strip = (s) => s.split(ZWC).join('')
+
+  test('realm=cn 时 system 被打散，剥掉零宽字符后等于原文', () => {
+    const sys = '你是客服助手，负责回答用户问题。'.repeat(5)
+    const out = shapeWorkbuddyBody({
+      model: 'glm-5.3',
+      messages: [{ role: 'system', content: sys }, { role: 'user', content: 'hi' }]
+    }, null, 'cn')
+    assert.equal(out.messages[0].role, 'system')
+    assert.equal(out.messages[0].content.includes(ZWC), true, 'CN system 必须插零宽字符')
+    assert.equal(strip(out.messages[0].content), sys, '剥掉零宽后必须等于原文（语义零损）')
+    assert.equal(out.messages[1].content, 'hi', 'user 消息不动')
+  })
+
+  test('realm 非 cn（global/null）时完全不打散，历史行为不变', () => {
+    const sys = '你是客服助手。'.repeat(10)
+    for (const realm of [null, undefined, 'global', 'intl']) {
+      const out = shapeWorkbuddyBody({
+        model: 'glm-5.3',
+        messages: [{ role: 'system', content: sys }, { role: 'user', content: 'hi' }]
+      }, null, realm)
+      assert.equal(out.messages[0].content.includes(ZWC), false, `realm=${realm} 不应插零宽字符`)
+    }
+  })
+
+  test('打散落在指纹改写之后：输出的指纹是改写后的句子', () => {
+    const out = shapeWorkbuddyBody({
+      model: 'glm-5.3',
+      messages: [
+        { role: 'system', content: 'Main branch (you will usually use this for PRs): master' },
+        { role: 'user', content: 'hi' }
+      ]
+    }, null, 'cn')
+    const stripped = strip(out.messages[0].content)
+    assert.match(stripped, /PRs usually go here/, '指纹先被改写，再被打散')
+    assert.equal(stripped.includes('usually use this'), false)
+  })
+
+  test('多段形态：只打散 text 段，其他段原样保留', () => {
+    const img = { type: 'image_url', image_url: { url: 'data:image/png;base64,AAA' } }
+    const out = shapeWorkbuddyBody({
+      model: 'glm-5.3',
+      messages: [
+        { role: 'system', content: [{ type: 'text', text: '第一段系统提示'.repeat(4) }, img] },
+        { role: 'user', content: 'hi' }
+      ]
+    }, null, 'cn')
+    const parts = out.messages[0].content
+    assert.equal(parts[0].text.includes(ZWC), true)
+    assert.equal(strip(parts[0].text), '第一段系统提示'.repeat(4))
+    assert.equal(parts[1], img, '非 text 段不碰')
+  })
+})
+
 describe('模型清单', () => {
   test('不再内置写死清单：模型只能来自上游', () => {
     // 曾经这里有一份写死的 18 个模型。它既漏掉了上游新增的型号，又留着

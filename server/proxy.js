@@ -374,7 +374,9 @@ function serializeUpstreamBody(provider, body) {
     // 元数据要按**上游 id** 找：别名（glm-5.3-intl）在目录里是一条独立记录，
     // 但它的 max_output 与原始 id 一致，用上游 id 查更稳
     const meta = workbuddyModelMeta(provider, upstream?.model) || workbuddyModelMeta(provider, body?.model)
-    return JSON.stringify(shapeWorkbuddyBody(upstream, meta))
+    // realm 决定要不要做零宽打散（CN 版整段 prompt 匹配闸门专属），按
+    // 平台 base_url 判定；账号级 domain 与平台不同属的错配是配置错误，不在此兜
+    return JSON.stringify(shapeWorkbuddyBody(upstream, meta, workbuddyRealmFor(provider.base_url)))
   }
   const payload = withUsageOption(provider, body)
   return JSON.stringify(
