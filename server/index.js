@@ -71,7 +71,10 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const WEB_DIST = process.env.WEB_DIST || join(__dirname, '..', 'web', 'dist')
 const WEB_DIST_ROOT = resolve(WEB_DIST)
 
-const CALL_PLAN_FIELDS = ['auth_type', 'auth_header', 'auth_prefix', 'auth_query_param', 'chat_path', 'models_path', 'models_method']
+// images_path 必须在内：只生图的平台（chatgpt2api 挂反代子路径、或上游把生图放在
+// /v1/image/generations 这类非标准位置）全靠它把生图请求指对地方，漏掉它
+// callPlan 只会退回协议的默认 /images/generations，请求直接 404。
+const CALL_PLAN_FIELDS = ['auth_type', 'auth_header', 'auth_prefix', 'auth_query_param', 'chat_path', 'images_path', 'models_path', 'models_method']
 
 // 常数时间比较密钥，防止时序侧信道攻击（直接比较长度差异也会泄露信息，先哈希成等长再比较）
 function safeEqual(a, b) {

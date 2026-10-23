@@ -23,7 +23,10 @@ export const TEMPLATES = [
   // ChatGPT 网页/手机版账号：经 chatgpt2api 反向代理转成 OpenAI 兼容 /v1。
   // 凭据在 chatgpt2api 侧以 access_token 导入（手机已登录号可绕过 device-code 的手机号验证），
   // 网关只做统一调度与负载均衡。chatgpt2api 默认 API 端口 3000，部署改端口时同步改 base_url。
-  { id: 'chatgpt-web', name: 'ChatGPT 网页/手机版（chatgpt2api）', group: '本地中转', protocol: 'openai-chat', base_url: 'http://127.0.0.1:3000/v1', default_models: ['gpt-5', 'gpt-5-mini', 'gpt-5-1', 'gpt-5-2', 'gpt-5-3', 'gpt-5-3-mini', 'gpt-image-2'] },
+  // 只接生图时用「只生图」卡：模型清单里只有生图模型，避免客户端拉到一堆对话模型后把图片请求打到 chat 通道。
+  // images_path 显式写全，兼容把 chatgpt2api 挂在反代子路径（https://x.example.com/gpt/v1）的场景。
+  { id: 'chatgpt-image', name: 'ChatGPT 网页版（chatgpt2api）· 只生图', group: '本地中转', protocol: 'openai-chat', base_url: 'http://127.0.0.1:3000/v1', images_path: '/images/generations', default_models: ['gpt-image-2', 'codex-gpt-image-2', 'gpt-image-1'] },
+  { id: 'chatgpt-web', name: 'ChatGPT 网页/手机版（chatgpt2api）', group: '本地中转', protocol: 'openai-chat', base_url: 'http://127.0.0.1:3000/v1', images_path: '/images/generations', default_models: ['gpt-5', 'gpt-5-mini', 'gpt-5-1', 'gpt-5-2', 'gpt-5-3', 'gpt-5-3-mini', 'gpt-image-2', 'codex-gpt-image-2'] },
   // 走官方 OpenAI 兼容端点：鉴权仍是 x-api-key，请求体无需转换即可透传。
   // 直接用原生 /v1/messages 会因缺少 max_tokens、响应结构不同而必然 400。
   { id: 'anthropic', name: 'Anthropic Claude', group: 'Anthropic 格式', protocol: 'anthropic-openai', base_url: 'https://api.anthropic.com/v1' },
