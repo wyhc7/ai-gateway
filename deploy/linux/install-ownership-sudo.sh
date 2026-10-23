@@ -62,14 +62,16 @@ install -m 0440 -o root -g root "$TMP" "$SUDOERS_FILE"
 echo "已写入 $SUDOERS_FILE"
 echo "规则：$USER_NAME ALL=(root) NOPASSWD: $CHOWN_BIN -R $USER_NAME:$USER_NAME $REPO_DIR"
 
-# 立即验证：以服务用户 `sudo -n -l` 不带参数列出该用户被授予的全部命令，
-# 再 grep 这条规则。
+# 立即验证：以服务用户 `sudo -n -l` 列全量，再 grep 这条规则。
 #
-# 不能写 `sudo -l <命令> <参数...>`：那要求参数与规则逐字对应，稍有出入就报
-# "not allowed to run"，把有效规则误判成失效（第一版就栽在这）。
-# 不带参数列全量，只判断"这条 chown 在不在白名单里"，稳定得多。
+# 两处必须注意，第一版各栽了一次：
+# 1) 不能写 `sudo -l <命令> <参数...>`：那要求参数逐字对应，稍有出入就报
+#    "not allowed to run"，把有效规则误判成失效。
+# 2) sudo -l 的输出会把命令里的冒号打印成转义形式 `ai-gateway\:ai-gateway`，
+#    直接 grep `ai-gateway:ai-gateway` 永远匹配不上。
+# 所以这里按 `NOPASSWD:` + chown 路径 + 仓库路径 判断，中间的属主部分用 .* 跳过。
 if su -s /bin/bash "$USER_NAME" -c "sudo -n -l" 2>/dev/null \
-  | grep -q -- "NOPASSWD.*$CHOWN_BIN -R $USER_NAME:$USER_NAME $REPO_DIR"; then
+  | grep -qE "NOPASSWD:.*${CHOWN_BIN} -R .*${REPO_DIR}\$"; then
   echo "验证：免密 sudo 可用 ✅"
 else
   echo "验证：规则未在 sudo -l 输出中命中，请人工检查 ⚠️" >&2
