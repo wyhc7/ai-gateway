@@ -27,6 +27,11 @@ const execFileAsync = promisify(execFile)
 // 服务账号。与 deploy/linux 里的 systemd 单元保持一致，可用环境变量覆盖。
 export const DEFAULT_SERVICE_USER = 'ai-gateway'
 
+// sudo 免密白名单里的命令路径。部署脚本会往 /etc/sudoers.d 写一条
+// 「ai-gateway 可免密执行 chown -R ai-gateway:ai-gateway <仓库>」，
+// 这里的路径必须和那条 NOPASSWD 规则里的完全一致，否则 sudo 会按规则不匹配拒绝。
+export const SUDO_CHOWN = '/usr/bin/chown'
+
 // 扫描深度上限：仓库是有限深度，超过就是不认识的深层产物，不值得为它遍历。
 export const MAX_SCAN_DEPTH = 6
 
@@ -126,40 +131,69 @@ function passwdLines() {
 
 /**
  * 生成修复命令。界面与日志里展示给人看，也方便人工复核后再执行。
- * 不在本模块直接 chown：那需要 root，且属于「改动磁盘状态」的事，
- * 由调用方明确决定要不要做。
  */
 export function chownCommand(root, user = serviceUser()) {
   return `chown -R ${user}:${user} ${root}`
 }
 
+/** 面板里走 sudo 的那条命令（与服务端实际执行的形式一致）。 */
+export function sudoChownCommand(root, user = serviceUser()) {
+  return `sudo -n ${SUDO_CHOWN} -R ${user}:${user} ${root}`
+}
+
 /**
- * 以 root 执行 chown -R。非 root 时返回 { ok:false, reason }，不抛异常
- * —— 体检失败不该把整次更新拦死，只需如实说「修不了，请人工处理」。
+ * 修正属主。
+ *
+ * 三条路径，按权限从高到低：
+ *   1. 自己是 root  → 直接 chown
+ *   2. 不是 root     → 试 `sudo -n`（部署脚本写了 NOPASSWD 白名单才能成）
+ *   3. 都失败        → 不抛异常，返回 not-root 并把命令交给用户
+ *
+ * 第 3 条刻意不抛：体检失败不该把整次更新拦死，多数情况下 git 与 build
+ * 仍然能跑完，让更新先进行比直接中止更有用。
  */
 export async function repairOwnership(root, user = serviceUser()) {
   if (process.platform === 'win32') {
     return { ok: false, reason: 'windows', message: 'Windows 无 POSIX 属主概念，跳过' }
   }
-  if (process.getuid && process.getuid() !== 0) {
-    return {
-      ok: false,
-      reason: 'not-root',
-      message: `当前进程不是 root，无法自动修正属主。请手工执行：${chownCommand(root, user)}`
+  const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
+  const opts = { timeout: 120 * 1000, maxBuffer: 4 * 1024 * 1024, windowsHide: true }
+
+  if (isRoot) {
+    try {
+      await execFileAsync('chown', ['-R', `${user}:${user}`, root], opts)
+      return { ok: true, via: 'root', message: `已把 ${root} 的属主修正为 ${user}:${user}` }
+    } catch (e) {
+      return {
+        ok: false,
+        reason: 'failed',
+        message: `chown 失败：${String(e?.stderr || e?.message || e).slice(0, 500)}`
+      }
     }
   }
+
+  // 非 root：试免密 sudo。-n 是关键，没有它 sudo 会停下来等密码，
+  // 把一次「网页点更新」挂成永久 pending —— 和 git 那侧的 GIT_TERMINAL_PROMPT=0 同理。
   try {
-    await execFileAsync('chown', ['-R', `${user}:${user}`, root], {
-      timeout: 120 * 1000,
-      maxBuffer: 4 * 1024 * 1024,
-      windowsHide: true
-    })
-    return { ok: true, message: `已把 ${root} 的属主修正为 ${user}:${user}` }
+    await execFileAsync('sudo', ['-n', SUDO_CHOWN, '-R', `${user}:${user}`, root], opts)
+    return { ok: true, via: 'sudo', message: `已通过 sudo 把 ${root} 的属主修正为 ${user}:${user}` }
   } catch (e) {
+    const raw = String(e?.stderr || e?.message || e)
+    // sudo 根本没装（容器里常见）：ENOENT，和权限不足要分开说
+    if (e?.code === 'ENOENT') {
+      return {
+        ok: false,
+        reason: 'sudo-missing',
+        message: `没装 sudo，无法自动修正属主。请手工执行：${chownCommand(root, user)}`
+      }
+    }
+    const needsPasswd = /password is required|a terminal is required/i.test(raw)
     return {
       ok: false,
-      reason: 'failed',
-      message: `chown 失败：${String(e?.stderr || e?.message || e).slice(0, 500)}`
+      reason: needsPasswd ? 'sudo-needs-password' : 'sudo-denied',
+      message: needsPasswd
+        ? `没有免密 sudo 权限，无法自动修正属主。请手工执行：${chownCommand(root, user)}；或按 docs/DEPLOY-OWNERSHIP.md 配好白名单`
+        : `sudo 修正属主失败（${raw.slice(0, 200)}）。请手工执行：${chownCommand(root, user)}`
     }
   }
 }

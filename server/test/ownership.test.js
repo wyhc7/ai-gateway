@@ -12,11 +12,13 @@ import { join } from 'node:path'
 
 import {
   DEFAULT_SERVICE_USER,
+  SUDO_CHOWN,
   chownCommand,
   ensureOwnership,
   findForeignOwners,
   repairOwnership,
-  serviceUser
+  serviceUser,
+  sudoChownCommand
 } from '../ownership.js'
 
 const IS_WIN = process.platform === 'win32'
@@ -49,6 +51,16 @@ test('chownCommand 生成的命令可读、可复制', () => {
   assert.equal(chownCommand('/srv/x', 'foo'), 'chown -R foo:foo /srv/x')
 })
 
+test('sudoChownCommand 与服务端实际执行的参数逐字一致', () => {
+  // sudoers 的 NOPASSWD 规则是逐字节比较命令行的，-n 由 sudo 自己吃掉不算参数，
+  // 所以这里必须与 repairOwnership 里的 ['-n', SUDO_CHOWN, '-R', ...] 对应。
+  assert.equal(
+    sudoChownCommand('/opt/ai-gateway'),
+    `sudo -n ${SUDO_CHOWN} -R ai-gateway:ai-gateway /opt/ai-gateway`
+  )
+  assert.equal(SUDO_CHOWN, '/usr/bin/chown')
+})
+
 test('Windows 上不报属主异常（没有 POSIX 属主概念）', { skip: !IS_WIN }, async () => {
   const dir = tmpRepo()
   try {
@@ -75,13 +87,17 @@ test('属主一致时不报异常（非 Windows 也走一遍）', { skip: IS_WIN
   }
 })
 
-test('非 root 时修不了，但必须给出可执行的 chown 命令', { skip: IS_WIN }, async () => {
+test('非 root 且无免密 sudo 时，必须给出可执行的 chown 命令', { skip: IS_WIN }, async () => {
   if (process.getuid && process.getuid() === 0) return // root 下这条不适用
   const dir = tmpRepo()
   try {
     const fixed = await repairOwnership(dir)
     assert.equal(fixed.ok, false)
-    assert.equal(fixed.reason, 'not-root')
+    // Windows 走 windows 分支，Linux 非 root 走到 sudo 分支
+    assert.ok(
+      ['sudo-needs-password', 'sudo-denied', 'sudo-missing'].includes(fixed.reason),
+      `reason 应是 sudo 相关，实际 ${fixed.reason}`
+    )
     assert.match(fixed.message, /chown -R /)
     assert.match(fixed.message, /ai-gateway:ai-gateway/)
   } finally {
