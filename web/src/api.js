@@ -103,6 +103,21 @@ export const api = {
   cancelCodexDevice: (sessionId) => request(`/api/oauth/codex/device/${sessionId}`, { method: 'DELETE' }),
   refreshCodexAccount: (providerId, keyId) => request(`/api/oauth/codex/accounts/${providerId}/${keyId}/refresh`, { method: 'POST' }),
 
+  // 转换层账号池（chatgpt2api）。网关代理这一层，浏览器拿不到转换层 auth-key。
+  // 加号走 OAuth PKCE：start 给链接，finish 用 callback 换 refresh_token。
+  getChatgptAccounts: (providerId) =>
+    request(`/api/chatgpt-accounts${providerId ? `?provider_id=${encodeURIComponent(providerId)}` : ''}`),
+  importChatgptAccounts: (providerId, tokens) =>
+    request('/api/chatgpt-accounts/import', { method: 'POST', body: JSON.stringify({ provider_id: providerId, tokens }) }),
+  refreshChatgptAccounts: (providerId, tokens) =>
+    request('/api/chatgpt-accounts/refresh', { method: 'POST', body: JSON.stringify({ provider_id: providerId, tokens }) }),
+  deleteChatgptAccounts: (providerId, tokens) =>
+    request('/api/chatgpt-accounts', { method: 'DELETE', body: JSON.stringify({ provider_id: providerId, tokens }) }),
+  startChatgptOauth: (providerId, emailHint) =>
+    request('/api/chatgpt-accounts/oauth/start', { method: 'POST', body: JSON.stringify({ provider_id: providerId, email_hint: emailHint || '' }) }),
+  finishChatgptOauth: (providerId, sessionId, callback) =>
+    request('/api/chatgpt-accounts/oauth/finish', { method: 'POST', body: JSON.stringify({ provider_id: providerId, session_id: sessionId, callback }) }),
+
   // 系统更新（比对上游仓库并一键更新）
   checkUpdate: (force = false) => request(`/api/update/check${force ? '?force=1' : ''}`),
   applyUpdate: () => request('/api/update/apply', { method: 'POST' })

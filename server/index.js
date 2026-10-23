@@ -7,6 +7,12 @@ import { state, persist, persistImmediate, getProvider, genId, todayKey, getAdmi
 import { handleChat, handleImages, handleModels, refreshModels, previewModels, refreshWorkbuddyCatalog, DEFAULT_PROTOCOL } from './proxy.js'
 import { autoRefreshModelsTick } from './model-auto-refresh.js'
 import {
+  pickBridgeProvider,
+  bridgeBaseOf,
+  proxyAccountsRequest,
+  sanitizeAccounts
+} from './chatgpt-accounts.js'
+import {
   createApiKey,
   updateApiKey,
   deleteApiKey,
@@ -1087,6 +1093,197 @@ app.post('/api/oauth/workbuddy/accounts/:providerId/:keyId/refresh', api(async (
 //   访问密钥（本组接口）           —— 网关往下发给客户端用的钥匙，本文件管的就是它。
 // 每个访问密钥可以限定「只能用哪些模型」，转发时按白名单放行。
 // 明文只在创建与轮换的响应里出现一次，列表接口一律只回前缀片段。
+// ---------------------------------------------------------------------------
+// 转换层账号管理（chatgpt2api 等自建转换层）
+//
+// 账号池在转换层那边，但它的 auth-key 必须留在服务器上。所以这里做一层代理：
+// 浏览器带**管理密钥**调 /api/chatgpt-accounts/*，网关在这一侧补 auth-key 再打
+// 上游。auth-key 不出服务器，转换层端口也不用对外开放。
+//
+// 只代理账号管理这一小撮路径（白名单在 server/chatgpt-accounts.js），不做通用
+// 隧道：上游还挂着模型调用端点，转发面越大越容易被当成万能代理用。
+// ---------------------------------------------------------------------------
+function resolveBridgeTarget(req, res) {
+  const pid = req.query?.provider_id || req.body?.provider_id
+  const provider = pickBridgeProvider(state.providers, pid)
+  if (!provider) {
+    res.status(400).json({
+      error: {
+        message: pid
+          ? `找不到平台 ${pid}，或该平台没有可用的 base_url`
+          : '当前没有任何转换层平台。请先在「添加订阅」里用 ChatGPT 网页版（chatgpt2api）方案建一个平台'
+      }
+    })
+    return null
+  }
+  return provider
+}
+
+function bridgeError(res, e) {
+  const status = Number(e?.statusCode) || 502
+  return res.status(status).json({ error: { message: e?.message || String(e) } })
+}
+
+app.get('/api/chatgpt-accounts', api(async (req, res) => {
+  const provider = resolveBridgeTarget(req, res)
+  if (!provider) return
+  try {
+    const up = await proxyAccountsRequest(provider, 'GET', '/api/accounts')
+    if (up.status !== 200) {
+      return res.status(up.status).json({ error: { message: up.body?.error?.message || up.body?.detail?.error || `转换层返回 HTTP ${up.status}` } })
+    }
+    res.json({
+      provider: { id: provider.id, name: provider.name, base_url: bridgeBaseOf(provider) },
+      accounts: sanitizeAccounts(up.body)
+    })
+  } catch (e) {
+    bridgeError(res, e)
+  }
+}))
+
+app.post('/api/chatgpt-accounts/import', api(async (req, res) => {
+  const provider = resolveBridgeTarget(req, res)
+  if (!provider) return
+  const tokens = Array.isArray(req.body?.tokens) ? req.body.tokens : []
+  const clean = tokens.map((t) => String(t || '').trim()).filter(Boolean)
+  if (clean.length === 0) {
+    return res.status(400).json({ error: { message: '请提供至少一个 access_token（tokens 数组）' } })
+  }
+  try {
+    const up = await proxyAccountsRequest(provider, 'POST', '/api/accounts', { tokens: clean })
+    if (up.status !== 200) {
+      return res.status(up.status).json({ error: { message: up.body?.error?.message || up.body?.detail?.error || `转换层返回 HTTP ${up.status}` } })
+    }
+    addLog({
+      type: 'provider',
+      method: 'POST',
+      path: '/api/chatgpt-accounts/import',
+      status: 200,
+      detail: `向转换层 ${provider.name} 导入 ${clean.length} 个 token（新增 ${up.body?.added ?? '?'}）`
+    })
+    res.json({
+      added: up.body?.added ?? 0,
+      skipped: up.body?.skipped ?? 0,
+      accounts: sanitizeAccounts(up.body)
+    })
+  } catch (e) {
+    bridgeError(res, e)
+  }
+}))
+
+app.post('/api/chatgpt-accounts/refresh', api(async (req, res) => {
+  const provider = resolveBridgeTarget(req, res)
+  if (!provider) return
+  try {
+    // 上游 refresh 需要 tokens；不传时先拉一次全量，用现有 token 逐个刷新
+    let tokens = Array.isArray(req.body?.tokens) ? req.body.tokens.map((t) => String(t || '').trim()).filter(Boolean) : []
+    if (tokens.length === 0) {
+      const list = await proxyAccountsRequest(provider, 'GET', '/api/accounts')
+      const items = Array.isArray(list.body?.items) ? list.body.items : []
+      tokens = items.map((a) => String(a?.access_token || '')).filter(Boolean)
+    }
+    if (tokens.length === 0) {
+      return res.json({ refreshed: 0, errors: [], accounts: [] })
+    }
+    const up = await proxyAccountsRequest(provider, 'POST', '/api/accounts/refresh', { tokens })
+    const after = await proxyAccountsRequest(provider, 'GET', '/api/accounts')
+    res.json({
+      refreshed: up.body?.refreshed ?? 0,
+      errors: up.body?.errors || [],
+      accounts: sanitizeAccounts(after.body)
+    })
+  } catch (e) {
+    bridgeError(res, e)
+  }
+}))
+
+app.delete('/api/chatgpt-accounts', api(async (req, res) => {
+  const provider = resolveBridgeTarget(req, res)
+  if (!provider) return
+  const tokens = Array.isArray(req.body?.tokens) ? req.body.tokens.map((t) => String(t || '').trim()).filter(Boolean) : []
+  if (tokens.length === 0) {
+    return res.status(400).json({ error: { message: '删除账号需要提供 tokens（上游按 token 定位，不接受邮箱）' } })
+  }
+  try {
+    const up = await proxyAccountsRequest(provider, 'DELETE', '/api/accounts', { tokens })
+    if (up.status !== 200) {
+      return res.status(up.status).json({ error: { message: up.body?.error?.message || `转换层返回 HTTP ${up.status}` } })
+    }
+    res.json({ ok: true })
+  } catch (e) {
+    bridgeError(res, e)
+  }
+}))
+
+// --- OAuth 授权加号：start 拿链接，finish 换 token 三件套 ---
+app.post('/api/chatgpt-accounts/oauth/start', api(async (req, res) => {
+  const provider = resolveBridgeTarget(req, res)
+  if (!provider) return
+  const emailHint = String(req.body?.email_hint || '').trim()
+  try {
+    const up = await proxyAccountsRequest(provider, 'POST', '/api/accounts/oauth/start', { email_hint: emailHint })
+    if (up.status !== 200) {
+      return res.status(up.status).json({ error: { message: up.body?.error?.message || up.body?.detail?.error || `转换层返回 HTTP ${up.status}` } })
+    }
+    // state 前段就是 session_id，前端展示链接时不必再拆
+    const url = String(up.body?.authorize_url || '')
+    let state = ''
+    try {
+      state = new URL(url).searchParams.get('state') || ''
+    } catch {
+      /* 上游给的不是标准 URL，就不回 state */
+    }
+    res.json({
+      session_id: up.body?.session_id || '',
+      authorize_url: url,
+      state,
+      expires_in: up.body?.expires_in || '600'
+    })
+  } catch (e) {
+    bridgeError(res, e)
+  }
+}))
+
+app.post('/api/chatgpt-accounts/oauth/finish', api(async (req, res) => {
+  const provider = resolveBridgeTarget(req, res)
+  if (!provider) return
+  const sessionId = String(req.body?.session_id || '').trim()
+  const callback = String(req.body?.callback || '').trim()
+  if (!sessionId || !callback) {
+    return res.status(400).json({ error: { message: 'session_id 与 callback 都必填' } })
+  }
+  // 本地先校 state，不匹配直接退回，别白跑一次上游
+  let cbState = ''
+  try {
+    cbState = new URL(callback).searchParams.get('state') || ''
+  } catch {
+    return res.status(400).json({ error: { message: 'callback 不是合法 URL，请粘贴完整的 platform.openai.com/auth/callback?... 地址' } })
+  }
+  if (cbState && !cbState.startsWith(sessionId)) {
+    return res.status(400).json({
+      error: {
+        message: `state 不匹配（期望 ${sessionId}.xxx，收到 ${cbState.slice(0, 24)}...）。多半是你授权的窗口对应另一次会话，请重新点「生成授权链接」。`
+      }
+    })
+  }
+  try {
+    const up = await proxyAccountsRequest(provider, 'POST', '/api/accounts/oauth/finish', { session_id: sessionId, callback })
+    if (up.status !== 200) {
+      return res.status(up.status).json({ error: { message: up.body?.error?.message || up.body?.detail?.error || `转换层返回 HTTP ${up.status}` } })
+    }
+    addLog({
+      type: 'provider',
+      method: 'POST',
+      path: '/api/chatgpt-accounts/oauth/finish',
+      status: 200,
+      detail: `转换层 ${provider.name} 完成 OAuth 授权加号`
+    })
+    res.json({ ok: true, accounts: sanitizeAccounts(up.body) })
+  } catch (e) {
+    bridgeError(res, e)
+  }
+}))
+
 // ---------------------------------------------------------------------------
 app.get('/api/keys', (req, res) => {
   const keys = (state.api_keys || []).map(serializeApiKey)

@@ -30,3 +30,20 @@ export function filterModelsForProvider(provider, list) {
 // 不把 codex-gpt-image-2 / gpt-image-1 一起塞进来：前者只有 Plus/Team/Pro 能用，
 // 后者是上一代编号，写死在兜底里等于把必然 404 的名字发给客户端。
 export const IMAGE_ONLY_FALLBACK_MODELS = ['gpt-image-2']
+
+// 「这个平台是不是自建转换层（chatgpt2api 之类）」。
+//
+// 与 image_only 分开判断的原因：image_only 是**模型闸门**语义，决定要不要过滤
+// 模型清单；而转换层判定决定 UI 怎么讲「添加 Key」、账号代理往哪转发。两者目前
+// 恰好同时成立，但混用会让以后「只生图的官方 API 平台」被误认成转换层。
+//
+// 判据两条，任一成立即可：
+//   1. 显式标了 image_only —— 现有方案里只有 chatgpt2api 这条这么建
+//   2. base_url 指向本机/内网 —— 官方 API 不会这么配
+export function isBridgeProvider(provider) {
+  if (!provider) return false
+  if (provider.image_only) return true
+  const url = String(provider.base_url || '')
+  return /\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(url)
+}
+

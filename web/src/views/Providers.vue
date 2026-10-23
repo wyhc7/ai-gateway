@@ -96,10 +96,17 @@
                     <el-button
                       v-else-if="isBridgeProvider(p) && p.keys.length > 0"
                       size="small"
+                      type="primary"
+                      plain
+                      @click="openChatgptAccounts(p)"
+                    >管理账号</el-button>
+                    <el-button
+                      v-if="isBridgeProvider(p) && p.keys.length > 0"
+                      size="small"
                       plain
                       @click="openAddKeyDialog(p)"
                     >换转换层 Key</el-button>
-                    <el-button v-else size="small" plain @click="openAddKeyDialog(p)">添加 Key</el-button>
+                    <el-button v-else-if="!isBridgeProvider(p)" size="small" plain @click="openAddKeyDialog(p)">添加 Key</el-button>
                   </div>
                 </div>
                 <div class="key-ledger">
@@ -456,6 +463,14 @@
       </template>
     </el-dialog>
 
+    <!-- 转换层账号池：加 ChatGPT 账号在这里，不在「添加 Key」 -->
+    <ChatgptAccountsDialog
+      ref="chatgptAccountsDialogRef"
+      v-model="chatgptAccountsDialog"
+      :provider="chatgptAccountsTarget"
+      @changed="load"
+    />
+
     <el-dialog v-model="keyDialog" :title="editingKey ? '编辑 Key' : '添加 Key'" width="480px">
       <el-form label-width="90px">
         <el-form-item label="Key 名称">
@@ -699,10 +714,11 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api.js'
 import SwitchRail from '../components/SwitchRail.vue'
+import ChatgptAccountsDialog from '../components/ChatgptAccountsDialog.vue'
 
 const providers = ref([])
 const loading = ref(false)
@@ -1143,8 +1159,21 @@ async function removeProvider(p) {
   }
 }
 
-async function toggleProvider(p) {
-  try {
+// 转换层账号池对话框。账号存在转换层那边，网关只做代理，
+// 所以这里把目标平台整条传过去（组件要用 base_url 展示、用 id 拼请求）。
+const chatgptAccountsDialog = ref(false)
+const chatgptAccountsTarget = ref(null)
+const chatgptAccountsDialogRef = ref(null)
+
+async function openChatgptAccounts(p) {
+  chatgptAccountsTarget.value = p
+  chatgptAccountsDialog.value = true
+  // 等组件挂载后再拉数据；同一 tick 里 ref 还没绑上
+  await nextTick()
+  chatgptAccountsDialogRef.value?.open?.()
+}
+
+async function toggleProvider(p) {  try {
     await api.updateProvider(p.id, { enabled: p.enabled })
   } catch (e) {
     p.enabled = !p.enabled
