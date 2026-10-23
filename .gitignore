@@ -27,3 +27,5 @@ _*.py
 _*.mjs
 start-*.bat
 start-*.sh
+
+out/
