@@ -82,6 +82,19 @@ test('sanitizeAccounts 绝不返回 token 明文', () => {
   assert.equal(json.includes('idt.secret'), false, '不得出现 id_token')
 })
 
+test('plan 优先取上游 type：续期后的 JWT 不含 chatgpt_plan_type', () => {
+  // 实测：OAuth 刷新后的 access_token，auth 段只剩 amr / user_id / residency
+  const refreshedJwt = `h.${Buffer.from(JSON.stringify({
+    exp: 1793620365,
+    'https://api.openai.com/auth': { amr: ['otp'], user_id: 'user-x' }
+  })).toString('base64url')}.s`
+  const out = sanitizeAccounts({
+    items: [{ access_token: refreshedJwt, type: 'free', email: 'a@b.com', quota: 22 }]
+  })
+  assert.equal(out[0].plan, 'free', '上游 type 应兜住 JWT 里缺失的字段')
+  assert.equal(out[0].access_expires_at, 1793620365000)
+})
+
 test('sanitizeAccounts 容忍空与畸形输入', () => {
   assert.deepEqual(sanitizeAccounts(null), [])
   assert.deepEqual(sanitizeAccounts({ items: [] }), [])

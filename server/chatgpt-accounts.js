@@ -147,20 +147,24 @@ export function sanitizeAccounts(payload) {
       : []
   return items.map((a) => {
     const at = String(a?.access_token || a?.accessToken || '')
-    let plan = ''
+    let jwtPlan = ''
     let accessExp = 0
     if (at) {
       const parts = at.split('.')
       if (parts.length > 1) {
         try {
           const p = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'))
-          plan = p?.['https://api.openai.com/auth']?.chatgpt_plan_type || ''
+          jwtPlan = p?.['https://api.openai.com/auth']?.chatgpt_plan_type || ''
           accessExp = Number(p?.exp || 0) * 1000
         } catch {
           /* payload 解不出来就留空，不影响展示 */
         }
       }
     }
+    // plan 优先用上游账号记录的 type：OAuth 续期后拿到的 access_token 里
+    // 往往**不含** chatgpt_plan_type（实测刷新后的 JWT auth 段只剩 amr /
+    // user_id / residency），只信 JWT 会把免费号显示成空套餐。
+    const plan = String(a?.type || jwtPlan || '')
     return {
       email: a?.email || '',
       status: a?.status || '',
@@ -169,6 +173,7 @@ export function sanitizeAccounts(payload) {
       plan,
       refresh_token: Boolean(a?.refresh_token),
       access_expires_at: accessExp || null,
+      restore_at: a?.restore_at || null,
       last_token_refresh_at: a?.last_token_refresh_at || null,
       last_refresh_error: a?.last_refresh_error || null,
       token_tail: at ? at.slice(-6) : ''
