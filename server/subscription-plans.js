@@ -85,8 +85,9 @@ export const SUBSCRIPTION_PLANS = [
     chat_path: '/chat/completions',
     images_path: '/images/generations',
     default_models: ['gpt-image-2'],
-    hint: '先在本机或支持区服务器跑起 chatgpt2api（默认 3000 端口，API 路径 /v1），再导入 ChatGPT 账号的 access_token。'
-      + '建完平台点「添加 Key」，填入 chatgpt2api 的 CHATGPT2API_AUTH_KEY。'
+    hint: '先在本机或支持区服务器跑起 chatgpt2api（默认 3000 端口，API 路径 /v1）。'
+      + '建完平台点「添加 Key」只需填一次转换层的 CHATGPT2API_AUTH_KEY —— 这是网关访问转换层的凭据，不是账号。'
+      + '要加 ChatGPT 账号请在转换层那台机器上跑 cgpt-add（OAuth 授权，拿 refresh_token 自动续期），加多少个都与网关的 Key 数量无关。'
       + '本方案只生图：模型清单里不含任何文本模型，生图走 /api/v1/images/generations，模型 gpt-image-2。'
   }
 ]

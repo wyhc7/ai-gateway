@@ -81,19 +81,34 @@
             <el-row :gutter="20">
               <el-col :xs="24" :md="14">
                 <div class="sub-head">
-                  <span class="section-title">{{ isOAuthProvider(p) ? '订阅账号' : 'API Keys' }} · {{ p.keys.length }}</span>
+                  <!-- 转换层类平台（chatgpt2api 等）：网关这一侧只认一个上游凭据，
+                       不是账号列表。标签写成「转换层凭据」，免得被当成加账号的入口。 -->
+                  <span class="section-title">
+                    {{ isOAuthProvider(p) ? '订阅账号' : (isBridgeProvider(p) ? '转换层凭据' : 'API Keys') }}
+                    · {{ p.keys.length }}
+                  </span>
                   <div class="head-actions">
                     <template v-if="isOAuthProvider(p)">
                       <el-button v-if="isWorkbuddyProvider(p)" size="small" plain @click="openWbJsonDialog(p)">导入 JSON</el-button>
                       <el-button size="small" plain @click="openImportCredentialDialog(p)">导入 Token</el-button>
                       <el-button size="small" plain @click="openAuthDialog(p)">授权 {{ authLabel(p) }} 账号</el-button>
                     </template>
+                    <el-button
+                      v-else-if="isBridgeProvider(p) && p.keys.length > 0"
+                      size="small"
+                      plain
+                      @click="openAddKeyDialog(p)"
+                    >换转换层 Key</el-button>
                     <el-button v-else size="small" plain @click="openAddKeyDialog(p)">添加 Key</el-button>
                   </div>
                 </div>
                 <div class="key-ledger">
                   <div v-if="p.keys.length === 0" class="key-empty">
-                    {{ isOAuthProvider(p) ? `尚未绑定订阅账号，点击「授权 ${authLabel(p)} 账号」添加。` : '尚未配置 Key，点击右上角添加。' }}
+                    {{ isOAuthProvider(p)
+                      ? `尚未绑定订阅账号，点击「授权 ${authLabel(p)} 账号」添加。`
+                      : (isBridgeProvider(p)
+                        ? '尚未配置转换层凭据，点击右上角填入 CHATGPT2API_AUTH_KEY。'
+                        : '尚未配置 Key，点击右上角添加。') }}
                   </div>
                   <div
                     v-for="k in p.keys"
@@ -379,11 +394,17 @@
             </div>
           </el-col>
           <!-- 静态 Key 类方案（chatgpt2api 等自建转换层）：凭据建完再补，
-               这里先把话说明白，免得创建后找不到入口 -->
+               这里先把话说明白，免得创建后找不到入口。
+               关键区分：「添加 Key」填的是**转换层凭据**（整条链路只需要 1 个），
+               而真正的 ChatGPT 账号池在转换层自己那边，加账号与网关无关。 -->
           <el-col v-if="currentPlan?.auth_kind === 'api_key'" :span="24">
             <div class="oauth-hint" style="margin-top: -4px">
-              这条方案用的是自建转换层的 auth-key，不是 OpenAI 官方 Key。
-              创建后回到平台列表点「添加 Key」，把 <code>CHATGPT2API_AUTH_KEY</code> 填进去。
+              这条方案用的是自建转换层的凭据，不是 OpenAI 官方 Key。
+              创建后点「添加 Key」只需填 <code>一次</code> <code>CHATGPT2API_AUTH_KEY</code>，之后不要再加。
+              <br />
+              <strong>要加 ChatGPT 账号，不在网关这里加</strong>：账号池在转换层
+              <code>{{ currentPlan?.base_url?.replace(/\/v1\/?$/, '') }}</code> 自己那边，
+              在那台机器上跑 <code>cgpt-add</code> 走 OAuth 授权即可，加多少都行、与网关 Key 数量无关。
               <template v-if="currentPlan?.image_only">本方案只生图，模型清单只有生图模型。</template>
             </div>
           </el-col>
@@ -1301,9 +1322,11 @@ async function createSubscription() {
     subscriptionDialog.value = false
     await load()
     // 凭据是静态 Key 的方案（自建转换层）：没有设备码可走，直接把他送到
-    // 「添加 Key」对话框，否则建完一个空平台在列表里杵着，没人知道下一步是填 Key
+    // 「添加 Key」对话框，否则建完一个空平台在列表里杵着，没人知道下一步是填 Key。
+    // 注意：这里填的是**转换层凭据**，一个平台一个就够；加 ChatGPT 账号是
+    // 转换层那边的事（cgpt-add），不在网关这里加。
     if (plan.auth_kind === 'api_key') {
-      ElMessage.success('订阅平台已创建，请填入转换层的 auth-key')
+      ElMessage.success('平台已创建，请填入转换层凭据（只需一个，之后加账号在转换层那侧做）')
       openAddKeyDialog(created)
       return
     }
@@ -1347,6 +1370,18 @@ function isOAuthProtocol(protocol) {
 
 function isOAuthProvider(p) {
   return isOAuthProtocol(p?.protocol)
+}
+
+// 自建转换层平台（如 chatgpt2api）：网关侧只需要一个上游凭据，
+// 真正的账号池在转换层自己那边。UI 据此把「添加 Key」的语义改掉，
+// 避免用户以为这里是加账号的地方、被 1 个 Key 卡住。
+function isBridgeProvider(p) {
+  const proto = p?.protocol
+  const url = String(p?.base_url || '')
+  if (proto !== 'openai-chat') return false
+  if (p?.image_only) return true
+  // 兜底：指向本机/内网的 openai-chat 也按转换层看待
+  return /\/\/(127\.0\.0\.1|localhost|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(url)
 }
 
 function isCodexProvider(p) {
