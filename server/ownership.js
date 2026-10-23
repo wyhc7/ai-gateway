@@ -1,0 +1,201 @@
+// 部署目录属主自愈。
+//
+// 起因：手工排障时用 root 跑过 `git reset --hard` + `npm run build`，于是
+// /opt/ai-gateway 下一批文件变成 root:root。而服务与「网页一键更新」都以
+// ai-gateway 用户跑，结果是：
+//
+//   EACCES: permission denied, unlink '/opt/ai-gateway/web/dist/assets/index-xxx.css'
+//   fatal: Unable to create '/opt/ai-gateway/.git/index.lock'
+//
+// 更坑的是这类失败是**一串**的：修好 dist，下一步装依赖又栽在 node_modules，
+// 再下一步栽在 .git/index。用户看到的是「更新失败」，但根因只有一条。
+//
+// 所以更新流程在动手前先体检：扫出不属于服务账号的路径，趁还在 root 权限下
+// （systemd 的 ExecStartPre 或用户显式 sudo）一次性 chown 回来，然后再 git
+// 与 build。不能指望每次都由人来 chown。
+//
+// 边界：本模块只负责「找出问题、给出命令」，实际 chown 由调用方按权限决定，
+// 因此纯函数部分完全可单测，不需要 root。
+
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { join } from 'node:path'
+
+const execFileAsync = promisify(execFile)
+
+// 服务账号。与 deploy/linux 里的 systemd 单元保持一致，可用环境变量覆盖。
+export const DEFAULT_SERVICE_USER = 'ai-gateway'
+
+// 扫描深度上限：仓库是有限深度，超过就是不认识的深层产物，不值得为它遍历。
+export const MAX_SCAN_DEPTH = 6
+
+// 扫描时跳过的目录。node_modules 动辄几万文件，而它属于「装错了重装即可」，
+// 真被 root 占了会由 npm install 那一步自己暴露，不值得拖慢体检。
+const SKIP_DIRS = new Set(['node_modules', '.git/objects'])
+
+export function serviceUser() {
+  return process.env.UPDATE_SERVICE_USER || DEFAULT_SERVICE_USER
+}
+
+/**
+ * 扫描目录，返回不属于 expectUser 的路径（相对仓库根）。
+ *
+ * 只扫目录自身与常规文件，符号链接按链接本身判断（不算跟随）。
+ * 深度受限，且跳过 node_modules —— 目的是「快速判断有没有被 root 污染」，
+ * 不是做完整性审计。
+ *
+ * Windows 直接返回空：那里没有 POSIX 属主，statSync 的 uid 恒为 0，
+ * 照字面比较会把每个文件都判成「属主异常」。
+ */
+export function findForeignOwners(root, expectUser = serviceUser(), { maxDepth = MAX_SCAN_DEPTH } = {}) {
+  if (process.platform === 'win32') return []
+  const bad = []
+  const walk = (dir, depth, rel) => {
+    if (depth > maxDepth) return
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      // 读不了本身就是一种异常（权限不对），记下来
+      bad.push(rel || '.')
+      return
+    }
+    for (const ent of entries) {
+      const childRel = rel ? `${rel}/${ent.name}` : ent.name
+      if (SKIP_DIRS.has(ent.name)) continue
+      const abs = join(dir, ent.name)
+      let st
+      try {
+        st = statSync(abs, { throwIfNoEntry: false })
+      } catch {
+        continue
+      }
+      if (!st) continue
+      if (st.uid !== undefined) {
+        let owner = ''
+        try {
+          // 用 uid 反查用户名：数字 uid 对用户没有意义
+          owner = ownerNameOf(st.uid)
+        } catch {
+          owner = String(st.uid)
+        }
+        if (owner !== expectUser) bad.push(childRel)
+      }
+      if (ent.isDirectory()) walk(abs, depth + 1, childRel)
+    }
+  }
+  // 根目录自身也要判断：整个仓库被 root 占了时，子项扫下去全是坏点，
+  // 但先报出根目录更利于定位。
+  try {
+    const st = statSync(root, { throwIfNoEntry: false })
+    if (st && st.uid !== undefined && ownerNameOf(st.uid) !== expectUser) bad.unshift('.')
+  } catch {
+    /* 根都读不了，交给下面的 walk 报 */
+  }
+  walk(root, 0, '')
+  return bad
+}
+
+// uid → owner 名的小缓存。一次更新会问几千次同一个 uid，不值得反复起进程。
+const uidCache = new Map()
+
+function ownerNameOf(uid) {
+  if (uidCache.has(uid)) return uidCache.get(uid)
+  let name
+  try {
+    // 同步读 /etc/passwd：比 spawn `id -nu <uid>` 快几个数量级，
+    // 而且不依赖 PATH 上有 id。
+    const line = passwdLines().find((l) => l.split(':')[2] === String(uid))
+    name = line ? line.split(':')[0] : String(uid)
+  } catch {
+    name = String(uid)
+  }
+  uidCache.set(uid, name)
+  return name
+}
+
+// /etc/passwd 只读一次。改名/加用户极少发生在一次更新的生命周期里。
+let passwdCache = null
+function passwdLines() {
+  if (passwdCache === null) {
+    passwdCache = readFileSync('/etc/passwd', 'utf8').split('\n').filter(Boolean)
+  }
+  return passwdCache
+}
+
+/**
+ * 生成修复命令。界面与日志里展示给人看，也方便人工复核后再执行。
+ * 不在本模块直接 chown：那需要 root，且属于「改动磁盘状态」的事，
+ * 由调用方明确决定要不要做。
+ */
+export function chownCommand(root, user = serviceUser()) {
+  return `chown -R ${user}:${user} ${root}`
+}
+
+/**
+ * 以 root 执行 chown -R。非 root 时返回 { ok:false, reason }，不抛异常
+ * —— 体检失败不该把整次更新拦死，只需如实说「修不了，请人工处理」。
+ */
+export async function repairOwnership(root, user = serviceUser()) {
+  if (process.platform === 'win32') {
+    return { ok: false, reason: 'windows', message: 'Windows 无 POSIX 属主概念，跳过' }
+  }
+  if (process.getuid && process.getuid() !== 0) {
+    return {
+      ok: false,
+      reason: 'not-root',
+      message: `当前进程不是 root，无法自动修正属主。请手工执行：${chownCommand(root, user)}`
+    }
+  }
+  try {
+    await execFileAsync('chown', ['-R', `${user}:${user}`, root], {
+      timeout: 120 * 1000,
+      maxBuffer: 4 * 1024 * 1024,
+      windowsHide: true
+    })
+    return { ok: true, message: `已把 ${root} 的属主修正为 ${user}:${user}` }
+  } catch (e) {
+    return {
+      ok: false,
+      reason: 'failed',
+      message: `chown 失败：${String(e?.stderr || e?.message || e).slice(0, 500)}`
+    }
+  }
+}
+
+/**
+ * 体检 + 自愈，更新流程开头调用。
+ *
+ * 返回：
+ *   { needed, before, after, repaired, detail }
+ * needed 表示本次是否发现并处理过属主问题；detail 直接进步骤日志。
+ */
+export async function ensureOwnership(root, user = serviceUser()) {
+  const before = findForeignOwners(root, user)
+  if (before.length === 0) {
+    return { needed: false, before: [], after: [], repaired: false, detail: `属主正常（${user}）` }
+  }
+  const sample = before.slice(0, 3).join('、')
+  const more = before.length > 3 ? ` 等 ${before.length} 个` : ''
+  const fixed = await repairOwnership(root, user)
+  if (!fixed.ok) {
+    return {
+      needed: true,
+      before,
+      after: before,
+      repaired: false,
+      detail: `发现 ${before.length} 个文件属主不是 ${user}（${sample}${more}），${fixed.message}`
+    }
+  }
+  const after = findForeignOwners(root, user)
+  return {
+    needed: true,
+    before,
+    after,
+    repaired: after.length === 0,
+    detail: after.length === 0
+      ? `已修正 ${before.length} 个文件的属主（${sample}${more}）为 ${user}:${user}`
+      : `修正后仍有 ${after.length} 个文件属主异常，请手工检查`
+  }
+}

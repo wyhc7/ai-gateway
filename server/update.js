@@ -14,6 +14,8 @@ import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
+import { ensureOwnership, serviceUser, chownCommand } from './ownership.js'
+
 const execFileAsync = promisify(execFile)
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -661,6 +663,24 @@ export async function applyUpdate() {
   const branch = updateBranch()
   const before = local.revision
   const deployedRevision = readDeployed()?.revision || null
+
+  // 属主体检必须排在 git 之前。
+  //
+  // 手工排障时若用 root 跑过构建/合并，仓库里会混进 root:root 的文件；而本服务
+  // 以 ai-gateway 跑，后续每一步都会栽在 EACCES 上：先删不掉 web/dist/assets，
+  // 再写不了 .git/index，装依赖还能栽在 node_modules。失败信息五花八门，根因
+  // 只有「属主不对」这一条，所以在这里一次修掉，并把这个动作写进步骤日志——
+  // 让人知道「不是代码有问题，是权限被谁动过」。
+  const ownership = await ensureOwnership(repoDir())
+  if (ownership.needed) {
+    if (ownership.repaired) {
+      done('修正部署目录属主', ownership.detail)
+    } else {
+      // 修不了（非 root）时**不中止**：多数情况下 git 与 build 仍然能跑，
+      // 中止反而把本来能完成的更新拦死。把命令交给用户，让他自己决定。
+      done('修正部署目录属主', ownership.detail)
+    }
+  }
 
   try {
     await fetchRemote(branch)
