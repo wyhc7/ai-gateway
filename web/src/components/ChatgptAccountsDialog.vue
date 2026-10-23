@@ -185,16 +185,49 @@
             如果你的浏览器和这台服务器不在同一网络也没关系，链接是 auth.openai.com 的。
           </div>
 
-          <div class="ca-field-label">第 2 步 · 授权后页面会跳到 platform.openai.com/auth/callback?...（打不开是正常的），把地址栏整条粘到下面</div>
+          <div class="ca-field-label">
+            第 2 步 · 授权后页面会跳到 platform.openai.com/auth/callback?...（打不开是正常的）
+          </div>
+          <div class="ca-auto">
+            <div class="ca-auto-title">自动送回（推荐，不用复制粘贴）</div>
+            <ol class="ca-auto-steps">
+              <li>把下面这个按钮<strong>拖到书签栏</strong>（或右键存为书签，名字随便取）</li>
+              <li>在授权完成后那个 <code>platform.openai.com/auth/callback?...</code> 页面上，<strong>点一下这个书签</strong></li>
+              <li>弹出一个新标签显示「加号成功」，回来点上面的「刷新」就能看到账号</li>
+            </ol>
+            <div class="ca-bookmark-row">
+              <a
+                class="ca-bookmarklet"
+                :href="bookmarklet"
+                @click.prevent="onBookmarkClick"
+              >✓ 送回 ChatGPT 授权</a>
+              <el-button size="small" text @click="copyBookmarklet">复制书签代码</el-button>
+            </div>
+            <div class="ca-hint">
+              为什么不能全自动：ChatGPT 的 OAuth 只允许回调到
+              <code>platform.openai.com/auth/callback</code>，这个地址改不了，
+              所以 <code>code</code> 只出现在你浏览器里，得由浏览器送回来。
+              点书签就是那一次「送回来」，比手工复制整条 URL 稳。
+            </div>
+          </div>
+
+          <div class="ca-field-label">或者手工粘贴 callback 地址（老办法）</div>
           <el-input
             v-model="callback"
             type="textarea"
             :rows="3"
             placeholder="https://platform.openai.com/auth/callback?code=ac_...&state=..."
+            @paste="onCallbackPaste"
           />
           <div class="ca-actions">
             <el-button type="success" :loading="finishing" @click="finishOauth">完成加号</el-button>
             <el-button text @click="resetFlow">清空重来</el-button>
+            <el-checkbox v-model="watchClipboard" class="ca-clip">
+              自动读剪贴板
+            </el-checkbox>
+            <span v-if="watchClipboard" class="ca-clip-state">
+              {{ clipboardState }}
+            </span>
           </div>
         </template>
       </div>
@@ -221,9 +254,10 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import api from '../api.js'
+import { buildBookmarklet, extractCodeAndState, looksLikeCallback } from '../oauth-auto.js'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -395,7 +429,91 @@ function resetFlow() {
   sessionId.value = ''
   callback.value = ''
   step.value = 0
+  stopClipboardWatch()
 }
+
+// ---------------------------------------------------------------------------
+// 自动送回 callback
+//
+// 分两条路，都不需要手工拼 URL：
+//   A. 书签脚本：授权页点一下，跨域 POST 回网关，那个端点自己回 CORS 头
+//   B. 剪贴板轮询：浏览器允许读剪贴板时，发现像 callback 就自动填进来
+// 书签是主力（100% 可用）；剪贴板是锦上添花（有些浏览器要用户点头才允许读）。
+// ---------------------------------------------------------------------------
+
+const watchClipboard = ref(false)
+const clipboardState = ref('等待剪贴板…')
+let clipTimer = null
+let lastClip = ''
+
+const bookmarklet = computed(() => {
+  if (!authorizeUrl.value || !sessionId.value) return 'javascript:void 0'
+  return buildBookmarklet(window.location.origin, providerId.value, sessionId.value)
+})
+
+// 拖拽之外的入口：点一下直接复制整段 javascript: 代码，方便手动建书签
+async function copyBookmarklet() {
+  try {
+    await navigator.clipboard.writeText(bookmarklet.value)
+    ElMessage.success('书签代码已复制，新建一个书签把地址粘进去即可')
+  } catch {
+    ElMessage.warning('浏览器不让自动复制，请右键那个按钮 →「添加到书签」')
+  }
+}
+
+function onBookmarkClick() {
+  ElMessage.info('这是书签按钮，请把它拖到书签栏，然后在授权完成后的页面上点它')
+}
+
+// 手工粘贴时也顺手识别：粘贴内容里有 code 就自动规整
+function onCallbackPaste(e) {
+  const text = e?.clipboardData?.getData?.('text') || ''
+  if (!looksLikeCallback(text)) return
+  const { code } = extractCodeAndState(text)
+  if (code) {
+    ElMessage.success('已从剪贴板识别到授权回调，点「完成加号」即可')
+  }
+}
+
+async function tickClipboard() {
+  try {
+    const text = await navigator.clipboard.readText()
+    if (!text || text === lastClip) return
+    lastClip = text
+    if (!looksLikeCallback(text)) return
+    if (callback.value && callback.value.trim() === text.trim()) return
+    callback.value = text.trim()
+    clipboardState.value = '已自动填入回调 ✅'
+    ElMessage.success('检测到剪贴板里的授权回调，已自动填入')
+    stopClipboardWatch()
+    watchClipboard.value = false
+  } catch (e) {
+    // 浏览器要求用户手势或权限才能读剪贴板，如实说明而不是静默失败
+    clipboardState.value = '读剪贴板被浏览器拦了，请用书签或手工粘贴'
+    stopClipboardWatch()
+    watchClipboard.value = false
+  }
+}
+
+function startClipboardWatch() {
+  stopClipboardWatch()
+  clipboardState.value = '监听中…请在授权页复制回调地址'
+  clipTimer = setInterval(tickClipboard, 2000)
+}
+
+function stopClipboardWatch() {
+  if (clipTimer) {
+    clearInterval(clipTimer)
+    clipTimer = null
+  }
+}
+
+watch(watchClipboard, (on) => {
+  if (on) startClipboardWatch()
+  else stopClipboardWatch()
+})
+
+onBeforeUnmount(stopClipboardWatch)
 
 async function importManual() {
   const tokens = manualTokens.value.split('\n').map((s) => s.trim()).filter(Boolean)
@@ -610,5 +728,64 @@ defineExpose({ open, load })
 }
 .ca-collapse {
   margin-top: 16px;
+}
+
+/* 自动送回区块 */
+.ca-auto {
+  background: #f0f9eb;
+  border: 1px solid #e1f3d8;
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 4px;
+}
+.ca-auto-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1a7f37;
+  margin-bottom: 6px;
+}
+.ca-auto-steps {
+  margin: 0 0 10px;
+  padding-left: 20px;
+  font-size: 12px;
+  color: #606266;
+  line-height: 1.9;
+}
+.ca-auto-steps code {
+  background: #e7f5df;
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.ca-bookmark-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.ca-bookmarklet {
+  display: inline-block;
+  padding: 7px 16px;
+  background: #1a7f37;
+  color: #fff;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: grab;
+  user-select: none;
+  box-shadow: 0 1px 3px rgba(26, 127, 55, 0.3);
+}
+.ca-bookmarklet:hover {
+  background: #166a2d;
+}
+.ca-bookmarklet:active {
+  cursor: grabbing;
+}
+.ca-clip {
+  margin-left: 4px;
+}
+.ca-clip-state {
+  font-size: 12px;
+  color: #909399;
 }
 </style>

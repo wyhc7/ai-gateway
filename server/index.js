@@ -1244,6 +1244,78 @@ app.post('/api/chatgpt-accounts/oauth/start', api(async (req, res) => {
   }
 }))
 
+// 一条独立的「回调接收」端点，专给书签脚本用。
+//
+// 为什么要单独一条而不是复用上面的 /oauth/finish：
+//   1. 书签脚本跑在 platform.openai.com 的页面里，提交是跨域的，
+//      必须自己回 CORS 头；而普通 /api/* 不接受跨域。
+//   2. 书签里不能塞管理密钥（它会出现在页面 JS 里），所以鉴权换成
+//      「平台 id + session_id」这对组合：session_id 是 32 位随机串，
+//      10 分钟过期，泄漏也只能用一次，且拿到它本身做不了别的事。
+//   3. 表单提交（application/x-www-form-urlencoded）而不是 JSON：
+//      书签里拼 JSON fetch 有 preflight，表单没有。
+//
+// 返回一个给人看的小 HTML 页，而不是 JSON —— 用户点完书签总得看到结果。
+app.options('/api/chatgpt-accounts/oauth/callback', (req, res) => {
+  res.set({
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type'
+  }).sendStatus(204)
+})
+
+app.post('/api/chatgpt-accounts/oauth/callback', express.urlencoded({ extended: false }), api(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*')
+  const providerId = String(req.body?.provider_id || '').trim()
+  const sessionId = String(req.body?.session_id || '').trim()
+  const callback = String(req.body?.callback || '').trim()
+  const html = (title, body, ok) => `<!doctype html><meta charset="utf-8">
+<title>${title}</title>
+<style>body{font:15px/1.7 -apple-system,"Segoe UI",sans-serif;max-width:560px;margin:60px auto;padding:0 20px;color:#303133}
+h2{color:${ok ? '#1a7f37' : '#c45656'}}code{background:#f4f4f5;padding:2px 6px;border-radius:3px;word-break:break-all}</style>
+<h2>${title}</h2><div>${body}</div><p style="color:#909399;font-size:13px">可以关掉这个页面了，账号列表在网关面板里刷新即可。</p>`
+  const reply = (status, title, body, ok) => res.status(status).type('html').send(html(title, body, ok))
+
+  if (!sessionId || !callback) {
+    return reply(400, '缺少参数', '书签脚本需要 <code>session_id</code> 与 <code>callback</code>。请回到网关面板重新生成书签。', false)
+  }
+  const provider = pickBridgeProvider(state.providers, providerId || undefined)
+  if (!provider) {
+    return reply(400, '找不到转换层平台', '请确认网关里已经建好「ChatGPT 网页版（chatgpt2api）· 生图」平台。', false)
+  }
+
+  // state 前缀必须对上 session_id，否则说明授权窗口属于另一次会话
+  let cbState = ''
+  try {
+    cbState = new URL(callback).searchParams.get('state') || ''
+  } catch {
+    return reply(400, 'callback 不是合法 URL', `收到的内容是：<code>${callback.slice(0, 160)}</code>`, false)
+  }
+  if (cbState && !cbState.startsWith(sessionId)) {
+    return reply(400, 'state 不匹配', `这次授权对应的是另一次会话（期望 <code>${sessionId.slice(0, 8)}…</code>，收到 <code>${cbState.slice(0, 8)}…</code>）。<br>请回面板点「生成授权链接」并重新生成书签。`, false)
+  }
+
+  try {
+    const up = await proxyAccountsRequest(provider, 'POST', '/api/accounts/oauth/finish', { session_id: sessionId, callback })
+    if (up.status !== 200) {
+      const msg = up.body?.error?.message || up.body?.detail?.error || `转换层返回 HTTP ${up.status}`
+      return reply(up.status, '兑换 token 失败', `转换层说：<code>${String(msg).slice(0, 300)}</code>`, false)
+    }
+    const list = sanitizeAccounts(up.body)
+    const fresh = list.find((a) => a.refresh_token) || list[0]
+    addLog({
+      type: 'provider',
+      method: 'POST',
+      path: '/api/chatgpt-accounts/oauth/callback',
+      status: 200,
+      detail: `书签脚本完成 OAuth 加号：${fresh?.email || '(未知邮箱)'}（转换层 ${provider.name}）`
+    })
+    return reply(200, '加号成功 ✅', `账号：<code>${fresh?.email || '(未知邮箱)'}</code><br>自动续期：${fresh?.refresh_token ? '已开启' : '未开启'}<br>剩余生图额度：${fresh?.image_quota ?? '—'} 次`, true)
+  } catch (e) {
+    return reply(502, '连不上转换层', `<code>${String(e?.message || e).slice(0, 300)}</code>`, false)
+  }
+}))
+
 app.post('/api/chatgpt-accounts/oauth/finish', api(async (req, res) => {
   const provider = resolveBridgeTarget(req, res)
   if (!provider) return
