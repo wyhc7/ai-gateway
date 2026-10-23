@@ -9,7 +9,9 @@ import assert from 'node:assert/strict'
 import {
   bridgeBaseOf,
   pickBridgeProvider,
-  sanitizeAccounts
+  sanitizeAccounts,
+  normalizeLimits,
+  imageLimitOf
 } from '../chatgpt-accounts.js'
 import { isBridgeProvider } from '../providers-image-only.js'
 
@@ -103,4 +105,78 @@ test('sanitizeAccounts 容忍空与畸形输入', () => {
   assert.equal(out[0].plan, '')
   assert.equal(out[0].refresh_token, false)
   assert.equal(out[0].access_expires_at, null)
+  assert.equal(out[0].image_quota, null)
+  assert.deepEqual(out[0].limits, [])
+})
+
+// 上游真实返回的 limits_progress 形状（取自线上账号）
+const REAL_LIMITS = [
+  { feature_name: 'deep_research', remaining: 5, reset_after: '2026-11-22T12:31:01.690996+00:00' },
+  { feature_name: 'file_upload', remaining: 15, reset_after: '2026-10-24T12:31:01.691016+00:00' },
+  { feature_name: 'paste_text_to_file', remaining: 3, reset_after: '2026-10-24T12:31:01.691022+00:00' },
+  { feature_name: 'image_gen', remaining: 22, reset_after: '2026-10-24T11:36:44.691026+00:00' },
+  { feature_name: 'reason', remaining: 44, reset_after: '2026-10-23T16:29:33.265116+00:00' }
+]
+
+test('normalizeLimits：生图排第一、中文名、未知能力保留原 key', () => {
+  const limits = normalizeLimits(REAL_LIMITS)
+  assert.equal(limits.length, 5)
+  assert.equal(limits[0].key, 'image_gen')
+  assert.equal(limits[0].label, '生图')
+  assert.equal(limits[0].remaining, 22)
+  assert.equal(limits[0].reset_at, '2026-10-24T11:36:44.691026+00:00')
+  // 认识的翻译，不认识的保留原 key
+  const byKey = Object.fromEntries(limits.map((l) => [l.key, l]))
+  assert.equal(byKey.deep_research.label, '深度研究')
+  assert.equal(byKey.file_upload.label, '文件上传')
+  const unknown = normalizeLimits([{ feature_name: 'brand_new_feature', remaining: 7 }])
+  assert.equal(unknown[0].label, 'brand_new_feature')
+  assert.equal(unknown[0].remaining, 7)
+  // 脏数据要过滤，不能崩
+  assert.deepEqual(normalizeLimits(null), [])
+  assert.deepEqual(normalizeLimits([null, {}, { remaining: 3 }]), [])
+})
+
+test('imageLimitOf 取出生图那一项', () => {
+  const limits = normalizeLimits(REAL_LIMITS)
+  assert.equal(imageLimitOf(limits).remaining, 22)
+  assert.equal(imageLimitOf([]), null)
+  assert.equal(imageLimitOf(null), null)
+})
+
+test('剩余生图额度：limits.image_gen 优先，退回顶层 quota', () => {
+  const out = sanitizeAccounts({
+    items: [{
+      email: 'a@b.com',
+      quota: 22,
+      type: 'free',
+      restore_at: '2026-10-24T11:36:44.691026+00:00',
+      limits_progress: REAL_LIMITS,
+      success: 1,
+      fail: 1
+    }]
+  })
+  const a = out[0]
+  assert.equal(a.image_quota, 22, '应取 limits 里 image_gen 的 remaining')
+  assert.equal(a.quota_reset_at, '2026-10-24T11:36:44.691026+00:00')
+  assert.equal(a.limits.length, 5)
+  assert.equal(a.success, 1)
+  assert.equal(a.fail, 1)
+
+  // 老版本 / 没有 limits_progress 时退回顶层 quota
+  const old = sanitizeAccounts({ items: [{ quota: 17, restore_at: '2026-10-25T00:00:00Z' }] })
+  assert.equal(old[0].image_quota, 17)
+  assert.equal(old[0].quota_reset_at, '2026-10-25T00:00:00Z')
+  assert.deepEqual(old[0].limits, [])
+})
+
+test('额度用完时 image_quota 是 0 而不是 null', () => {
+  const out = sanitizeAccounts({
+    items: [{
+      quota: 0,
+      limits_progress: [{ feature_name: 'image_gen', remaining: 0, reset_after: '2026-10-24T00:00:00Z' }]
+    }]
+  })
+  assert.equal(out[0].image_quota, 0, '0 是有效额度，不能被 ?? 掉')
+  assert.equal(out[0].quota_reset_at, '2026-10-24T00:00:00Z')
 })

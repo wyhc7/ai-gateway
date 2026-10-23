@@ -46,6 +46,23 @@
         </div>
       </div>
 
+      <!-- 剩余生图额度汇总：账号多的时候一眼看总量 -->
+      <div class="ca-quota-bar">
+        <div class="ca-quota-total">
+          <span class="ca-quota-num">{{ totalImageQuota }}</span>
+          <span class="ca-quota-unit">次剩余生图额度</span>
+        </div>
+        <div class="ca-quota-side">
+          <span v-if="totalImageQuota > 0">
+            {{ accounts.length }} 个账号合计，约可出 {{ totalImageQuota }} 张图
+          </span>
+          <span v-else class="ca-quota-warn">额度已用完，等恢复时间或加号</span>
+          <span v-if="earliestReset" class="ca-quota-reset">
+            最近恢复：{{ earliestReset }}
+          </span>
+        </div>
+      </div>
+
       <div class="ca-meta">
         转换层：<code>{{ bridgeInfo.base_url || bridgeProvider.base_url }}</code>
         <el-button text size="small" :loading="loading" @click="load">刷新</el-button>
@@ -53,22 +70,36 @@
 
       <!-- 账号列表 -->
       <el-table v-if="accounts.length" :data="accounts" size="small" class="ca-table">
-        <el-table-column prop="email" label="邮箱" min-width="220" show-overflow-tooltip />
-        <el-table-column label="状态" width="90">
+        <el-table-column prop="email" label="邮箱" min-width="200" show-overflow-tooltip />
+        <el-table-column label="状态" width="80">
           <template #default="{ row }">
             <el-tag :type="row.status === '正常' ? 'success' : 'warning'" size="small">
               {{ row.status || '未知' }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="额度" width="80" align="center">
+        <el-table-column label="剩余生图额度" width="170">
           <template #default="{ row }">
-            <span :class="{ 'ca-quota-low': row.quota !== null && row.quota <= 5 }">
-              {{ row.quota === null ? '—' : row.quota }}
-            </span>
+            <div class="ca-quota-cell">
+              <div class="ca-quota-line">
+                <strong :class="quotaClass(row.image_quota)">{{ row.image_quota === null ? '—' : row.image_quota }}</strong>
+                <span class="ca-quota-of">次</span>
+                <el-tooltip v-if="row.quota_reset_at" placement="top" :content="`额度恢复时间：${fmtTime(row.quota_reset_at)}`">
+                  <span class="ca-quota-small">{{ shortReset(row.quota_reset_at) }}</span>
+                </el-tooltip>
+              </div>
+              <el-progress
+                v-if="row.image_quota !== null"
+                :percentage="quotaPercent(row.image_quota)"
+                :color="quotaColor(row.image_quota)"
+                :show-text="false"
+                :stroke-width="4"
+                class="ca-quota-progress"
+              />
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="自动续期" width="110" align="center">
+        <el-table-column label="自动续期" width="100" align="center">
           <template #default="{ row }">
             <el-tooltip
               v-if="row.refresh_token"
@@ -88,7 +119,22 @@
             </el-tooltip>
           </template>
         </el-table-column>
-        <el-table-column label="到期" width="150">
+        <el-table-column label="其他能力" width="140">
+          <template #default="{ row }">
+            <div v-if="otherLimits(row).length" class="ca-limits">
+              <el-tooltip
+                v-for="l in otherLimits(row)"
+                :key="l.key"
+                placement="top"
+                :content="l.reset_at ? `${l.label} 剩余 ${l.remaining}，${fmtTime(l.reset_at)} 恢复` : `${l.label} 剩余 ${l.remaining}`"
+              >
+                <span class="ca-limit-chip">{{ l.label }} {{ l.remaining }}</span>
+              </el-tooltip>
+            </div>
+            <span v-else class="ca-muted">—</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="到期" width="130">
           <template #default="{ row }">
             <span class="ca-muted">{{ row.access_expires_at ? fmtTime(row.access_expires_at) : '—' }}</span>
           </template>
@@ -215,6 +261,65 @@ function fmtTime(ms) {
   if (Number.isNaN(d.getTime())) return '—'
   const pad = (n) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+// 剩余生图额度的每日上限。免费号实测 image_gen.remaining = 23 起算，
+// 首次取到 22/21 之类也不该把进度条按 22 当满格，所以固定按免费号日额度算。
+// 付费号额度更高时进度条会超过 100，quotaPercent 里做了夹取。
+const FREE_DAILY_IMAGE_QUOTA = 23
+
+const totalImageQuota = computed(() =>
+  accounts.value.reduce((sum, a) => sum + (typeof a.image_quota === 'number' ? a.image_quota : 0), 0)
+)
+
+// 最近的一次额度恢复时间（多个账号时挑最早的那个）
+const earliestReset = computed(() => {
+  const list = accounts.value
+    .map((a) => a.quota_reset_at)
+    .filter(Boolean)
+    .map((t) => new Date(t).getTime())
+    .filter((t) => Number.isFinite(t))
+  if (!list.length) return ''
+  return fmtTime(Math.min(...list))
+})
+
+function quotaPercent(v) {
+  if (typeof v !== 'number') return 0
+  const max = Math.max(FREE_DAILY_IMAGE_QUOTA, v)
+  return Math.min(100, Math.round((v / max) * 100))
+}
+
+function quotaColor(v) {
+  if (typeof v !== 'number') return '#dcdfe6'
+  if (v <= 0) return '#f56c6c'
+  if (v <= 5) return '#e6a23c'
+  return '#67c23a'
+}
+
+function quotaClass(v) {
+  if (typeof v !== 'number') return ''
+  if (v <= 0) return 'ca-quota-out'
+  if (v <= 5) return 'ca-quota-low'
+  return 'ca-quota-ok'
+}
+
+// 恢复时间很短就只显示相对时长，省一列宽度
+function shortReset(t) {
+  if (!t) return ''
+  const d = new Date(t).getTime()
+  if (!Number.isFinite(d)) return ''
+  const diff = d - Date.now()
+  if (diff <= 0) return '可恢复'
+  const h = Math.floor(diff / 3600000)
+  if (h < 1) return `${Math.max(1, Math.floor(diff / 60000))} 分钟后`
+  if (h < 24) return `${h} 小时后`
+  return `${Math.floor(h / 24)} 天后`
+}
+
+// 生图之外的额度（深度研究 / 文件上传等），生图那一项单独成一列了
+function otherLimits(row) {
+  const list = Array.isArray(row?.limits) ? row.limits : []
+  return list.filter((l) => l.key !== 'image_gen' && typeof l.remaining === 'number')
 }
 
 async function load() {
@@ -372,6 +477,91 @@ defineExpose({ open, load })
 .ca-quota-low {
   color: #e6a23c;
   font-weight: 600;
+}
+.ca-quota-ok {
+  color: #1a7f37;
+}
+.ca-quota-out {
+  color: #f56c6c;
+  font-weight: 600;
+}
+
+/* 剩余生图额度汇总条 */
+.ca-quota-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  border: 1px solid #e1f3d8;
+  background: #f0f9eb;
+  border-radius: 8px;
+}
+.ca-quota-total {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.ca-quota-num {
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+  color: #1a7f37;
+}
+.ca-quota-unit {
+  font-size: 12px;
+  color: #529b2e;
+}
+.ca-quota-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  font-size: 12px;
+  color: #606266;
+}
+.ca-quota-warn {
+  color: #e6a23c;
+  font-weight: 600;
+}
+.ca-quota-reset {
+  color: #909399;
+}
+.ca-quota-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ca-quota-line {
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+}
+.ca-quota-of {
+  font-size: 11px;
+  color: #909399;
+}
+.ca-quota-small {
+  margin-left: auto;
+  font-size: 11px;
+  color: #c0c4cc;
+}
+.ca-quota-progress {
+  margin-top: 1px;
+}
+.ca-limits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+.ca-limit-chip {
+  font-size: 11px;
+  color: #606266;
+  background: #f4f4f5;
+  border-radius: 3px;
+  padding: 1px 4px;
+  white-space: nowrap;
 }
 .ca-empty {
   padding: 6px 0 12px;

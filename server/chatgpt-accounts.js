@@ -138,6 +138,53 @@ export async function proxyAccountsRequest(provider, method, path, body) {
   }
 }
 
+// 上游 limits_progress 里各类能力的展示名。没列到的按原 key 显示，
+// 这样上游新增能力（新的 feature_name）不会因为网关不认识就被吞掉。
+const LIMIT_LABELS = {
+  image_gen: '生图',
+  deep_research: '深度研究',
+  file_upload: '文件上传',
+  paste_text_to_file: '粘贴转文件',
+  reason: '推理'
+}
+
+/**
+ * 把 limits_progress 规整成前端能直接渲染的形状，并按「生图优先」排序。
+ *
+ * 上游原本是个数组：[{feature_name, remaining, reset_after}]，其中
+ * image_gen.remaining 就是**剩余生图额度**（与顶层 quota 同源）。顶层 quota
+ * 单独留着是为了兼容只有 quota、没有 limits_progress 的老版本。
+ */
+export function normalizeLimits(raw) {
+  const arr = Array.isArray(raw) ? raw : []
+  const out = []
+  for (const it of arr) {
+    if (!it || typeof it !== 'object') continue
+    const key = String(it.feature_name || '').trim()
+    if (!key) continue
+    const remaining = Number(it.remaining)
+    out.push({
+      key,
+      label: LIMIT_LABELS[key] || key,
+      remaining: Number.isFinite(remaining) ? remaining : null,
+      reset_at: it.reset_after || null
+    })
+  }
+  // 生图放最前面：这个面板存在的意义就是盯生图额度
+  out.sort((a, b) => {
+    if (a.key === 'image_gen') return -1
+    if (b.key === 'image_gen') return 1
+    return 0
+  })
+  return out
+}
+
+/** 从 limits 里取生图这一项（拿不到就返回 null）。 */
+export function imageLimitOf(limits) {
+  const arr = Array.isArray(limits) ? limits : []
+  return arr.find((l) => l.key === 'image_gen') || null
+}
+
 /** 把上游返回的账号压成前端要用的形状：不返回任何 token，只留展示字段。 */
 export function sanitizeAccounts(payload) {
   const items = Array.isArray(payload?.items)
@@ -165,15 +212,26 @@ export function sanitizeAccounts(payload) {
     // 往往**不含** chatgpt_plan_type（实测刷新后的 JWT auth 段只剩 amr /
     // user_id / residency），只信 JWT 会把免费号显示成空套餐。
     const plan = String(a?.type || jwtPlan || '')
+    const limits = normalizeLimits(a?.limits_progress)
+    const imageLimit = imageLimitOf(limits)
+    // 剩余生图额度：优先 limits_progress.image_gen，退回顶层 quota
+    const imageQuota = imageLimit?.remaining ?? (typeof a?.quota === 'number' ? a.quota : null)
     return {
       email: a?.email || '',
       status: a?.status || '',
       source_type: a?.source_type || '',
       quota: typeof a?.quota === 'number' ? a.quota : null,
+      image_quota: imageQuota,
+      // 生图额度恢复时间：limits 里的 reset_at 更精确，顶层 restore_at 兜底
+      quota_reset_at: imageLimit?.reset_at || a?.restore_at || null,
+      limits,
       plan,
       refresh_token: Boolean(a?.refresh_token),
       access_expires_at: accessExp || null,
       restore_at: a?.restore_at || null,
+      last_used_at: a?.last_used_at || null,
+      success: typeof a?.success === 'number' ? a.success : null,
+      fail: typeof a?.fail === 'number' ? a.fail : null,
       last_token_refresh_at: a?.last_token_refresh_at || null,
       last_refresh_error: a?.last_refresh_error || null,
       token_tail: at ? at.slice(-6) : ''
