@@ -220,14 +220,19 @@ function guessMime(p) {
 }
 
 // ---------------------------------------------------------------- onboard
-// 直接调网关管理接口建平台：protocol=openai-chat，base_url 指 chatgpt2api，
-// 模型清单只填生图模型，并把 chatgpt2api 的 auth-key 作为平台 Key 塞进去。
+// 直接调网关管理接口建平台：走「添加订阅」的 chatgpt-web 方案（image_only），
+// base_url 指 chatgpt2api，再把 chatgpt2api 的 auth-key 作为平台 Key 塞进去。
+// 带上 plan_id 是关键：服务端据此把 image_only 与模型清单按方案裁定，
+// 而不是信客户端发来的 model_names。
+const ONBOARD_MODELS = (process.env.WITH_ALT_IMAGES === '1'
+  ? ['gpt-image-2', 'codex-gpt-image-2', 'gpt-image-1']
+  : ['gpt-image-2'])
+
 async function cmdOnboard() {
   if (!ADMIN_KEY) throw new Error('缺 ADMIN_KEY（网关管理密钥）')
   if (!C2A_KEY) throw new Error('缺 C2A_KEY（chatgpt2api 的 auth-key）')
   const baseUrl = process.env.C2A_BASE_URL || `${C2A_BASE}/v1`
-  const models = ['gpt-image-2']
-  if (process.env.WITH_ALT_IMAGES === '1') models.push('codex-gpt-image-2', 'gpt-image-1')
+  const models = ONBOARD_MODELS
 
   const list = await (await fetch(`${GW_BASE}/api/providers`, { headers: { 'X-Admin-Key': ADMIN_KEY } })).json()
   const exist = (Array.isArray(list) ? list : []).find((p) => p.base_url === baseUrl && IMAGE_MODEL_RE.test((p.models || []).map((m) => m.id).join(' ')))
@@ -235,7 +240,7 @@ async function cmdOnboard() {
     const r = await fetch(`${GW_BASE}/api/providers/${exist.id}`, {
       method: 'PUT',
       headers: { 'X-Admin-Key': ADMIN_KEY, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: true, images_path: '/images/generations', model_names: models })
+      body: JSON.stringify({ enabled: true, image_only: true, images_path: '/images/generations', model_names: models })
     })
     console.log(`[ok] 已更新现有平台 ${exist.name} (${exist.id})`)
     console.log(JSON.stringify(await r.json(), null, 2))
@@ -246,9 +251,11 @@ async function cmdOnboard() {
     method: 'POST',
     headers: { 'X-Admin-Key': ADMIN_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      name: 'ChatGPT 网页版 · 只生图',
+      name: 'ChatGPT 网页版（chatgpt2api）· 生图',
       base_url: baseUrl,
       protocol: 'openai-chat',
+      plan_id: 'chatgpt-web',
+      image_only: true,
       images_path: '/images/generations',
       enabled: true,
       model_names: models

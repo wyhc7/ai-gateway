@@ -23,7 +23,7 @@
 
 - **要写代码 / 自动化编程** → Codex 通道（`CODEX-ONBOARDING.md`）
 - **要聊天 / 文生图 / 图编辑 / 联网搜索** → 网页版通道（`CHATGPT2API-ONBOARDING.md`）
-- **只要生图（gpt-image-2）** → `CHATGPT-IMAGE-ONLY.md`（只生图模板 + 一键脚本，模型清单锁死在生图）
+- **只要生图（gpt-image-2）** → `CHATGPT-IMAGE-ONLY.md`（「添加订阅」里的「ChatGPT 网页版（chatgpt2api）· 生图」方案，清单锁死在生图）
 - 两个通道**账号体系相通**（同一 ChatGPT 订阅），可同时接，互相不冲突
 
 ## 共同前提

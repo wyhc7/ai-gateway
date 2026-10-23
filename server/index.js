@@ -19,7 +19,8 @@ import {
   filterModelsForAuth
 } from './api-keys.js'
 import { TEMPLATES } from './templates.js'
-import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
+import { SUBSCRIPTION_PLANS, findPlan } from './subscription-plans.js'
+import { filterModelsForProvider, isImageModel } from './providers-image-only.js'
 import { startWorkbuddyLogin, pollWorkbuddyLogin, cancelWorkbuddyLogin, refreshWorkbuddyToken } from './workbuddy-oauth.js'
 import { workbuddyRealmFor } from './workbuddy-core.js'
 import { fetchWorkbuddyCheckinStatus, performWorkbuddyCheckin, beijingDayKey, fetchWorkbuddyCredits } from './workbuddy-checkin.js'
@@ -368,15 +369,24 @@ app.post('/api/providers', (req, res) => {
   if (!name || !base_url) {
     return res.status(400).json({ error: { message: '平台名称和 Base URL 为必填项' } })
   }
+  // 来自「添加订阅」的方案：image_only / auth_kind 是方案属性，不能由客户端随意决定
+  // 口径——前端只是把它抄过来，真正的判据在这里。这样即便有人直接拿 curl 建平台，
+  // 也不会造出一个「声称只生图但塞了文本模型」的平台。
+  const plan = req.body.plan_id ? findPlan(req.body.plan_id) : null
+  const imageOnly = plan ? Boolean(plan.image_only) : Boolean(req.body.image_only)
+  const names = (plan ? plan.default_models || [] : model_names).filter(Boolean)
   const provider = {
     id: genId(),
     name,
     base_url,
     protocol: protocol || DEFAULT_PROTOCOL,
     enabled,
-    models: model_names.filter(Boolean).map((id) => ({ id, owned_by: name })),
+    // 只生图平台在建平台这一刻就把非生图模型剔掉：前端模板、导入备份、
+    // 手填 model_names 三条路都从这里过，闸门放在最前面最省事
+    models: (imageOnly ? names.filter(isImageModel) : names).map((id) => ({ id, owned_by: name })),
     keys: [],
     extra_headers: extra_headers || {},
+    ...(imageOnly ? { image_only: true } : {}),
     ...pickCallPlan(req.body),
     // WorkBuddy 的登录起点版本（cn / intl）。国际版的登录入口只认 IDE 客户端，
     // 起点也不同，所以建平台时就定下来，授权框据此预选。
@@ -421,8 +431,11 @@ app.put('/api/providers/:id', (req, res) => {
   if (protocol !== undefined) p.protocol = protocol
   if (enabled !== undefined) p.enabled = Boolean(enabled)
   if (extra_headers !== undefined) p.extra_headers = extra_headers
+  // image_only 是只增不减的锁：只生图平台在编辑表单里被拖进文本模型，
+  // 也在这里被剔掉。允许关掉它等于给「只生图」留后门，不提供这个开关。
+  if (req.body.image_only) p.image_only = true
   if (model_names !== undefined) {
-    p.models = model_names.filter(Boolean).map((id) => ({ id, owned_by: p.name }))
+    p.models = filterModelsForProvider(p, model_names.filter(Boolean)).map((id) => ({ id, owned_by: p.name }))
   }
   Object.assign(p, pickCallPlan(req.body))
   persistImmediate()

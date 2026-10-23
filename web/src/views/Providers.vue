@@ -308,6 +308,11 @@
               <el-form-item label="对话接口路径">
                 <el-input v-model="providerForm.chat_path" placeholder="/chat/completions" />
               </el-form-item>
+              <!-- 生图路径独立一栏：只生图平台（chatgpt2api 等）没有对话可言，
+                   路径填错的表现是生图请求直接 404，且在网关日志里只看到一次转发 -->
+              <el-form-item label="生图接口路径">
+                <el-input v-model="providerForm.images_path" placeholder="/images/generations" />
+              </el-form-item>
               <el-form-item label="模型列表路径">
                 <el-input v-model="providerForm.models_path" placeholder="/models" />
               </el-form-item>
@@ -373,6 +378,15 @@
               按你订阅的版本选；建成后该平台固定属于这个版本，要接另一个版本请另建一个平台。
             </div>
           </el-col>
+          <!-- 静态 Key 类方案（chatgpt2api 等自建转换层）：凭据建完再补，
+               这里先把话说明白，免得创建后找不到入口 -->
+          <el-col v-if="currentPlan?.auth_kind === 'api_key'" :span="24">
+            <div class="oauth-hint" style="margin-top: -4px">
+              这条方案用的是自建转换层的 auth-key，不是 OpenAI 官方 Key。
+              创建后回到平台列表点「添加 Key」，把 <code>CHATGPT2API_AUTH_KEY</code> 填进去。
+              <template v-if="currentPlan?.image_only">本方案只生图，模型清单只有生图模型。</template>
+            </div>
+          </el-col>
         </el-row>
         <el-form-item label="模型 API 地址" required>
           <el-input v-model="subForm.base_url" :placeholder="subFormPlaceholder" />
@@ -382,11 +396,16 @@
             v-model="subForm.model_names_text"
             type="textarea"
             :rows="4"
-            placeholder="每行一个模型；默认不预填，留空即可"
+            :placeholder="currentPlan?.image_only ? '只生图方案：预填 gpt-image-2，留空则由网关回退到同一份清单' : '每行一个模型；默认不预填，留空即可'"
           />
           <span class="muted" style="display: block; margin-top: 6px; font-size: 12px; line-height: 1.7">
-            默认模型不预填——订阅上游的可用型号随版本演进，写死一份容易与实际对不上。
-            留空建完后点平台列表里的「刷新」，拉取失败时网关会回退到内置默认列表兜底。
+            <template v-if="currentPlan?.image_only">
+              只生图方案：非生图模型即使填进来也会被服务端剔掉，客户端 <code>/v1/models</code> 只会看到生图模型。
+            </template>
+            <template v-else>
+              默认模型不预填——订阅上游的可用型号随版本演进，写死一份容易与实际对不上。
+              留空建完后点平台列表里的「刷新」，拉取失败时网关会回退到内置默认列表兜底。
+            </template>
           </span>
         </el-form-item>
       </el-form>
@@ -686,6 +705,7 @@ const emptyForm = () => ({
   auth_prefix: '',
   auth_query_param: '',
   chat_path: '',
+  images_path: '',
   models_path: '',
   models_method: ''
 })
@@ -711,7 +731,7 @@ function protocolLabel(proto) {
 }
 
 function isCustomCallPlan(p) {
-  return p.auth_type || p.auth_header || p.auth_prefix || p.auth_query_param || p.chat_path || p.models_path || p.models_method
+  return p.auth_type || p.auth_header || p.auth_prefix || p.auth_query_param || p.chat_path || p.images_path || p.models_path || p.models_method
 }
 
 const presetId = ref('')
@@ -741,6 +761,7 @@ function applyPreset(id) {
   providerForm.value.auth_prefix = t.auth_prefix !== undefined ? t.auth_prefix : ''
   providerForm.value.auth_query_param = t.auth_query_param || ''
   providerForm.value.chat_path = t.chat_path || ''
+  providerForm.value.images_path = t.images_path || ''
   providerForm.value.models_path = t.models_path || ''
   providerForm.value.models_method = t.models_method || ''
   providerForm.value.extra_headers_text = t.extra_headers ? JSON.stringify(t.extra_headers, null, 2) : ''
@@ -761,6 +782,7 @@ function onProtocolChange() {
     providerForm.value.auth_prefix = ''
     providerForm.value.auth_query_param = ''
     providerForm.value.chat_path = ''
+    providerForm.value.images_path = ''
     providerForm.value.models_path = ''
     providerForm.value.models_method = ''
   }
@@ -983,6 +1005,7 @@ function openEditDialog(p) {
     auth_prefix: p.auth_prefix !== undefined ? p.auth_prefix : '',
     auth_query_param: p.auth_query_param || '',
     chat_path: p.chat_path || '',
+    images_path: p.images_path || '',
     models_path: p.models_path || '',
     models_method: p.models_method || ''
   }
@@ -1015,7 +1038,7 @@ async function saveProvider() {
     extra_headers: extra,
     model_names
   }
-  for (const field of ['auth_type', 'auth_header', 'auth_prefix', 'auth_query_param', 'chat_path', 'models_path', 'models_method']) {
+  for (const field of ['auth_type', 'auth_header', 'auth_prefix', 'auth_query_param', 'chat_path', 'images_path', 'models_path', 'models_method']) {
     // 始终提交（含空字符串）：空值 = 清空自定义配置、回退到协议默认
     payload[field] = providerForm.value[field] || ''
   }
@@ -1060,7 +1083,7 @@ async function doPreview() {
     api_key,
     extra_headers: parseExtraFromForm()
   }
-  for (const field of ['auth_type', 'auth_header', 'auth_prefix', 'auth_query_param', 'chat_path', 'models_path', 'models_method']) {
+  for (const field of ['auth_type', 'auth_header', 'auth_prefix', 'auth_query_param', 'chat_path', 'images_path', 'models_path', 'models_method']) {
     if (providerForm.value[field]) payload[field] = providerForm.value[field]
   }
   if (editingProvider.value && !api_key) {
@@ -1231,14 +1254,22 @@ async function openSubscriptionDialog() {
 
 // 换接入点时只跟着刷新接入地址。名称只在为空、或还停在某个方案自带的名字上时
 // 才覆盖，免得把用户自己敲的名字抹掉。
-// 模型清单故意不碰：默认模型随上游版本变，预填一份很容易与实际可用型号对不上，
-// 而用户在里面写过东西时更不能覆盖。留空由他自己填，或建完点「刷新」让网关兜底。
+// 模型清单：OAuth 方案故意不碰（默认模型随上游版本变，预填一份很容易与实际对不上，
+// 而用户在里面写过东西时更不能覆盖）；只生图方案例外——它的全部意义就是清单里
+// 只有生图模型，必须预填，否则建出来的平台空着，刷新又会把文本模型灌回来。
 function applyPlan() {
   const plan = subscriptionPlans.value.find((p) => p.id === subForm.value.plan_id)
   if (!plan) return
   const stillPlanName = subscriptionPlans.value.some((p) => p.name === subForm.value.name)
   if (!subForm.value.name || stillPlanName) subForm.value.name = plan.name
   subForm.value.base_url = plan.base_url
+  if (!plan.default_models || plan.default_models.length === 0) return
+  const stillPlanModels = subscriptionPlans.value.some(
+    (p) => (p.default_models || []).join('\n') === subForm.value.model_names_text
+  )
+  if (!subForm.value.model_names_text.trim() || stillPlanModels || plan.image_only) {
+    subForm.value.model_names_text = plan.default_models.join('\n')
+  }
 }
 
 async function createSubscription() {
@@ -1250,18 +1281,32 @@ async function createSubscription() {
   const model_names = subForm.value.model_names_text.split('\n').map((s) => s.trim()).filter(Boolean)
   creatingSub.value = true
   try {
-    // 不提交 api_key：订阅平台的凭据走授权/导入，交了后端会存成一个永远调不通的静态 Key
+    // 不提交 api_key：订阅平台的凭据走授权/导入/补填，交了后端会存成一个
+    // 未必可用的静态 Key。plan_id 一并提交，image_only 这类方案属性由服务端裁定，
+    // 不靠前端抄一份字段说了算。
     const created = await api.createProvider({
       name: subForm.value.name,
       base_url: subForm.value.base_url,
       protocol: plan.protocol,
+      plan_id: plan.id,
       extra_headers: {},
+      // 方案自带的调用路径（生图路径尤其关键）：反代挂子路径时全靠它指对地方
+      chat_path: plan.chat_path || '',
+      images_path: plan.images_path || '',
       // 登录起点版本：国际版入口只认 IDE 客户端，和国内版不是同一个地址
       workbuddy_region: plan.region,
+      image_only: Boolean(plan.image_only),
       model_names
     })
     subscriptionDialog.value = false
     await load()
+    // 凭据是静态 Key 的方案（自建转换层）：没有设备码可走，直接把他送到
+    // 「添加 Key」对话框，否则建完一个空平台在列表里杵着，没人知道下一步是填 Key
+    if (plan.auth_kind === 'api_key') {
+      ElMessage.success('订阅平台已创建，请填入转换层的 auth-key')
+      openAddKeyDialog(created)
+      return
+    }
     ElMessage.success('订阅平台已创建，接下来绑定凭据')
     // 平台没有凭据就服务不了，所以建完直接进授权：WorkBuddy 扫码、Grok/Codex 设备码。
     // 想改走「导入 Token」关掉这个框，从平台列表里点即可

@@ -66,19 +66,26 @@ uv 方式：`uv sync && uv run main.py`，前端可选 `web/`。
 
 ## 3. 网关侧建「只生图」平台
 
+> 入口统一在 **平台管理 → 添加订阅**，方案名 **「ChatGPT 网页版（chatgpt2api）· 生图」**。
+> 「添加平台」里已经没有 chatgpt2api 的模板了——凭据是自建转换层的 auth-key，
+> 还得配生图路径，只有订阅入口能一次配齐。
+> 这条方案**只生图**：模型清单只有 `gpt-image-2`，服务端会剔掉任何非生图模型。
+
 ### 3.1 界面方式
 
-平台管理 → 添加平台 → 选模板 **「ChatGPT 网页版（chatgpt2api）· 只生图」**：
+平台管理 → 添加订阅 → 订阅接入选 **「ChatGPT 网页版（chatgpt2api）· 生图」**：
 
 | 字段 | 值 |
 |---|---|
-| 协议 | `openai-chat` |
-| Base URL | `http://127.0.0.1:3000/v1`（跨机就写 `http://<IP>:3000/v1`） |
-| 生图路径 | `/images/generations`（模板已填） |
-| API Key | chatgpt2api 的 `CHATGPT2API_AUTH_KEY` |
-| 模型 | `gpt-image-2`（已预填；Plus 号想要 Codex 生图再加 `codex-gpt-image-2`） |
+| 订阅接入 | ChatGPT 网页版（chatgpt2api）· 生图 |
+| 平台名称 | 自动填好，可改 |
+| 模型 API 地址 | `http://127.0.0.1:3000/v1`（跨机写 `http://<IP>:3000/v1`） |
+| 模型名称 | `gpt-image-2`（已预填，别加文本模型） |
 
-不要点「拉取列表」去收全套模型——会把 `gpt-5` 之类对话模型也收进来，客户端就有机会把图片请求发到对话通道。
+点「创建」后弹框直接进 **添加 Key**，把 chatgpt2api 的 `CHATGPT2API_AUTH_KEY` 填进去。
+
+文本模型不用管：方案标了 `image_only`，客户端 `/v1/models` 只会看到生图模型，
+就算点「刷新」把上游整份目录拉回来，`gpt-5` 系也会在建平台/刷新/保存三处被剔掉。
 
 ### 3.2 脚本方式（最快，一条命令）
 
@@ -88,18 +95,20 @@ export C2A_KEY=<chatgpt2api 的 auth-key>
 node scripts/chatgpt-image.mjs onboard
 ```
 
-脚本干的事：`POST /api/providers`（protocol/base_url/images_path/模型清单）→ `POST /api/providers/<id>/keys` 塞 Key。
+脚本干的事：`POST /api/providers`（plan_id/base_url/images_path/模型清单）→ `POST /api/providers/<id>/keys` 塞 Key。
 已经有指向同一 base_url 的生图平台就改成更新，不会建重复。
 
 ### 3.3 纯 curl 等价物
 
 ```bash
+# 带 plan_id 建：image_only 与模型清单由服务端按方案裁定，客户端说了不算
 curl -X POST http://127.0.0.1:3080/api/providers \
   -H "X-Admin-Key: <ADMIN_KEY>" -H "Content-Type: application/json" \
   -d '{
-    "name": "ChatGPT 网页版 · 只生图",
+    "name": "ChatGPT 网页版 · 生图",
     "base_url": "http://127.0.0.1:3000/v1",
     "protocol": "openai-chat",
+    "plan_id": "chatgpt-web",
     "images_path": "/images/generations",
     "model_names": ["gpt-image-2"]
   }'
@@ -171,10 +180,14 @@ curl -X POST http://127.0.0.1:3080/api/keys -H "X-Admin-Key: <ADMIN_KEY>" \
 
 | 文件 | 改动 | 为什么 |
 |---|---|---|
-| `server/templates.js` | 新增模板 `chatgpt-image`「只生图」，模型只有 `gpt-image-2 / codex-gpt-image-2 / gpt-image-1`；`chatgpt-web` 补 `images_path` | 用户只拉生图模型，避免误用对话通道 |
-| `server/index.js` | `CALL_PLAN_FIELDS` 补 `images_path` | 之前前端传了 `images_path` 会被白名单过滤静默丢掉，生图请求永远打到默认路径 |
+| `server/templates.js` | 删掉 `chatgpt-web` / `chatgpt-image` 两条模板 | 同一份接入留两处，必然建出配置不一致的平台 |
+| `server/subscription-plans.js` | 合并成一条 `chatgpt-web` 方案：`image_only`、`chat_path`、`images_path`、`default_models=['gpt-image-2']` | 只生图，且从「添加订阅」一次配齐 |
+| `server/providers-image-only.js` | 新增：生图模型判据 + 平台模型过滤 + 只生图兜底清单 | 模型清单有三个写入口（建平台 / 刷新 / 保存），全都在服务端挡 |
+| `server/proxy.js` | 刷新时按 `image_only` 过滤；兜底改用 `IMAGE_ONLY_FALLBACK_MODELS` | 上游 `/v1/models` 会把 `gpt-5` 系吐回来，不挡就灌进清单 |
+| `server/index.js` | `CALL_PLAN_FIELDS` 补 `images_path`；建/改平台按 `plan_id` 或 `image_only` 过滤模型，并把 `image_only` 落盘 | 之前 `images_path` 被白名单静默丢掉，生图永远打默认路径 |
+| `web/src/views/Providers.vue` | 订阅表单支持方案路径与模型预填、`image_only` 方案创建后直接进「添加 Key」；高级项新增「生图接口路径」 | 前端不抄字段说了算，但入口得指对 |
 | `scripts/chatgpt-image.mjs` | 新增 | 建平台 / 探活 / 生成 / 编辑 / 直连排障一条命令搞定 |
-| `server/test/provider-images-path.test.js` | 新增 4 条断言 | 锁死上面两个洞，回归不再复发 |
+| `server/test/*.test.js` | 新增 `image-only-plan.test.js` 7 条；更新 `provider-images-path` / `proxy-models` | 锁死「清单里不许出现文本模型」与 `images_path` 两个洞 |
 
 生图超时保持 `IMAGES_TOTAL_TIMEOUT_MS` 默认 300 秒（`server/proxy.js`），
 gpt-image-2 实测 30~90 秒，排队时更久；要改就设环境变量，不要动代码。

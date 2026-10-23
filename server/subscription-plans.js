@@ -56,7 +56,39 @@ export const SUBSCRIPTION_PLANS = [
   // 上游是 chatgpt.com/backend-api/codex 的 Responses API，网关自动做协议转换。
   // 上游没有公开的 /models，default_models 同时充当兜底列表；
   // 实际可用模型随 OpenAI 版本演进，以对话实测为准。
-  { id: 'codex-oauth', name: 'Codex 订阅账号（ChatGPT Plus/Pro）', protocol: 'codex-oauth', base_url: 'https://chatgpt.com/backend-api/codex', default_models: ['gpt-5.3-codex-spark', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] }
+  { id: 'codex-oauth', name: 'Codex 订阅账号（ChatGPT Plus/Pro）', protocol: 'codex-oauth', base_url: 'https://chatgpt.com/backend-api/codex', default_models: ['gpt-5.3-codex-spark', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] },
+  // ChatGPT 网页/手机版（经 chatgpt2api 转换层）——只生图。
+  //
+  // 原先在 templates.js 里是两条模板（「网页/手机版」与「只生图」），现在合成这一条，
+  // 并且只从这里建：凭据不是 OpenAI 官方 API Key，而是自建转换层的 auth-key，
+  // 要走「添加订阅」这条路才能把地址、模型清单、生图路径一次配齐。
+  //
+  // 四条落地约定：
+  // - default_models 只有生图模型，一个文本模型都不给。文本通道不接，
+  //   客户端 `/v1/models` 就拉不到 gpt-5 系，图片请求也没机会被误发到 chat。
+  //   codex-gpt-image-2 / gpt-image-1 也不预填：那是 Plus 与旧版上游才有，
+  //   写进去只会让「刷新失败兜底」给客户端发一批必然 404 的名字，
+  //   真要就建完自己点「刷新」或手工加。
+  // - chat_path 与 images_path 都显式写全：反代把转换层挂在子路径
+  //   （https://x.example.com/gpt/v1）时，两者一起改才不会打偏。
+  // - image_only=true 让服务端在配模型时把非生图模型过滤掉（见
+  //   server/providers-image-only.js），刷新拉回一整份目录也不会漏进文本模型。
+  // - auth_kind='api_key' 表示凭据是可补填的静态 Key、不是 OAuth：建完平台要
+  //   点「添加 Key」把 chatgpt2api 的 auth-key 填进去才开始工作。
+  {
+    id: 'chatgpt-web',
+    name: 'ChatGPT 网页版（chatgpt2api）· 生图',
+    protocol: 'openai-chat',
+    base_url: 'http://127.0.0.1:3000/v1',
+    auth_kind: 'api_key',
+    image_only: true,
+    chat_path: '/chat/completions',
+    images_path: '/images/generations',
+    default_models: ['gpt-image-2'],
+    hint: '先在本机或支持区服务器跑起 chatgpt2api（默认 3000 端口，API 路径 /v1），再导入 ChatGPT 账号的 access_token。'
+      + '建完平台点「添加 Key」，填入 chatgpt2api 的 CHATGPT2API_AUTH_KEY。'
+      + '本方案只生图：模型清单里不含任何文本模型，生图走 /api/v1/images/generations，模型 gpt-image-2。'
+  }
 ]
 
 export function findPlan(id) {

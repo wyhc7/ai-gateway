@@ -9,6 +9,7 @@ import { TEMPLATES } from './templates.js'
 import { isWorkbuddyProtocol, workbuddyHeaders, workbuddyChatBaseFor, shapeWorkbuddyBody, workbuddyRealmFor } from './workbuddy-lane.js'
 import { fetchWorkbuddyCatalog, mergeWorkbuddyCatalogs } from './workbuddy-catalog.js'
 import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
+import { filterModelsForProvider, IMAGE_ONLY_FALLBACK_MODELS } from './providers-image-only.js'
 
 // 允许「协议级默认模型」兜底的协议白名单。
 //
@@ -758,9 +759,12 @@ export async function refreshModels(providerId) {
         // 刷新结果静默成「没模型」。
         const raw = data && data.data !== undefined ? data.data : data
         const list = Array.isArray(raw) ? raw : Array.isArray(raw?.models) ? raw.models : []
-        const models = list
+        // 只生图平台：上游 /v1/models 会把 gpt-5 系一起吐出来，
+        // 在这里就剔干净——文本模型一旦进了清单，客户端就能把图片请求
+        // 误发到 chat 通道，或者反过来把对话请求打到生图上。
+        const models = filterModelsForProvider(provider, list
           .map((m) => normalizeUpstreamModel(m, provider))
-          .filter((m) => m.id)
+          .filter((m) => m.id))
         // 信封报了错就别把空列表当成功——否则刷新会静默清空模型
         if (models.length === 0 && Number.isFinite(Number(data?.code)) && Number(data.code) !== 0) {
           throw new Error(String(data.msg || `上游返回 code=${data.code}`))
@@ -783,7 +787,11 @@ export async function refreshModels(providerId) {
   }
   // 全部 Key 均不可用：若该协议有内置默认模型，退回默认列表并标注来源，
   // 避免平台因为拉不到 /models 而完全不可用。
-  const fallback = defaultModelsFor(provider.protocol)
+  // 只生图平台用自己那份兜底（只有 gpt-image-2），不走 defaultModelsFor——
+  // 后者按协议查表，可能给出别的方案的对话模型清单。
+  const fallback = provider.image_only
+    ? IMAGE_ONLY_FALLBACK_MODELS.map((id) => ({ id, owned_by: provider.name }))
+    : defaultModelsFor(provider.protocol)
   if (fallback && fallback.length) {
     provider.models = fallback
     provider.models_updated_at = Date.now()

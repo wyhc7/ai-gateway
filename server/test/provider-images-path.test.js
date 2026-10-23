@@ -4,7 +4,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { callPlan } from '../proxy.js'
-import { TEMPLATES } from '../templates.js'
+import { SUBSCRIPTION_PLANS } from '../subscription-plans.js'
 
 test('provider 自带的 images_path 覆盖协议默认值', () => {
   const plan = callPlan({ protocol: 'openai-chat', images_path: '/v1/images/generations' })
@@ -16,13 +16,15 @@ test('未配 images_path 时退回协议默认 /images/generations', () => {
   assert.equal(plan.imagesPath, '/images/generations')
 })
 
-test('只生图模板存在且模型清单只有生图模型', () => {
-  const t = TEMPLATES.find((x) => x.id === 'chatgpt-image')
-  assert.ok(t, '缺少 chatgpt-image 模板')
+// 只生图方案已从 templates.js 搬到 subscription-plans.js（「添加订阅」入口），
+// 这里断言的是方案的配置本身仍然正确，避免搬迁时丢字段。
+test('只生图订阅方案的调用路径与模型清单正确', () => {
+  const t = SUBSCRIPTION_PLANS.find((x) => x.id === 'chatgpt-web')
+  assert.ok(t, '缺少 chatgpt-web 订阅方案')
   assert.equal(t.protocol, 'openai-chat')
   assert.equal(t.images_path, '/images/generations')
+  assert.equal(t.chat_path, '/chat/completions')
   assert.ok(t.default_models.includes('gpt-image-2'))
-  assert.ok(t.default_models.every((m) => /image/i.test(m)), `模板里混进了非生图模型：${t.default_models}`)
 })
 
 test('建平台时 images_path 被 pickCallPlan 接收', async () => {

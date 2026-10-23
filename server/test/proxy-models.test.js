@@ -20,11 +20,13 @@ let canonicalModelId = null
 let stripRateSuffix = null
 let lookupModel = null
 let TEMPLATES = null
+let SUBSCRIPTION_PLANS = null
 
 before(async () => {
   ;({ state } = await import('../store.js'))
   ;({ defaultModelsFor, refreshModels, autoHeaders, handleModels, canonicalModelId, stripRateSuffix, lookupModel } = await import('../proxy.js'))
   ;({ TEMPLATES } = await import('../templates.js'))
+  ;({ SUBSCRIPTION_PLANS } = await import('../subscription-plans.js'))
 })
 
 beforeEach(() => { globalThis.fetch = realFetch })
@@ -54,14 +56,14 @@ describe('defaultModelsFor', () => {
     assert.equal(defaultModelsFor('no-such-protocol'), null)
   })
 
-  test('回归：模板自带的 default_models 不得扩散到同协议的其他平台', () => {
-    // 兜底名单必须按「上游有没有 /models」来定，不能按「模板里有没有写默认模型」。
-    // chatgpt-web 是 openai-chat 协议且自带 gpt-5 / gpt-image-2 等默认模型；
-    // 一旦按协议匹配，DeepSeek / 通义 / Gemini / 硅基流动 / Ollama 等约 20 个
-    // openai-chat 平台在拉取模型失败时都会被静默塞进 ChatGPT 的模型列表，
-    // 界面显示「拉取成功」，但用户拿 deepseek-chat 请求必然失败且毫无提示。
-    const chatgptWeb = TEMPLATES.find((t) => t.id === 'chatgpt-web')
-    assert.ok(chatgptWeb, 'chatgpt-web 模板应存在')
+  test('回归：方案自带的 default_models 不得扩散到同协议的其他平台', () => {
+    // 兜底名单必须按「上游有没有 /models」来定，不能按「方案里有没有写默认模型」。
+    // chatgpt-web 是 openai-chat 协议且自带生图默认模型（已从 templates 搬到
+    // subscription-plans）；一旦按协议匹配，DeepSeek / 通义 / Gemini / 硅基流动 /
+    // Ollama 等约 20 个 openai-chat 平台在拉取模型失败时都会被静默塞进 ChatGPT 的
+    // 模型列表，界面显示「拉取成功」，但用户拿 deepseek-chat 请求必然失败且毫无提示。
+    const chatgptWeb = SUBSCRIPTION_PLANS.find((t) => t.id === 'chatgpt-web')
+    assert.ok(chatgptWeb, 'chatgpt-web 订阅方案应存在')
     assert.ok(chatgptWeb.default_models?.length > 0, 'chatgpt-web 应自带默认模型，否则这条回归失去意义')
     assert.equal(chatgptWeb.protocol, 'openai-chat')
 
