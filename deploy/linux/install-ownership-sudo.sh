@@ -62,14 +62,18 @@ install -m 0440 -o root -g root "$TMP" "$SUDOERS_FILE"
 echo "已写入 $SUDOERS_FILE"
 echo "规则：$USER_NAME ALL=(root) NOPASSWD: $CHOWN_BIN -R $USER_NAME:$USER_NAME $REPO_DIR"
 
-# 立即验证：以服务用户 `sudo -n -l` 列出可用命令，看这条 chown 规则是否命中。
-# 用 -l 而不是真跑一次 chown：改属主有副作用，验证阶段不该动磁盘状态。
-if su -s /bin/bash "$USER_NAME" -c "sudo -n -l '$CHOWN_BIN' -R '$USER_NAME:$USER_NAME' '$REPO_DIR'" 2>/dev/null \
-  | grep -q -- 'NOPASSWD'; then
+# 立即验证：以服务用户 `sudo -n -l` 不带参数列出该用户被授予的全部命令，
+# 再 grep 这条规则。
+#
+# 不能写 `sudo -l <命令> <参数...>`：那要求参数与规则逐字对应，稍有出入就报
+# "not allowed to run"，把有效规则误判成失效（第一版就栽在这）。
+# 不带参数列全量，只判断"这条 chown 在不在白名单里"，稳定得多。
+if su -s /bin/bash "$USER_NAME" -c "sudo -n -l" 2>/dev/null \
+  | grep -q -- "NOPASSWD.*$CHOWN_BIN -R $USER_NAME:$USER_NAME $REPO_DIR"; then
   echo "验证：免密 sudo 可用 ✅"
 else
-  echo "验证：规则未命中，请人工执行下面这行检查 ⚠️" >&2
-  echo "  su -s /bin/bash $USER_NAME -c \"sudo -n -l '$CHOWN_BIN' -R '$USER_NAME:$USER_NAME' '$REPO_DIR'\"" >&2
+  echo "验证：规则未在 sudo -l 输出中命中，请人工检查 ⚠️" >&2
+  echo "  su -s /bin/bash $USER_NAME -c 'sudo -n -l'" >&2
 fi
 
 echo
