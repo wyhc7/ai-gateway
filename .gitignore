@@ -29,3 +29,5 @@ start-*.bat
 start-*.sh
 
 out/
+
+.tmp_*
