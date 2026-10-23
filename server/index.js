@@ -286,9 +286,17 @@ app.use((req, res, next) => {
 
 // 管理端鉴权：除 /api/v1/*（网关调用，走网关 Key）与 /api/health（健康检查）外，
 // 所有管理接口都必须携带管理密钥（X-Admin-Key 头或 Authorization: Bearer）
+//
+// 常量放在这里是因为鉴权中间件在路由注册之前就执行，需要提前引用。
+const CHATGPT_OAUTH_CALLBACK_PATH = '/api/chatgpt-accounts/oauth/callback'
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api/')) return next()
   if (req.path.startsWith('/api/v1/') || req.path === '/api/health') return next()
+  // 书签脚本用的回调端点必须豁免：它跑在 platform.openai.com 的页面里，
+  // 那里没有管理密钥（也不能有——密钥会出现在页面 JS 里）。
+  // 它的鉴权换成 provider_id + session_id：session 是 32 位随机串、
+  // 10 分钟过期、成功即销毁，泄漏也只能用一次，且拿到它做不了别的事。
+  if (req.path === CHATGPT_OAUTH_CALLBACK_PATH) return next()
   const adminKey = getAdminKey()
   const provided = req.headers['x-admin-key'] || (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
   if (adminKey && provided && safeEqual(provided, adminKey)) return next()
