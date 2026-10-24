@@ -253,6 +253,12 @@ export function parseWorkbuddyAuthFile(raw) {
   } catch {
     return null
   }
+  // 批量导出文件（{ format:'workbuddy-accounts', accounts:[...] }）只有一个
+  // 账号时也认：取第一条，与前端 parseWorkbuddyAuthEntries 的摊平逻辑对齐。
+  // 多账号的场景走批量导入接口，这里只负责「单个登录态」这一种语义。
+  if (!Array.isArray(obj) && Array.isArray(obj?.accounts) && obj.accounts.length === 1) {
+    obj = obj.accounts[0]
+  }
   const auth = obj.auth || obj
   const account = obj.account || obj
 

@@ -1521,7 +1521,17 @@ function parseWorkbuddyAuthEntries(raw) {
   } catch {
     return { entries: [], error: '不是合法的 JSON，请确认粘贴/上传的是登录态文件内容' }
   }
-  const list = Array.isArray(obj) ? obj : [obj]
+  // 三种形状都认：
+  //   1) 裸数组        [ {accessToken, uid, ...}, ... ]
+  //   2) 单个登录态    { accessToken, uid, ... } 或 { auth, account }
+  //   3) 批量导出文件  { format:'workbuddy-accounts', accounts: [...] }
+  // 第 3 种是网关自己的批量导出产物，字段是驼峰（accessToken），
+  // 与单条登录态同形，所以只要把 accounts 摊平就能复用后面那套解析。
+  const list = Array.isArray(obj)
+    ? obj
+    : Array.isArray(obj?.accounts)
+      ? obj.accounts
+      : [obj]
   if (list.length === 0) return { entries: [], error: 'JSON 里没有账号' }
   const entries = []
   const bad = []
