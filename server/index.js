@@ -29,7 +29,7 @@ import {
 import { TEMPLATES } from './templates.js'
 import { SUBSCRIPTION_PLANS, findPlan } from './subscription-plans.js'
 import { filterModelsForProvider, isImageModel } from './providers-image-only.js'
-import { startWorkbuddyLogin, pollWorkbuddyLogin, cancelWorkbuddyLogin, refreshWorkbuddyToken } from './workbuddy-oauth.js'
+import { startWorkbuddyLogin, pollWorkbuddyLogin, cancelWorkbuddyLogin, refreshWorkbuddyToken, ensureWorkbuddyToken } from './workbuddy-oauth.js'
 import { workbuddyRealmFor } from './workbuddy-core.js'
 import { fetchWorkbuddyCheckinStatus, performWorkbuddyCheckin, beijingDayKey, fetchWorkbuddyCredits } from './workbuddy-checkin.js'
 import { addLog, getLogs, initLogger } from './logger.js'
@@ -997,6 +997,51 @@ const workbuddyCheckinTimer = setInterval(() => {
   workbuddyAutoCheckinTick().catch(() => {})
 }, WORKBUDDY_CHECKIN_TICK_MS)
 workbuddyCheckinTimer.unref?.()
+
+// —— WorkBuddy 凭据保活 ——
+//
+// 为什么需要这个：续期原本只在「调用前」和「401/403 后」触发（见
+// proxy.resolveKeyToken）。这个设计对高频账号没问题，但对**冷账号**是致命的：
+// 一个号如果一整个 token 周期都没被选中过，就永远没人去刷它，
+// 等下次选中时 refresh_token 可能已经作废 —— 号就这样无声地死了。
+//
+// 7 个号轮询，单个号确实可能长期轮不到。所以这里补一个主动保活：
+// 每小时扫一遍，把「已经过了续期窗口」的号刷掉。
+//
+// 直接复用 ensureWorkbuddyToken：它内部先判断 tokenNeedsRefresh，
+// 没到期就原样返回、不发请求 —— 所以这个 tick 对绝大多数账号是完全空转，
+// 不会白白消耗 refresh_token 的寿命。
+const WORKBUDDY_KEEPALIVE_TICK_MS = 60 * 60 * 1000
+
+async function workbuddyTokenKeepaliveTick() {
+  for (const p of state.providers || []) {
+    if (p.protocol !== 'workbuddy-oauth') continue
+    for (const key of p.keys || []) {
+      if (!key.enabled || key.type !== 'oauth' || !key.refresh_token) continue
+      try {
+        const { credential, refreshed } = await ensureWorkbuddyToken(key)
+        if (!refreshed) continue
+        Object.assign(key, credential)
+        persistImmediate()
+        delete key.last_refresh_error
+        addLog({
+          type: 'oauth', action: 'refresh', provider_id: p.id,
+          detail: `${key.name} 凭据已保活续期`
+        })
+      } catch (err) {
+        // 失败不反复刷屏：写进字段，界面能看见，下一轮再试
+        key.last_refresh_error = err.message
+        persistImmediate()
+        addLog({ type: 'oauth', action: 'refresh', provider_id: p.id, detail: `${key.name} 保活续期失败：${err.message}` })
+      }
+    }
+  }
+}
+
+const workbuddyKeepaliveTimer = setInterval(() => {
+  workbuddyTokenKeepaliveTick().catch(() => {})
+}, WORKBUDDY_KEEPALIVE_TICK_MS)
+workbuddyKeepaliveTimer.unref?.()
 
 // —— WorkBuddy 积分倍率复取 ——
 //
