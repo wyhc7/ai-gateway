@@ -30,9 +30,19 @@ start-*.sh
 
 out/
 
-# 临时命令与被密码污染的 helper
-# .tmp_*   ：调试时随手写的远程命令脚本
-# *pass*.bat：SSH 免交互登录用的 askpass helper，里面是明文服务器密码
+# 临时命令脚本
 .tmp_*
+*.tmp.sh
+.t.sh
+
+# SSH / 凭据 helper —— 这些文件里是**明文密码**，一旦提交就是事故。
+# 历史事故：.sshpass.bat、.sshlogin.bat 都曾被 git add -A 带进去过，
+# 所以这里不按具体名字拦，凡是名字里带 pass/login/cred/secret/keepass
+# 的 dotfile 一律挡掉。
 *pass*.bat
+*login*.bat
+*login*.txt
+*cred*
+*secret*
 .sshask*
+.keepass*
