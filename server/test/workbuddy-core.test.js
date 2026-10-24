@@ -326,6 +326,42 @@ describe('凭据解析与 JWT 兜底', () => {
     assert.equal(parseWorkbuddyAuthFile(''), null)
   })
 
+  // 网关自己的批量导出产物长这样：
+  //   { format:'workbuddy-accounts', version:1, accounts:[ { uid, accessToken, ... } ] }
+  // 直接喂给单条解析会读不到字段（obj 是外层对象，没有 accessToken），
+  // 所以这里要能揭开 accounts 再看一层。多账号的批量场景走导入接口，
+  // 单条解析只在恰好一个账号时替它摊平。
+  test('批量导出文件（accounts 包裹）单条也能解析', () => {
+    const out = parseWorkbuddyAuthFile(JSON.stringify({
+      format: 'workbuddy-accounts',
+      version: 1,
+      count: 1,
+      accounts: [{
+        uid: 'u-49f65fb8',
+        accessToken: 'at-batch',
+        refreshToken: 'rt-batch',
+        domain: 'www.codebuddy.cn',
+        expiresAt: 1795218069000
+      }]
+    }))
+    assert.ok(out, '不能返回 null')
+    assert.equal(out.uid, 'u-49f65fb8')
+    assert.equal(out.access_token, 'at-batch')
+    assert.equal(out.refresh_token, 'rt-batch')
+    assert.equal(out.domain, 'www.codebuddy.cn')
+  })
+
+  test('accounts 里有多条时单条解析返回 null（该走批量导入接口）', () => {
+    const out = parseWorkbuddyAuthFile(JSON.stringify({
+      format: 'workbuddy-accounts',
+      accounts: [
+        { uid: 'u-1', accessToken: 'at-1' },
+        { uid: 'u-2', accessToken: 'at-2' }
+      ]
+    }))
+    assert.equal(out, null)
+  })
+
   // 实测 /v2/plugin/auth/token 不返回绝对 expiresAt，只给 expiresIn。
   // 缺绝对字段时 JWT 的 exp 是权威兜底，否则 UI 永远显示「有效期未知」。
   test('缺 uid 时回落到 JWT 的 sub', () => {
