@@ -1899,6 +1899,19 @@ function creditsLow(k) {
 async function exportProviders() {
   try {
     const blob = await api.exportProviders()
+    // 顺手数一下账号池里有多少条，好在提示里说清楚这份文件的分量。
+    // blob 本身只是个字节流，没有额外字段可读，所以自己 parse 一遍。
+    let accountCount = 0
+    try {
+      const parsed = JSON.parse(await blob.text())
+      accountCount = Array.isArray(parsed?.chatgpt_accounts?.items)
+        ? parsed.chatgpt_accounts.items.length
+        : Array.isArray(parsed?.chatgpt_accounts)
+          ? parsed.chatgpt_accounts.length
+          : 0
+    } catch {
+      /* 数不出来不影响下载，只是提示少一句 */
+    }
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -1907,7 +1920,13 @@ async function exportProviders() {
     URL.revokeObjectURL(url)
     // Key 在导出时已脱敏（只留前后 4 位）——备份文件常被转手，
     // 明文凭据等于把账号送人。要迁移凭据得回页面里逐个复制。
-    ElMessage.success('导出成功（Key 已脱敏，仅留前后 4 位）')
+    // 但账号池是完整导出的（不带 token 的备份换机器时没用），
+    // 所以这句话得说清楚，别让人以为整份文件都安全。
+    ElMessage.success(
+      accountCount > 0
+        ? `导出成功（平台 Key 已脱敏；含 ${accountCount} 个账号的完整凭证，此文件等同密码，勿外传）`
+        : '导出成功（Key 已脱敏，仅留前后 4 位）'
+    )
   } catch (e) {
     ElMessage.error(e?.message || '导出失败')
   }
@@ -1923,9 +1942,12 @@ async function importProviders(event) {
 
   try {
     const text = await file.text()
-    const data = JSON.parse(text)
+    const parsed = JSON.parse(text)
+    // 新格式是 { providers: [...], chatgpt_accounts: {...} }，老格式是裸数组。
+    // 两种都得认：用户的历史下载里有老文件，不能一升级就导不进去。
+    const data = Array.isArray(parsed) ? parsed : parsed?.providers
     if (!Array.isArray(data)) {
-      throw new Error('文件格式错误：必须是平台数组')
+      throw new Error('文件格式错误：需要平台数组，或含 providers 数组的备份对象')
     }
 
     let keyCount = 0
@@ -1938,13 +1960,39 @@ async function importProviders(event) {
       }
     }
 
+    const backupAccounts = Array.isArray(parsed?.chatgpt_accounts?.items)
+      ? parsed.chatgpt_accounts.items
+      : Array.isArray(parsed?.chatgpt_accounts)
+        ? parsed.chatgpt_accounts
+        : []
+
+    const scope = backupAccounts.length
+      ? `${data.length} 个平台、${keyCount} 个 Key、${backupAccounts.length} 个 ChatGPT 账号`
+      : `${data.length} 个平台、${keyCount} 个 Key`
+
     ElMessageBox.confirm(
-      `确定导入 ${data.length} 个平台、${keyCount} 个 Key 吗？`,
+      `确定导入 ${scope} 吗？`,
       '确认导入',
       { type: 'warning' }
     ).then(async () => {
-      const result = await api.importProviders(data)
+      const result = await api.importProviders(data, backupAccounts, parsed?.chatgpt_accounts?.provider_id)
       ElMessage.success(`成功导入 ${result.imported} 个平台`)
+      // 账号池是「合并」不是「覆盖」：重复导入不会炸号，也不会删掉现有账号。
+      // 所以这里只说结果，不说「覆盖」，免得用户以为要先清空。
+      const acc = result.accounts
+      if (acc) {
+        const bits = []
+        if (acc.added) bits.push(`新增 ${acc.added}`)
+        if (acc.skipped) bits.push(`已存在跳过 ${acc.skipped}`)
+        if (bits.length) {
+          ElMessage.success(`账号池：${bits.join('，')}`)
+        } else {
+          ElMessage.info('账号池：没有需要新增的账号')
+        }
+      }
+      for (const err of result.account_errors || []) {
+        ElMessage.warning({ message: `账号池写回失败：${err}`, duration: 10000, showClose: true })
+      }
       // 脱敏文件再导入：凭据被置空的 Key 逐个点名，
       // 别让用户以为导入完就能用，一调用全是空 Key 报错
       const masked = result.masked_keys || []
