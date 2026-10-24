@@ -7,7 +7,7 @@
 凭据一律走环境变量，**不写死在文件里**（这个仓库是公开的）：
 
     export MS_CLIENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-    export MS_REFRESH_TOKEN='M.C537_BAY...'
+    export MS_REFRESH_TOKEN='<Microsoft refresh_token>'
     export MS_EMAIL=someone@outlook.com
     python outlook-diagnose.py
 
