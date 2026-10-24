@@ -10,6 +10,7 @@ import net from 'node:net'
 import { spawn, execFile } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import os from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -83,6 +84,13 @@ function startGateway(port, dataDir, repoDir) {
       UPDATE_REPO_DIR: repoDir,
       UPDATE_BRANCH: 'main',
       UPDATE_SERVICE: 'gw-update-route-test',
+      // 属主体检只在「扫出外来 owner」时才记一步。夹具目录属于跑测试的用户
+      // （CI 里是 runner、开发机上是本人），而 serviceUser() 默认是部署账号
+      // ai-gateway —— 对不上就会凭空多出「修正部署目录属主」这一步，把下面
+      // 的步骤列表断言打歪。钉成当前用户，属主才算真的合规。
+      // 与 update.test.js 里的处理保持一致。
+      UPDATE_SERVICE_USER:
+        process.platform === 'win32' ? 'ai-gateway' : os.userInfo().username,
       // 这条是安全阀：测试绝不允许真的去重启服务器上的服务
       UPDATE_NO_RESTART: '1'
     },
