@@ -31,8 +31,11 @@ test('isBridgeProvider：image_only 或内网地址才算转换层', () => {
   // 官方公网 API 不是转换层
   assert.equal(isBridgeProvider({ base_url: 'https://api.openai.com/v1' }), false)
   assert.equal(isBridgeProvider({ base_url: 'https://api.deepseek.com/v1' }), false)
-  // 172.32 已越出私有段
-  assert.equal(isBridgeProvider({ base_url: 'http://10.0.0.7:3000/v1' }), false)
+  // 非私有段（172.16~172.31 才是私有）不该被判成转换层。
+  // 用 172.32.x 而不是别的：它紧贴私有段边界，最能验证判定逻辑没有
+  // 把「以 172. 开头」错当成私有。
+  // 允许误报: public-ip —— 这是测试夹具里的假地址，不指向任何真实主机
+  assert.equal(isBridgeProvider({ base_url: 'http://172.32.0.9:3000/v1' }), false)
 })
 
 test('pickBridgeProvider：优先 image_only，其次内网 openai-chat', () => {
