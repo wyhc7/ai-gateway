@@ -4,18 +4,21 @@
 
 [![CI](https://github.com/wyhc7/ai-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/wyhc7/ai-gateway/actions/workflows/ci.yml)
 
-一个**零依赖配置、开箱即用**的自托管 AI 中转站（网关）。可视化平台管理、多 Key 自动故障切换、模型自动拉取、仪表盘真实统计、Token 消耗记录。既能接常规 OpenAI 兼容厂商，也能接 **ChatGPT / Grok / Codex 订阅账号**（OAuth 授权或 access_token 导入），把各类账号统一调度成一个 OpenAI 兼容端点。
+一个**零外部依赖、开箱即用**的自托管 AI 中转站（网关）：不需要数据库、不需要 Redis，一份 JSON 配置跑起来。可视化平台管理、多 Key 自动故障切换、模型自动拉取、仪表盘真实统计、Token 消耗记录。既能接常规 OpenAI 兼容厂商，也能接 **ChatGPT / Grok / Codex 订阅账号**（OAuth 授权或 access_token 导入），把各类账号统一调度成一个 OpenAI 兼容端点。
+
+> 这里的「零依赖」指**不需要外部服务**（数据库、缓存、消息队列），不是指不用装 npm 包——首次运行仍需 `npm run install:all` 装依赖。
 
 > ⚠️ **先读这一段**：本项目支持「官方 API Key」与「订阅账号（OAuth / 逆向通道）」两类接入方式，二者性质不同 —— 后者**可能违反上游厂商的服务条款**。上手前请先看 [使用前提与风险须知](#使用前提与风险须知)。
 
 ## 功能
 
-- **25+ 平台模板** — OpenAI 兼容厂商（DeepSeek、通义千问、Gemini、硅基流动、OpenRouter 等）、网页版 ChatGPT（chatgpt2api）一键盘点
+- **25+ 平台模板** — OpenAI 兼容厂商（DeepSeek、通义千问、Gemini、硅基流动、OpenRouter 等）、网页版 ChatGPT（chatgpt2api，文生图专用）一键盘点
 - **自动故障切换** — Key 不可用时自动轮换到下一个 Key，请求不中断
 - **分级冷却与半开探测** — 区分「Key 失效」（401/403，长冷却）与「上游抖动」（5xx/限流，短冷却且限制同时冷却数量）；冷却过半后自动放行探测请求，上游恢复即刻可用
 - **模型自动拉取** — 输入 API Key 后一键拉取平台可用模型列表
+- **ChatGPT 账号池管理** — 面板内直接加号，看每个账号的剩余生图额度、重置时间与续期状态；优先走 OAuth 拿 `refresh_token` 自动续期，多账号按轮询均衡分摊额度（见 [网页版 ChatGPT](#网页版-chatgpt文生图专用)）
 - **访问密钥 + 模型级权限** — 给每个调用方单独发一把 Key，并限定它能用哪些模型（支持 `gpt-*` 通配），随时停用、设到期时间、按 Key 看用量（见 [访问密钥](#4-访问密钥按调用方分配权限)）
-- **一键检查更新与升级** — 管理界面比对上游仓库的提交，列出「更新内容」与影响面，点一下即可拉取、合并、装依赖、构建并重启（见 [系统更新](#系统更新一键升级)）
+- **一键检查更新与升级** — 管理界面比对上游仓库的提交，列出「更新内容」与影响面，点一下即可拉取、合并、装依赖、构建并重启；更新前自动修复文件所有权，避免历史 root 构建留下的 `EACCES`（见 [系统更新](#系统更新一键升级)）
 - **Token 统计** — 优先采用上游返回的 usage；上游不返回时按输出长度估算（含思考内容），不会静默漏计
 - **仪表盘统计** — 请求量、成功率、Token 消耗（每日/总计）、Key 健康状态，10 秒自动刷新
 - **完全兼容 OpenAI API** — 任何 OpenAI SDK / 客户端均可无缝接入，无需修改代码
@@ -24,6 +27,8 @@
 - **深色主题响应式界面** — 桌面端、移动端均可使用
 
 ## 快速开始
+
+需要 **Node.js 18+**（用到了全局 `fetch`、`AbortSignal.timeout` 与内置 test runner）。
 
 ```bash
 # 安装依赖
@@ -39,6 +44,8 @@ cd server && node index.js
 访问 `http://localhost:3001` 进入管理界面。
 
 首次打开管理界面会要求输入**管理密钥**（见下方「管理密钥」章节）。
+
+> 没构建前端也能起后端：`/api/*` 全部可用，只是浏览器打开首页会 404。纯 API 场景可以跳过 `web` 的构建。
 
 ### 环境变量
 
@@ -171,9 +178,37 @@ Google 官方 OpenAI 兼容端点，选 `Google Gemini` 模板，填 [AI Studio 
 
 选 `Codex 订阅账号` 模板 → 设备码 OAuth 授权（网页打开 `auth.openai.com/codex/device` 用订阅号确认），网关自动做 Responses API ↔ chat/completions 双向转换。详见 [docs/CODEX-ONBOARDING.md](docs/CODEX-ONBOARDING.md)。
 
-### 网页版 ChatGPT（对话 / 文生图）
+### 网页版 ChatGPT（文生图专用）
 
-走 `chatgpt.com/backend-api/conversation` 私有协议，需经 [chatgpt2api](https://github.com/basketikun/chatgpt2api) 反向代理转成 OpenAI 兼容端点，再用 `ChatGPT 网页/手机版（chatgpt2api）` 模板接入。**直接粘贴 ChatGPT access_token 即可，绕过 device-code 的手机号验证**。一键部署脚本见 [scripts/deploy-chatgpt2api.bat](scripts/deploy-chatgpt2api.bat)，详细见 [docs/CHATGPT2API-ONBOARDING.md](docs/CHATGPT2API-ONBOARDING.md)。
+走 `chatgpt.com/backend-api/conversation` 私有协议，需经 [chatgpt2api](https://github.com/basketikun/chatgpt2api) 反向代理转成 OpenAI 兼容端点，再用 `ChatGPT 网页版（chatgpt2api）· 生图` 模板接入。一键部署脚本见 [scripts/deploy-chatgpt2api.bat](scripts/deploy-chatgpt2api.bat)，详细见 [docs/CHATGPT2API-ONBOARDING.md](docs/CHATGPT2API-ONBOARDING.md)。
+
+**加号务必走 OAuth 授权，不要直接粘 access_token。** 这个区别决定账号八天后是继续可用还是直接作废：
+
+| 加号方式 | 拿得到 refresh_token | 到期后 |
+| -------- | -------------------- | ------ |
+| **OAuth 授权（推荐）** | ✅ 有 | 自动续期，长期可用 |
+| 直接粘贴 access_token | ❌ 没有 | access_token 到期（约 10 天）即失效，只能重新加 |
+
+面板「管理账号」里有完整的 OAuth 流程，授权完成后可以点浏览器书签把 callback 一键送回，不用手工复制地址栏。命令行等价工具见 [docs/ACCOUNT-TOOLS.md](docs/ACCOUNT-TOOLS.md)。
+
+另外，`chatgpt2api` 默认开启 `auto_remove_invalid_accounts`，账号一旦续期失败会被**直接删除**而不是标为异常，出事时无从排查。建议在 `/opt/chatgpt2api/config.json` 里关掉：
+
+```json
+"auto_remove_invalid_accounts": false
+```
+
+#### 生图调用
+
+模型固定用 `gpt-image-2`，接口就是 OpenAI 的 `/v1/images/generations`：
+
+```bash
+curl -X POST http://localhost:3001/api/v1/images/generations \
+  -H "Authorization: Bearer <网关 API Key>" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-image-2","prompt":"一只柴犬在樱花树下","n":1,"size":"1024x1024"}'
+```
+
+返回的 `data[0].b64_json` 解码即为 PNG。生成要 **16~25 秒**，客户端超时请设到 60 秒以上，否则必然失败。完整参数、四语言示例与错误对照见 [docs/API-CALL-GUIDE.md](docs/API-CALL-GUIDE.md)，账号池与额度机制见 [docs/CHATGPT-IMAGE-ONLY.md](docs/CHATGPT-IMAGE-ONLY.md)。
 
 > 注意：Codex 与网页版 ChatGPT 的上游（auth.openai.com / chatgpt.com）对出口区域敏感，服务器需能让流量走 OpenAI 支持区域（美/日/新/韩），否则会被封。配合下方「出网代理」使用。
 
@@ -269,6 +304,7 @@ sudo bash deploy/linux/complete-deploy.sh --update
 - **重启走 `systemctl --no-block`**：同步等待的话，systemd 停止本服务时会打断我们自己发起的那次重启，服务会停在停止状态起不来
 - **前端靠 `uptime` 变小判断重启完成**：重启刚下发时旧进程还在应答，只看 `/api/health` 通不通会误判成「已经回来了」
 - **合并之后才失败会明确标注**：告诉人「代码已进来，修完重试即可」，而不是让人以为要重头再来
+- **更新前先修文件所有权**：如果部署目录里混进过 root 拥有、而服务以普通用户运行的文件，`vite build` 覆盖旧产物时会 `EACCES: permission denied, unlink`。更新流程在 `git fetch` **之前**先扫一遍外来 owner 并自动 `chown -R` 回服务用户，根用户运行时可自行修复，普通用户运行时走一条受限 sudo 规则（安装方法见 [docs/DEPLOY-OWNERSHIP.md](docs/DEPLOY-OWNERSHIP.md)）。修复失败也不会中断更新，只记录原因。
 
 | 环境变量 | 默认 | 说明 |
 |---|---|---|
@@ -287,15 +323,18 @@ server/        — Node.js 后端（Express）
   index.js     — API 路由 + 鉴权
   proxy.js     — 模型匹配、故障切换、转发、协议转换
   api-keys.js  — 访问密钥：模型白名单规则匹配、鉴权解析、用量统计
+  chatgpt-accounts.js — ChatGPT 账号池代理：白名单转发、额度归一化、脱敏
+  providers-image-only.js — 生图专用平台的模型过滤
+  ownership.js — 更新前修复文件所有权（避免 root 构建留下的 EACCES）
   store.js     — 配置持久化与统计
-  update.js    — 系统更新：比对上游提交、裁步骤、快进合并、重启
+  update.js    — 系统更新：修复所有权、比对上游提交、裁步骤、快进合并、重启
   templates.js — 25+ 个平台模板
   codex-oauth.js / codex-responses.js — Codex 设备码授权 + Responses 双向转换
   oauth.js     — Grok 订阅 OAuth
   test/        — 集成测试
 web/           — Vue 3 + Element Plus 管理界面
 deploy/        — 各系统部署脚本与配置
-scripts/       — 辅助脚本（chatgpt2api 本机一键部署、访问密钥端到端冒烟）
+scripts/       — 辅助脚本：加号工具、2FA 出码、邮箱诊断、chatgpt2api 部署、冒烟测试
 docs/          — 部署与接入文档（含各订阅通道速查卡）
 ```
 
@@ -307,7 +346,15 @@ npm test --prefix server
 
 # 访问密钥端到端冒烟（起真进程 + 假上游，走真实 HTTP，手动运行）
 node scripts/smoke-api-keys.mjs
+
+# ChatGPT 加号（起会话 / 交 callback / 看账号池 / 算 2FA）
+node scripts/add-account.mjs start  --email a@b.com
+node scripts/add-account.mjs finish --session <sid> --callback '<浏览器地址栏>'
+node scripts/add-account.mjs list
+node scripts/add-account.mjs totp   --secret <Base32 密钥>
 ```
+
+加号与排查脚本的完整说明见 [docs/ACCOUNT-TOOLS.md](docs/ACCOUNT-TOOLS.md)，其中也记录了 `auth.openai.com` 会被 Cloudflare 拦截这一事实——脚本登录走不通，得用真实浏览器。
 
 测试使用本地 mock 上游，覆盖故障切换、流式透传、Token 统计、模型白名单越权等核心路径。
 其中 `test/api-keys.test.js` 覆盖访问密钥的规则匹配、摘要存储（断言明文不落盘）、
