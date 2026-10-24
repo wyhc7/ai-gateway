@@ -8,6 +8,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import os from 'node:os'
 import { join } from 'node:path'
 
 import {
@@ -22,6 +23,17 @@ import {
 } from '../ownership.js'
 
 const IS_WIN = process.platform === 'win32'
+
+// 当前进程的真实用户名。用来造「属主本来就一致」的夹具：
+// 临时目录天然属于跑测试的这个用户，所以只有拿它去比才是真的「一致」。
+function currentUser() {
+  try {
+    // getpwuid 比 `id -nu` 少一次进程，且不受 PATH 影响
+    return os.userInfo().username
+  } catch {
+    return serviceUser()
+  }
+}
 
 function tmpRepo() {
   const dir = mkdtempSync(join(tmpdir(), 'ownership-'))
@@ -79,7 +91,12 @@ test('Windows 上不报属主异常（没有 POSIX 属主概念）', { skip: !IS
 test('属主一致时不报异常（非 Windows 也走一遍）', { skip: IS_WIN }, async () => {
   const dir = tmpRepo()
   try {
-    const r = await ensureOwnership(dir, serviceUser())
+    // 关键：这里必须用「实际跑测试的那个用户」，不能用 serviceUser()。
+    // serviceUser() 返回的是部署时的服务账号（默认 ai-gateway），而 CI 里
+    // 跑测试的是 runner、开发机上是开发者本人 —— 临时目录属于他们，
+    // 拿 ai-gateway 去比必然判成「属主异常」，测试就假失败了。
+    const me = currentUser()
+    const r = await ensureOwnership(dir, me)
     assert.equal(r.needed, false)
     assert.match(r.detail, /属主正常/)
   } finally {

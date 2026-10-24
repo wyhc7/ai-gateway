@@ -9,10 +9,15 @@ import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import os from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
+
+// 属主体检这一步只在 POSIX 上存在：Windows 没有属主概念，findForeignOwners
+// 恒返回空，update.js 也就不会记这一步。写成常量避免每个断言各写一遍三元。
+const OWNERSHIP_STEP = process.platform === 'win32' ? [] : ['修正部署目录属主']
 
 // 先钉死环境：这三条必须在 import update.js 之前设好，
 // 尤其 UPDATE_NO_RESTART —— 测试绝不允许真的去重启服务器上的服务。
@@ -31,6 +36,15 @@ useRepo(SANDBOX)
 process.env.UPDATE_BRANCH = 'main'
 process.env.UPDATE_SERVICE = 'gw-update-test'
 process.env.UPDATE_NO_RESTART = '1'
+
+// 属主体检这一步只在「扫出外来 owner」时才记进步骤日志。夹具目录天然属于
+// 跑测试的这个用户（Windows 上是管理员、CI 里是 runner、开发机上是本人），
+// 而 serviceUser() 默认是部署账号 ai-gateway —— 两者对不上，Linux 上这一步
+// 就会凭空多出来，步骤列表断言随即假失败（Windows 因无 POSIX 属主而幸免，
+// 所以本地一直看不出问题）。把服务账号钉成当前用户，夹具的属主就真的是
+// 「一致」的，两种平台行为也就统一了。
+process.env.UPDATE_SERVICE_USER =
+  process.platform === 'win32' ? 'ai-gateway' : os.userInfo().username
 
 let up = null
 
@@ -396,7 +410,7 @@ describe('拒绝更新的情形：必须先说清楚为什么', () => {
     assert.equal(existsSync(join(f.work, 'web', 'src', 'thing.vue')), true)
 
     const names = r.steps.map((s) => s.name)
-    assert.deepEqual(names, ['拉取远程代码', '合并代码', '构建管理界面'])
+    assert.deepEqual(names, [...OWNERSHIP_STEP, '拉取远程代码', '合并代码', '构建管理界面'])
     assert.equal(r.steps.find((s) => s.name === '合并代码').ok, true)
     assert.equal(r.steps.at(-1).ok, false)
     // 构建都没成功，就不该再去重启
@@ -431,7 +445,7 @@ describe('applyUpdate：真的把部署目录快进到上游', () => {
 
     // 步骤日志：每一步都要有名字和结果，前端照它渲染
     const names = r.steps.map((s) => s.name)
-    assert.deepEqual(names, ['拉取远程代码', '合并代码', '构建管理界面', '重启服务'])
+    assert.deepEqual(names, [...OWNERSHIP_STEP, '拉取远程代码', '合并代码', '构建管理界面', '重启服务'])
     assert.equal(r.steps.find((s) => s.name === '合并代码').ok, true)
     // 没动前端就不该构建
     assert.match(r.steps.find((s) => s.name === '构建管理界面').detail, /跳过/)
@@ -457,7 +471,7 @@ describe('applyUpdate：真的把部署目录快进到上游', () => {
     assert.equal(r.ok, true)
     assert.equal(r.up_to_date, true)
     assert.equal(r.from, r.to)
-    assert.deepEqual(r.steps.map((s) => s.name), ['拉取远程代码', '比对版本'])
+    assert.deepEqual(r.steps.map((s) => s.name), [...OWNERSHIP_STEP, '拉取远程代码', '比对版本'])
     assert.equal(r.restart.mode, 'none')
 
     useRepo(SANDBOX)
