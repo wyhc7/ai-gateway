@@ -1,7 +1,38 @@
 # 加号工具与排查脚本
 
-这一组脚本解决三件事：**加号、算 2FA、诊断邮箱**。
+这一组脚本解决四件事：**加号、算 2FA、诊断邮箱、体检加号用的节点**。
 都放在 `scripts/`，凭据一律走环境变量或命令行参数，不写死在文件里。
+
+---
+
+## 0. node-check.mjs —— 加号前先看出口 IP
+
+加号时 OpenAI 看到的是**你本机代理的出口 IP**，不是服务器的。
+机场节点的 IP 大多已被公开标记为代理，这种 IP 上登录新号最容易触发风控。
+
+```bash
+node scripts/node-check.mjs --proxy http://127.0.0.1:7897
+node scripts/node-check.mjs --proxy http://127.0.0.1:7897 --count 6   # 看轮换
+```
+
+输出里只看两行判断：
+
+```
+机房    否 ✓        ← 是的话是机房 IP，不像家宽
+代理    否 ✓        ← 是的话被公开标成代理，别用
+```
+
+`--count` 还会告诉你这个节点是固定 IP 还是轮换的。
+
+实测对比（同一个机场，不同节点）：
+
+| 节点 | `hosting` | `proxy` | 结果 |
+|---|---|---|---|
+| 日本 Melbicom | false | **true** | 不顺，登录反复中断 |
+| 台湾中华电信 | false | **false** | 一次就过 |
+
+脚本用 `curl` 走代理：Node 原生 fetch 既不认 `HTTPS_PROXY`，
+也没有内置 socks 支持，为一个体检脚本装 `undici` 不划算。
 
 ---
 
@@ -160,3 +191,30 @@ node scripts/add-account.mjs list
 | 2FA 码过期 | 填进去报验证码错误 | 30 秒一轮，填之前现算 |
 | 脚本登录 | 微软返回 `AADSTS70003` | ROPC 已停用，不代表密码错 |
 | 中文乱码 | Windows 终端输出 `??` | 脚本输出统一用英文 |
+| **点账户卡片跳 Google** | 授权页有「选择账户」，点了卡片却跳到 `accounts.google.com` | **必须点「使用其他账户」后手输邮箱**，别点卡片 |
+| **会话超时被误报成密码错** | 在密码页报 `Incorrect email address or password`，但密码是对的 | `expires_in` 只有 600 秒。**先登录再起会话**，别在 2FA 页耗掉时间 |
+| **`finish` 的字段名** | 传 `callback_url` 报「session_id 与 callback 都必填」 | 字段名是 `callback`，不是 `callback_url` |
+
+### 两条流程上的经验
+
+**1. 先登录，再起 OAuth 会话。**
+
+会话只有 600 秒。如果在 2FA 页才开始算，取码、等下一轮 30 秒周期、
+再填进去，很容易耗到超时 —— 而超时的报错是 `Incorrect email address or password`，
+会让人误以为密码错了（实测踩过一次，白折腾十几分钟）。
+
+正确顺序：先用邮箱密码正常登录进 ChatGPT → 再 `start` → 打开授权链接 →
+因为已登录，点账户卡片直接就过（或者手输邮箱走一遍极快的流程）→ 拿 callback。
+
+**2. 加号要拉开间隔。**
+
+实测：45 分钟内连加 3 个号，全部在约 19 分钟后失效，错误是
+`oauth_refresh_http_401: Your session has ended`。这三条不是账号本身坏，
+是并发登录触发了上游的批量识别。
+
+建议同一 IP 上 2 小时内只加 1 个号；批量进号就分天。
+
+顺带一句：这条也和**加号时的出口 IP** 有关。实测两个节点对比很明显 ——
+`proxy: true` 的机场节点（日本 Melbicom）加号不顺，换成
+`proxy: false` 的台湾中华电信节点后一次就过。加号前先查一下 IP 属性，
+见 `scripts/node-check.mjs`。
