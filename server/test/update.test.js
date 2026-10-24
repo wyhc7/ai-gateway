@@ -15,10 +15,6 @@ import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
 
-// 属主体检这一步只在 POSIX 上存在：Windows 没有属主概念，findForeignOwners
-// 恒返回空，update.js 也就不会记这一步。写成常量避免每个断言各写一遍三元。
-const OWNERSHIP_STEP = process.platform === 'win32' ? [] : ['修正部署目录属主']
-
 // 先钉死环境：这三条必须在 import update.js 之前设好，
 // 尤其 UPDATE_NO_RESTART —— 测试绝不允许真的去重启服务器上的服务。
 const SANDBOX = mkdtempSync(join(tmpdir(), 'gw-update-sandbox-'))
@@ -410,7 +406,7 @@ describe('拒绝更新的情形：必须先说清楚为什么', () => {
     assert.equal(existsSync(join(f.work, 'web', 'src', 'thing.vue')), true)
 
     const names = r.steps.map((s) => s.name)
-    assert.deepEqual(names, [...OWNERSHIP_STEP, '拉取远程代码', '合并代码', '构建管理界面'])
+    assert.deepEqual(names, ['拉取远程代码', '合并代码', '构建管理界面'])
     assert.equal(r.steps.find((s) => s.name === '合并代码').ok, true)
     assert.equal(r.steps.at(-1).ok, false)
     // 构建都没成功，就不该再去重启
@@ -445,7 +441,7 @@ describe('applyUpdate：真的把部署目录快进到上游', () => {
 
     // 步骤日志：每一步都要有名字和结果，前端照它渲染
     const names = r.steps.map((s) => s.name)
-    assert.deepEqual(names, [...OWNERSHIP_STEP, '拉取远程代码', '合并代码', '构建管理界面', '重启服务'])
+    assert.deepEqual(names, ['拉取远程代码', '合并代码', '构建管理界面', '重启服务'])
     assert.equal(r.steps.find((s) => s.name === '合并代码').ok, true)
     // 没动前端就不该构建
     assert.match(r.steps.find((s) => s.name === '构建管理界面').detail, /跳过/)
@@ -471,7 +467,7 @@ describe('applyUpdate：真的把部署目录快进到上游', () => {
     assert.equal(r.ok, true)
     assert.equal(r.up_to_date, true)
     assert.equal(r.from, r.to)
-    assert.deepEqual(r.steps.map((s) => s.name), [...OWNERSHIP_STEP, '拉取远程代码', '比对版本'])
+    assert.deepEqual(r.steps.map((s) => s.name), ['拉取远程代码', '比对版本'])
     assert.equal(r.restart.mode, 'none')
 
     useRepo(SANDBOX)
