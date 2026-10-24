@@ -74,7 +74,19 @@ export const api = {
     }
     return resp.blob()
   },
-  importProviders: (data) => request('/api/providers/import', { method: 'POST', body: JSON.stringify(data) }),
+  // 导入兼容两种请求体：老格式是裸数组，新格式是含 providers + 账号池的对象。
+  // 参数分开传是为了让调用方读文件时能自己决定放不放账号池进去。
+  importProviders: (data, accounts = null, accountProviderId = '') => {
+    const body = Array.isArray(data) && !accounts?.length && !accountProviderId
+      ? data
+      : {
+          providers: Array.isArray(data) ? data : [],
+          ...(accounts?.length
+            ? { chatgpt_accounts: { provider_id: accountProviderId, items: accounts } }
+            : {})
+        }
+    return request('/api/providers/import', { method: 'POST', body: JSON.stringify(body) })
+  },
   getLogs: (query = '') => request(`/api/logs${query ? `?${query}` : ''}`),
 
   // 访问密钥（发给客户端的 Key，可限定可用模型）

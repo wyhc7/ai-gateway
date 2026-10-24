@@ -10,7 +10,9 @@ import {
   pickBridgeProvider,
   bridgeBaseOf,
   proxyAccountsRequest,
-  sanitizeAccounts
+  sanitizeAccounts,
+  collectAccountsForExport,
+  restoreAccountsFromBackup
 } from './chatgpt-accounts.js'
 import {
   createApiKey,
@@ -1489,21 +1491,65 @@ function sanitizeKeyForExport(k) {
   return out
 }
 
-app.get('/api/providers/export', (req, res) => {
-  const payload = state.providers.map((p) => ({
+// 导出格式：一个文件两层数据。
+//
+// 早先只导出平台数组（纯 JSON array），账号池是漏在外面的 —— 换机器恢复时
+// 平台回来了、11 个号却还得一个一个重新加，而每个号都要过一次 OAuth。
+// 现在改成对象形态，把账号池一起打包。
+//
+// 但纯数组仍要能读：老备份文件是数组，用户的浏览器收藏和历史下载里都有。
+// 所以 version 字段只用于**说明**，不用于拒绝 —— 判断依据是「有没有
+// providers 键」，数组就是老格式。
+const BACKUP_FORMAT = 'ai-gateway-backup'
+const BACKUP_VERSION = 1
+
+app.get('/api/providers/export', async (req, res) => {
+  const providers = state.providers.map((p) => ({
     ...p,
     keys: Array.isArray(p.keys) ? p.keys.map(sanitizeKeyForExport) : []
   }))
+
+  // 账号池取失败不能把整份备份搞砸：用户点导出是为了拿平台配置，
+  // 因为转换层暂时连不上就一行都导不出来，那是更糟的结果。
+  // 所以这里吞掉错误并记进 warnings，让文件照常下载。
+  let accounts = { provider_id: '', items: [] }
+  const warnings = []
+  try {
+    accounts = await collectAccountsForExport(state.providers, req.query.provider_id)
+  } catch (e) {
+    warnings.push(`账号池未导出：${e?.message || e}`)
+  }
+
+  const payload = {
+    format: BACKUP_FORMAT,
+    version: BACKUP_VERSION,
+    exported_at: new Date().toISOString(),
+    // 账号池里有完整 token，这里明写一句，免得有人把备份随手传群
+    secret_warning: 'chatgpt_accounts 含完整 access_token / refresh_token，等同账号密码，勿外传',
+    providers,
+    chatgpt_accounts: accounts
+  }
+  if (warnings.length) payload.warnings = warnings
+
   res.setHeader('Content-Type', 'application/json')
   res.setHeader('Content-Disposition', `attachment; filename="providers_${todayKey()}.json"`)
   res.end(JSON.stringify(payload, null, 2))
 })
 
-app.post('/api/providers/import', (req, res) => {
-  const data = req.body
+app.post('/api/providers/import', async (req, res) => {
+  const raw = req.body
+  // 新格式 { providers: [...] } 与老格式 [...] 都接
+  const data = Array.isArray(raw) ? raw : raw?.providers
   if (!Array.isArray(data)) {
-    return res.status(400).json({ error: { message: '数据格式错误：必须是平台数组' } })
+    return res.status(400).json({ error: { message: '数据格式错误：需要平台数组，或含 providers 数组的备份对象' } })
   }
+  const backupAccounts = Array.isArray(raw?.chatgpt_accounts)
+    ? raw.chatgpt_accounts
+    : Array.isArray(raw?.chatgpt_accounts?.items)
+      ? raw.chatgpt_accounts.items
+      : null
+  const accountProviderId = raw?.chatgpt_accounts?.provider_id || ''
+
   const imported = []
   const skipped = []
   const maskedKeys = []
@@ -1562,7 +1608,32 @@ app.post('/api/providers/import', (req, res) => {
     imported.push(item.name)
   }
   persistImmediate()
-  res.json({ ok: true, imported: imported.length, names: imported, skipped, masked_keys: maskedKeys })
+
+  // 账号池写回放在平台落盘之后：新平台刚 push 进去，pickBridgeProvider
+  // 才可能认得出来（备份里记的 provider_id 在新机器上必然不存在，
+  // 这时靠 image_only 回退定位）。
+  let accounts = null
+  const accountErrors = []
+  if (backupAccounts && backupAccounts.length) {
+    try {
+      const r = await restoreAccountsFromBackup(state.providers, accountProviderId, backupAccounts)
+      accounts = r
+    } catch (e) {
+      // 平台导入已经成功了，不能因为号池写回失败就整体报错 —— 那样前端会
+      // 以为什么都没进去。账号问题单独回传，让用户按提示处理。
+      accountErrors.push(e?.message || String(e))
+    }
+  }
+
+  res.json({
+    ok: true,
+    imported: imported.length,
+    names: imported,
+    skipped,
+    masked_keys: maskedKeys,
+    accounts,
+    account_errors: accountErrors
+  })
 })
 
 // 模型记录整体还原：字符串形态（旧导出/手工编辑）兼容成 { id, owned_by }，

@@ -118,7 +118,11 @@ test('导出脱敏：凭据只留前后 4 位，last_error 不进备份', { time
     const exp = await api(port, '/api/providers/export')
     assert.equal(exp.status, 200)
     const data = await exp.json()
-    const p = data[0]
+    // 导出已经从「裸数组」变成「带账号池的对象」，平台在 providers 里。
+    // 结构变化的原因见 index.js 导出路由上的注释：账号池得一起走。
+    assert.equal(data.format, 'ai-gateway-backup')
+    assert.ok(Array.isArray(data.providers), 'providers 必须是数组')
+    const p = data.providers[0]
     const k = p.keys[0]
 
     assert.ok(k.api_key.startsWith('sk-p') && k.api_key.endsWith('1234'), `api_key 应保留前后 4 位：${k.api_key}`)
@@ -127,6 +131,9 @@ test('导出脱敏：凭据只留前后 4 位，last_error 不进备份', { time
     assert.ok(k.access_token.includes('*') && k.refresh_token.includes('*'), 'OAuth 凭据同样脱敏')
     assert.equal(k.last_error, undefined, '导出不带 last_error')
     assert.equal(k.last_error_at, undefined, '导出不带 last_error_at')
+
+    // 账号池是完整凭证，这一点必须在文件里写明 —— 否则有人会把它当普通备份传群
+    assert.match(data.secret_warning, /等同账号密码/)
   })
 })
 
@@ -178,6 +185,32 @@ test('脱敏文件再导入：打码凭据置空并在 masked_keys 点名', { ti
     const k = dup[1].keys[0]
     assert.equal(k.api_key, '', '脱敏值不能当真实凭据落库')
     assert.equal(k.access_token, '')
+  })
+})
+
+test('老格式（裸平台数组）仍能导入：升级不该让历史备份失效', { timeout: 60000 }, async () => {
+  await withGateway(async (port) => {
+    // 导出改成对象之后，用户手里上一版下载的文件还是裸数组。
+    // 这条用例守着那个兼容分支 —— 它一旦被删，老文件就导不进去了。
+    const r = await api(port, '/api/providers/import', {
+      method: 'POST',
+      body: [{ name: '老备份', base_url: 'https://api.example.com/v1', keys: [] }]
+    })
+    assert.equal(r.status, 200)
+    const body = await r.json()
+    assert.equal(body.ok, true)
+    assert.equal(body.imported, 1)
+    // 老格式没有账号池，accounts 应为 null，而不是报错
+    assert.equal(body.accounts, null)
+  })
+})
+
+test('备份对象缺 providers：明确报格式错误，不静默吞掉', { timeout: 60000 }, async () => {
+  await withGateway(async (port) => {
+    const r = await api(port, '/api/providers/import', { method: 'POST', body: { foo: 1 } })
+    assert.equal(r.status, 400)
+    const body = await r.json()
+    assert.match(body.error.message, /providers/)
   })
 })
 

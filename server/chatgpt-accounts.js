@@ -21,6 +21,7 @@ const ALLOW = [
   ['POST', /^\/api\/accounts$/],
   ['DELETE', /^\/api\/accounts$/],
   ['POST', /^\/api\/accounts\/refresh$/],
+  ['POST', /^\/api\/accounts\/export$/],
   ['POST', /^\/api\/accounts\/oauth\/start$/],
   ['POST', /^\/api\/accounts\/oauth\/finish$/],
   ['GET', /^\/api\/accounts\/refresh\/progress\/[A-Za-z0-9_-]+$/],
@@ -237,4 +238,85 @@ export function sanitizeAccounts(payload) {
       token_tail: at ? at.slice(-6) : ''
     }
   })
+}
+
+// ---------------------------------------------------------------------------
+// 账号池随「平台导入导出」一起走
+// ---------------------------------------------------------------------------
+//
+// 为什么放在这里而不是让前端自己调两次接口：
+//   账号池在转换层（chatgpt2api）里，auth-key 只存在于服务器上。前端拿不到
+//   auth-key，也就不该自己去拼一次上游请求 —— 那样会把代理层绕开。
+//
+// 安全取舍：导出的账号包含完整 access_token / refresh_token，**等同于把号
+// 交出去**。这和一个脱敏的平台 Key（2f3b********bc4a）不是一个安全等级。
+// 之所以还是完整导出，是因为不带 token 的备份在换机器时毫无用处 ——
+// 用户要的是「一个文件恢复一切」。代价是：备份文件本身必须当密钥看待。
+
+/**
+ * 取账号池的完整条目（含 token），用于打包进备份文件。
+ *
+ * 走 GET /api/accounts 而不是 POST /api/accounts/export：
+ *   后者返回的是一份面向「Codex 迁移」的平铺数组，字段是上游裁剪过的；
+ *   前者给的是账号记录的原始形状，导入时能把 limits_progress、restore_at、
+ *   success/fail 这些运行时状态一并还原回去。
+ *
+ * @returns {Promise<{provider_id:string, items:object[]}>}
+ */
+export async function collectAccountsForExport(providers, providerId) {
+  const provider = pickBridgeProvider(providers, providerId)
+  if (!provider) {
+    // 没有转换层平台不算错 —— 这个网关可能只用官方 API，压根没有账号池
+    return { provider_id: '', items: [] }
+  }
+  const { status, body } = await proxyAccountsRequest(provider, 'GET', '/api/accounts')
+  if (status !== 200) {
+    const err = new Error(`取账号池失败（上游 ${status}）`)
+    err.statusCode = status >= 500 ? 502 : status
+    err.detail = body
+    throw err
+  }
+  const items = Array.isArray(body?.items) ? body.items : Array.isArray(body) ? body : []
+  return { provider_id: provider.id, items }
+}
+
+/**
+ * 把备份里的账号写回转换层。
+ *
+ * 上游 POST /api/accounts 的语义是「合并」不是「覆盖」：同一个 token 再加一次
+ * 会被跳过，新 token 才加进去。所以恢复操作是幂等的 —— 重复导入不会炸号，
+ * 也不会把现有账号删掉。这一点刻意保留，不做「先清空再写入」的语义，
+ * 否则一次误操作就能把整个号池抹掉。
+ *
+ * @returns {Promise<{added:number, skipped:number, refreshed:number, errors:any[]}>}
+ */
+export async function restoreAccountsFromBackup(providers, providerId, items) {
+  const provider = pickBridgeProvider(providers, providerId)
+  if (!provider) {
+    const err = new Error('备份里有账号池，但当前没有可写入的转换层平台，请先导入平台配置')
+    err.statusCode = 400
+    throw err
+  }
+  const accounts = (Array.isArray(items) ? items : []).filter(
+    (it) => it && typeof it === 'object' && (it.access_token || it.accessToken)
+  )
+  if (accounts.length === 0) {
+    return { added: 0, skipped: 0, refreshed: 0, errors: [] }
+  }
+  const { status, body } = await proxyAccountsRequest(provider, 'POST', '/api/accounts', {
+    accounts,
+    tokens: []
+  })
+  if (status !== 200) {
+    const err = new Error(`写回账号池失败（上游 ${status}）`)
+    err.statusCode = status >= 500 ? 502 : status
+    err.detail = body
+    throw err
+  }
+  return {
+    added: Number(body?.added || 0),
+    skipped: Number(body?.skipped || 0),
+    refreshed: Number(body?.refreshed || 0),
+    errors: Array.isArray(body?.errors) ? body.errors : []
+  }
 }
