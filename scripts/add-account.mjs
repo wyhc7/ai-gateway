@@ -87,6 +87,7 @@ async function call(base, path, { method = 'GET', adminKey, body } = {}) {
 // ---------- TOTP：2FA 密钥出码 ----------
 
 function totpBase32(secret, { digits = 6, period = 30, at = Date.now() } = {}) {
+  // 允许误报: totp-secret —— 这是 RFC 4648 的 Base32 字符表，不是密钥
   const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
   const clean = String(secret || '').toUpperCase().replace(/[^A-Z2-7]/g, '')
   if (!clean) throw new Error('2FA 密钥为空或含非法字符')

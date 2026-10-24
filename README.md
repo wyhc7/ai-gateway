@@ -347,6 +347,9 @@ npm test --prefix server
 # 访问密钥端到端冒烟（起真进程 + 假上游，走真实 HTTP，手动运行）
 node scripts/smoke-api-keys.mjs
 
+# 提交前凭据扫描（仓库是公开的，别把真实 Key 写进文档）
+node scripts/check-secrets.mjs --all
+
 # ChatGPT 加号（起会话 / 交 callback / 看账号池 / 算 2FA）
 node scripts/add-account.mjs start  --email a@b.com
 node scripts/add-account.mjs finish --session <sid> --callback '<浏览器地址栏>'
@@ -355,6 +358,10 @@ node scripts/add-account.mjs totp   --secret <Base32 密钥>
 ```
 
 加号与排查脚本的完整说明见 [docs/ACCOUNT-TOOLS.md](docs/ACCOUNT-TOOLS.md)，其中也记录了 `auth.openai.com` 会被 Cloudflare 拦截这一事实——脚本登录走不通，得用真实浏览器。
+
+> **这是个公开仓库，新克隆后请先装提交前检查**：`git config core.hooksPath .githooks`。
+> 它会拦住真实 Key、密码、公网 IP 被写进文档或脚本 —— 这类事故已经发生过两次，
+> 详见 [docs/SECRET-HYGIENE.md](docs/SECRET-HYGIENE.md)。
 
 测试使用本地 mock 上游，覆盖故障切换、流式透传、Token 统计、模型白名单越权等核心路径。
 其中 `test/api-keys.test.js` 覆盖访问密钥的规则匹配、摘要存储（断言明文不落盘）、

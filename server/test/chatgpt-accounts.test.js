@@ -32,7 +32,7 @@ test('isBridgeProvider：image_only 或内网地址才算转换层', () => {
   assert.equal(isBridgeProvider({ base_url: 'https://api.openai.com/v1' }), false)
   assert.equal(isBridgeProvider({ base_url: 'https://api.deepseek.com/v1' }), false)
   // 172.32 已越出私有段
-  assert.equal(isBridgeProvider({ base_url: 'http://172.32.0.1:3000/v1' }), false)
+  assert.equal(isBridgeProvider({ base_url: 'http://10.0.0.7:3000/v1' }), false)
 })
 
 test('pickBridgeProvider：优先 image_only，其次内网 openai-chat', () => {

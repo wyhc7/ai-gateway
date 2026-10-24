@@ -1,0 +1,16 @@
+#!/bin/sh
+# 提交前扫描暂存区，拦住真实 Key / 密码 / 公网 IP 被写进文档或脚本。
+#
+# 为什么要这个 hook：这个仓库是公开的，历史上已经泄露过两次 ——
+#   1. SSH askpass helper 里的明文服务器密码（.sshpass.bat / .sshlogin.bat）
+#   2. 文档里写死的网关主 Key、管理 Key、服务器 IP
+# 两次都不是「文件没被 ignore」，而是「没想到这里也算凭据」。
+# 靠记性挡不住，所以做成提交时自动跑。
+#
+# 装法（新克隆后执行一次）：
+#   git config core.hooksPath .githooks
+#
+# 确属误报时，在被报文件里加一行注释：允许误报: <规则id>
+# 临时跳过（不推荐）：git commit --no-verify
+
+exec node scripts/check-secrets.mjs

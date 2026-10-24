@@ -46,3 +46,6 @@ out/
 *secret*
 .sshask*
 .keepass*
+
+# 例外：扫描器本身的名字里带 secret，但它必须进仓库才有意义
+!scripts/check-secrets.mjs

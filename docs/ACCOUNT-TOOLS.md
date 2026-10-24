@@ -77,7 +77,7 @@ TOTP 工具的默认设置。如果商家的码算出来对不上，先确认他
 
 ```bash
 export MS_CLIENT_ID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-export MS_REFRESH_TOKEN='M.C537_BAY...'
+export MS_REFRESH_TOKEN='<Microsoft refresh_token>'
 export MS_EMAIL=someone@outlook.com
 python scripts/outlook-diagnose.py
 ```
