@@ -30,4 +30,9 @@ start-*.sh
 
 out/
 
+# 临时命令与被密码污染的 helper
+# .tmp_*   ：调试时随手写的远程命令脚本
+# *pass*.bat：SSH 免交互登录用的 askpass helper，里面是明文服务器密码
 .tmp_*
+*pass*.bat
+.sshask*
