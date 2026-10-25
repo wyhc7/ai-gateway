@@ -36,18 +36,29 @@ out/
 .t.sh
 
 # SSH / 凭据 helper —— 这些文件里是**明文密码**，一旦提交就是事故。
-# 历史事故：.sshpass.bat、.sshlogin.bat 都曾被 git add -A 带进去过，
-# 所以这里不按具体名字拦，凡是名字里带 pass/login/cred/secret/keepass
-# 的 dotfile 一律挡掉。
+# 历史事故：.sshpass.bat、.sshlogin.bat 都曾被 git add -A 带进去过。
 *pass*.bat
 *login*.bat
 *login*.txt
-*cred*
-*secret*
+# 凭据文件按「扩展名 + 名字形态」拦，不要用 *cred* / *secret* 这种裸通配。
+# 历史事故：*cred* 把 web/src/components/CreditsPanel.vue 吃掉了 ——
+# git add -A 之后 git status 里找不到这个文件，diff 也没有，只有翻 .gitignore
+# 才发现。源码文件名带 cred/secret 是完全正常的命名，不该因为起名被挡在仓库外。
+*.cred
+.cred*
+*cred*.json
+*cred*.txt
+*cred*.pem
+*cred*.key
+.secret*
+*secret*.json
+*secret*.txt
+*secret*.pem
+*secret*.key
 .sshask*
 .keepass*
 
-# 例外：扫描器本身的名字里带 secret，但它必须进仓库才有意义
+# 例外：扫描器本身必须进仓库才有意义
 !scripts/check-secrets.mjs
 
 # WorkBuddy / CodeBuddy 登录态导出文件 —— 里面是活的 accessToken / refreshToken，
