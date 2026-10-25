@@ -72,9 +72,20 @@ async function commit(work, message) {
   return gitAt(['rev-parse', 'HEAD'], work)
 }
 
+// 统一成 \n 再比较：Windows 上 git 可能按 autocrlf 把内容写成 \r\n，
+// 而测试关心的是「文件内容是不是上游那一份」，不是换行风格。
+function normalizeEol(text) {
+  return String(text).replace(/\r\n/g, '\n')
+}
+
 /**
  * 搭一套夹具：裸库 origin + 已推送第一个提交的工作库。
  * 工作库的 remote 是这个裸库，所以 fetch/merge 全走本地文件，不需要网络。
+ *
+ * 关掉 autocrlf / safecrlf：Windows 上默认 autocrlf=true，检出时会把测试写进去的
+ * '# fixture\n' 变成 '# fixture\r\n'。断言又是在比较文件内容，于是同一份代码在
+ * Windows 上失败、在 Linux 上通过 —— 这种「换个系统就红」的测试比不测还糟，
+ * 它教人习惯性忽略红灯。测试要的是文件内容本身，不是平台的换行策略。
  */
 async function fixture(name, extra = null) {
   const root = join(SANDBOX, name)
@@ -90,6 +101,8 @@ async function fixture(name, extra = null) {
   await gitAt(['config', 'user.email', 'test@example.com'], work)
   await gitAt(['config', 'user.name', 'Test'], work)
   await gitAt(['config', 'commit.gpgsign', 'false'], work)
+  await gitAt(['config', 'core.autocrlf', 'false'], work)
+  await gitAt(['config', 'core.safecrlf', 'false'], work)
 
   writeFileSync(join(work, 'README.md'), '# fixture\n')
   // extra 里的文件进第一个提交：这样它们不会出现在后续 diff 里，
@@ -874,8 +887,9 @@ describe('强制更新：真的能越过阻挡把代码对齐到上游', () => {
     const forced = await up.applyUpdate({ force: 'soft' })
     assert.equal(forced.ok, true, `强制更新应成功：${JSON.stringify(forced.steps)}`)
     assert.equal(forced.force_mode, 'soft')
-    // 本地改动被还原成上游内容
-    assert.equal(readFileSync(join(work, 'README.md'), 'utf8'), '# fixture\n')
+    // 本地改动被还原成上游内容。比较前统一换行符：夹具已经关了 autocrlf，
+    // 但用户机器上可能有别的 git 配置插手，断言不该被换行风格影响。
+    assert.equal(normalizeEol(readFileSync(join(work, 'README.md'), 'utf8')), '# fixture\n')
     assert.equal(existsSync(join(work, 'NEW.md')), true)
     assert.ok(forced.steps.some((s) => s.name === '丢弃本地改动'))
     assert.ok(forced.steps.some((s) => s.name === '备份当前版本'), '强制更新必须先留回滚点')
@@ -912,16 +926,35 @@ describe('强制更新：真的能越过阻挡把代码对齐到上游', () => {
     assert.equal(existsSync(join(work, 'LOCAL.md')), false, '本地未推提交里的文件必须消失')
 
     // 但备份引用还在，能救回来
-    const refs = await gitAt(['for-each-ref', '--format=%(refname)', 'refs/force-backup/'], work)
-    assert.ok(refs.includes('refs/force-backup/'), '必须留下备份引用')
-    const backupSha = await gitAt(['rev-parse', 'refs/force-backup/'.replace(/\/$/, '') + '/' + refs.split('refs/force-backup/')[1].split('/')[0]], work)
-    assert.equal(backupSha, localSha, '备份引用必须指向被丢弃的那个提交')
+    //
+    // 别取「第一个」备份引用：refs/force-backup/<时间戳> 只精确到秒，同一次
+    // 测试里 soft 与 normal 连续两次 applyUpdate 很可能落在同一秒，写到同一个
+    // ref 上（update-ref 是覆盖语义），残留的旧 ref 也可能被 for-each-ref 先列出来。
+    // 这里按「值等于被丢弃的那个 sha」来找，才是真正要断言的事实。
+    const refs = await gitAt(['for-each-ref', '--format=%(refname) %(objectname)', 'refs/force-backup/'], work)
+    assert.ok(refs.trim().length > 0, '必须留下备份引用')
+    const backupShas = refs
+      .split('\n')
+      .map((line) => line.trim().split(/\s+/)[1])
+      .filter(Boolean)
+    assert.ok(
+      backupShas.includes(localSha),
+      `备份引用必须包含被丢弃的提交 ${localSha}，实际有：${backupShas.join(', ')}`
+    )
   })
 
   test('hard 档清掉未跟踪文件，但不碰 .gitignore 里的运行时目录', async () => {
     const { work, origin } = await fixture('force-hard')
     useRepo(work)
     up.clearUpdateCache()
+
+    // 注意顺序：先把 .gitignore 提交并推上去，再让上游 clone 加自己的提交。
+    // 反过来的话，clone 基于旧 HEAD 推新提交会成功，而本地 work 再推 .gitignore
+    // 就会被 `! [rejected] (fetch first)` 挡下 —— 那是测试自己把 git 历史搞乱了，
+    // 和「hard 档能不能清未跟踪文件」毫无关系。
+    writeFileSync(join(work, '.gitignore'), 'data/\n')
+    await commit(work, 'chore: add gitignore')
+    await gitAt(['push', '-q', 'origin', 'main'], work)
 
     const clone = join(SANDBOX, 'force-hard', 'upstream')
     await gitAt(['clone', '-q', origin, clone])
@@ -933,9 +966,6 @@ describe('强制更新：真的能越过阻挡把代码对齐到上游', () => {
 
     // 未跟踪的残渣 + 一个被 ignore 的运行时目录
     writeFileSync(join(work, 'stale-script.sh'), 'echo old\n')
-    writeFileSync(join(work, '.gitignore'), 'data/\n')
-    await commit(work, 'chore: add gitignore')
-    await gitAt(['push', '-q', 'origin', 'main'], work)
     mkdirSync(join(work, 'junkdir'), { recursive: true })
     writeFileSync(join(work, 'junkdir', 'x.txt'), 'junk\n')
     mkdirSync(join(work, 'data'), { recursive: true })
@@ -956,7 +986,7 @@ describe('强制更新：真的能越过阻挡把代码对齐到上游', () => {
     writeFileSync(join(work, 'README.md'), '# keep me\n')
     const r = await up.applyUpdate({ force: 'nuke' })
     // 没有新提交，所以是 up_to_date；关键是本地改动还在
-    assert.equal(readFileSync(join(work, 'README.md'), 'utf8'), '# keep me\n', '非法档位绝不能丢东西')
+    assert.equal(normalizeEol(readFileSync(join(work, 'README.md'), 'utf8')), '# keep me\n', '非法档位绝不能丢东西')
     assert.equal(r.force_mode ?? null, null)
   })
 
@@ -964,9 +994,18 @@ describe('强制更新：真的能越过阻挡把代码对齐到上游', () => {
   // 这时 behind = 0、has_update = false，而人恰恰最需要「硬对齐 + 重跑一遍」。
   // 强制更新因此不能绑在 has_update 上。
   test('已是最新时强制更新仍然真的重部署，而不是报「无需更新」', async () => {
+    // 夹具的 web/package.json 必须有 build 脚本：重部署分支会真的去跑
+    // `npm run build --prefix web`，没有这个 script 就会以
+    // `npm error Missing script: "build"` 失败 —— 那是夹具不完整，不是产品问题。
+    // 用 `node -e` 而不是真 vite：测的是「有没有走构建这一步」，
+    // 不该把 vite 拉进来变成一项环境依赖。
     const { work } = await fixture('force-redeploy', {
       'server/package.json': JSON.stringify({ name: 'srv', version: '1.0.0' }),
-      'web/package.json': JSON.stringify({ name: 'web', version: '1.0.0' })
+      'web/package.json': JSON.stringify({
+        name: 'web',
+        version: '1.0.0',
+        scripts: { build: 'node -e "process.exit(0)"' }
+      })
     })
     useRepo(work)
     up.clearUpdateCache()
@@ -980,7 +1019,10 @@ describe('强制更新：真的能越过阻挡把代码对齐到上游', () => {
     assert.ok(r.steps.some((s) => s.name === '强制重部署'), '必须走重部署分支')
     assert.ok(r.steps.some((s) => s.name === '构建管理界面'), '重部署必须重跑构建')
     // 手工改动被打回上游内容
-    assert.equal(readFileSync(join(work, 'server', 'package.json'), 'utf8'), JSON.stringify({ name: 'srv', version: '1.0.0' }))
+    assert.equal(
+      normalizeEol(readFileSync(join(work, 'server', 'package.json'), 'utf8')),
+      JSON.stringify({ name: 'srv', version: '1.0.0' })
+    )
   })
 })
 
