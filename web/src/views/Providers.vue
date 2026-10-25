@@ -908,6 +908,9 @@ function refreshWorkbuddyCredits() {
       api.getWorkbuddyCredits(p.id, k.id)
         .then((c) => {
           k.credits_remain = c.remain
+          // 已用也要一起回写：卡头 tooltip 里有「已用 X」，只更新剩余会让
+          // 剩余 + 已用 ≠ 总量，看着像账错了
+          k.credits_used = c.used
           k.credits_size = c.size
           k.credits_at = c.fetched_at
           delete k.credits_error

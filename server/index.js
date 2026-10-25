@@ -31,7 +31,7 @@ import { SUBSCRIPTION_PLANS, findPlan } from './subscription-plans.js'
 import { filterModelsForProvider, isImageModel } from './providers-image-only.js'
 import { startWorkbuddyLogin, pollWorkbuddyLogin, cancelWorkbuddyLogin, refreshWorkbuddyToken, ensureWorkbuddyToken } from './workbuddy-oauth.js'
 import { workbuddyRealmFor, expiryToMs, jwtExpiresAtMs } from './workbuddy-core.js'
-import { fetchWorkbuddyCheckinStatus, performWorkbuddyCheckin, beijingDayKey, fetchWorkbuddyCredits } from './workbuddy-checkin.js'
+import { fetchWorkbuddyCheckinStatus, performWorkbuddyCheckin, beijingDayKey, fetchWorkbuddyCredits, workbuddyCreditsStale } from './workbuddy-checkin.js'
 import { addLog, getLogs, initLogger } from './logger.js'
 import { checkUpdate, applyUpdate, normalizeForceMode, FORCE_MODES } from './update.js'
 import {
@@ -891,6 +891,19 @@ function workbuddyCheckinDay() {
   return beijingDayKey()
 }
 
+// 查一次额度并写回 Key。查询与写入绑在一起：手动刷新、签到后刷新都走这里，
+// 分开写迟早会漏掉一个字段，页面上的「剩余 / 总量」就会自相矛盾。
+async function refreshWorkbuddyCreditsInto(key) {
+  const credits = await fetchWorkbuddyCredits(key)
+  key.credits_remain = credits.remain
+  key.credits_used = credits.used
+  key.credits_size = credits.size
+  key.credits_unit = credits.unit
+  key.credits_at = credits.fetched_at
+  delete key.credits_error
+  return credits
+}
+
 // 单账号签到。返回值区分三种结果，前端与日志据此措辞：
 //   already  今日已签（上游或本地记录任一判定）
 //   inactive 该账号没有可签到活动（国际版账号常见）
@@ -906,7 +919,21 @@ async function workbuddyCheckinOne(key) {
   }
   await performWorkbuddyCheckin(key)
   key.checkin_date = workbuddyCheckinDay()
-  return { status: 'ok', summary: { ...status, checked_in: true, today_credit: status.daily_credit || status.today_credit } }
+  // 签到是「新增一个额度包」，总量与剩余一起上涨（见 workbuddy-checkin.js 里
+  // packageBalance 的注释）。签完必须重查一次，否则卡头会一直显示签到前的总量，
+  // 签到发的那部分额度在页面上等于不存在。
+  // 查额度失败不影响签到本身——签到已经领到了，只是数字晚点更新。
+  let credits = null
+  try {
+    credits = await refreshWorkbuddyCreditsInto(key)
+  } catch (err) {
+    key.credits_error = err.message
+  }
+  return {
+    status: 'ok',
+    summary: { ...status, checked_in: true, today_credit: status.daily_credit || status.today_credit },
+    credits
+  }
 }
 
 app.get('/api/oauth/workbuddy/accounts/:providerId/:keyId/checkin', api(async (req, res) => {
@@ -930,10 +957,9 @@ app.post('/api/oauth/workbuddy/accounts/:providerId/:keyId/checkin', api(async (
   try {
     const result = await workbuddyCheckinOne(key)
     persistImmediate()
-    addLog({
-      type: 'oauth', action: 'checkin', provider_id: p.id,
-      detail: `${key.name} 签到：${{ ok: '成功', already: '今日已签', inactive: '该账号无签到活动' }[result.status] || result.status}`
-    })
+    const label = { ok: '成功', already: '今日已签', inactive: '该账号无签到活动' }[result.status] || result.status
+    const delta = result.credits ? `，额度 ${result.credits.remain} / ${result.credits.size}` : ''
+    addLog({ type: 'oauth', action: 'checkin', provider_id: p.id, detail: `${key.name} 签到：${label}${delta}` })
     res.json(result)
   } catch (err) {
     // 签到失败只影响这一个账号，不进冷却——它不影响对话能力
@@ -952,13 +978,7 @@ app.get('/api/oauth/workbuddy/accounts/:providerId/:keyId/credits', api(async (r
   const key = (p.keys || []).find((k) => k.id === req.params.keyId)
   if (!key) return res.status(404).json({ error: { message: '账号不存在' } })
   try {
-    const credits = await fetchWorkbuddyCredits(key)
-    key.credits_remain = credits.remain
-    key.credits_used = credits.used
-    key.credits_size = credits.size
-    key.credits_unit = credits.unit
-    key.credits_at = credits.fetched_at
-    delete key.credits_error
+    const credits = await refreshWorkbuddyCreditsInto(key)
     persistImmediate()
     res.json(credits)
   } catch (err) {
@@ -981,15 +1001,27 @@ async function workbuddyAutoCheckinTick() {
     if (p.protocol !== 'workbuddy-oauth') continue
     for (const key of p.keys || []) {
       if (!key.enabled || key.type !== 'oauth' || !key.access_token) continue
-      if (key.checkin_date === day) continue
+      if (key.checkin_date === day) {
+        // 今天已经签过的号：签到那一刻已经重查过额度，但一整天里额度还会因为
+        // 使用而变化。缓存过期就补一次，免得卡头一整天停在旧数字上。
+        if (workbuddyCreditsStale(key, now)) {
+          try {
+            await refreshWorkbuddyCreditsInto(key)
+          } catch (err) {
+            key.credits_error = err.message
+          }
+        }
+        continue
+      }
       if (key.checkin_last_attempt_at && now - key.checkin_last_attempt_at < WORKBUDDY_CHECKIN_TICK_MS) continue
       key.checkin_last_attempt_at = now
       try {
         const r = await workbuddyCheckinOne(key)
-        addLog({
-          type: 'oauth', action: 'checkin', provider_id: p.id,
-          detail: `${key.name} 自动签到：${{ ok: '成功', already: '今日已签', inactive: '该账号无签到活动' }[r.status] || r.status}`
-        })
+        const label = { ok: '成功', already: '今日已签', inactive: '该账号无签到活动' }[r.status] || r.status
+        // 把签到后的剩余/总量写进日志：签到到底涨了多少，翻日志就能看出来，
+        // 不用再去页面上对着数字猜。
+        const delta = r.credits ? `，额度 ${r.credits.remain} / ${r.credits.size}` : ''
+        addLog({ type: 'oauth', action: 'checkin', provider_id: p.id, detail: `${key.name} 自动签到：${label}${delta}` })
       } catch (err) {
         addLog({ type: 'oauth', action: 'checkin', provider_id: p.id, detail: `${key.name} 自动签到失败：${err.message}` })
       }

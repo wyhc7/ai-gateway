@@ -1,10 +1,12 @@
 // WorkBuddy 签到的契约测试
 //
-// 钉三件事：
+// 钉四件事：
 //  1. 上游两代字段命名并存，只认一代会让某些账号永远显示「未签到」；
 //  2. 计费面回 HTML（realm 不匹配 / 凭据失效）时，错误要说得出所以然，
 //     不能让上层报出一个 "parse failed: invalid character" 就完事；
-//  3. 签到日按北京时间算——网关跑在 UTC 机器上时，本地日期会在凌晨判错天。
+//  3. 签到日按北京时间算——网关跑在 UTC 机器上时，本地日期会在凌晨判错天；
+//  4. 卡头上的额度数字有保质期——签到会新增额度包，签完不重查就会一直
+//     显示签到前的总量，签到发的额度在页面上等于不存在。
 import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
@@ -16,7 +18,9 @@ const {
   workbuddyBillingHeaders,
   beijingDayKey,
   packageBalance,
-  fetchWorkbuddyCredits
+  fetchWorkbuddyCredits,
+  workbuddyCreditsStale,
+  WORKBUDDY_CREDITS_TTL_MS
 } = await import('../workbuddy-checkin.js')
 
 function startUpstream(handler) {
@@ -177,6 +181,35 @@ describe('额度折算', () => {
     assert.equal(b.remain, 0)
     assert.equal(b.used, 0)
     assert.equal(b.size, 0)
+  })
+})
+
+describe('额度缓存的保质期', () => {
+  const NOW = Date.UTC(2026, 9, 25, 13, 0, 0)
+
+  test('从没查过就该查', () => {
+    assert.equal(workbuddyCreditsStale({}, NOW), true)
+    assert.equal(workbuddyCreditsStale({ credits_at: 0 }, NOW), true)
+    assert.equal(workbuddyCreditsStale({ credits_at: null }, NOW), true)
+  })
+
+  test('凭据坏了导致 credits_at 是字符串时按没查过处理，不能漏查', () => {
+    assert.equal(workbuddyCreditsStale({ credits_at: 'not-a-time' }, NOW), true)
+  })
+
+  test('刚查过就不查——上游这个接口不快，别每小时全量打一遍', () => {
+    assert.equal(workbuddyCreditsStale({ credits_at: NOW - 60_000 }, NOW), false)
+    assert.equal(workbuddyCreditsStale({ credits_at: NOW }, NOW), false)
+  })
+
+  test('超过 TTL 才重查，边界取严格大于', () => {
+    assert.equal(workbuddyCreditsStale({ credits_at: NOW - WORKBUDDY_CREDITS_TTL_MS }, NOW), false)
+    assert.equal(workbuddyCreditsStale({ credits_at: NOW - WORKBUDDY_CREDITS_TTL_MS - 1 }, NOW), true)
+  })
+
+  test('TTL 可注入，测试不依赖 6 小时这个常数', () => {
+    assert.equal(workbuddyCreditsStale({ credits_at: NOW - 1000 }, NOW, 500), true)
+    assert.equal(workbuddyCreditsStale({ credits_at: NOW - 1000 }, NOW, 5000), false)
   })
 })
 

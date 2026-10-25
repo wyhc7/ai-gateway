@@ -122,6 +122,20 @@ export function beijingDayKey(now = Date.now()) {
   return new Date(now + 8 * 3600 * 1000).toISOString().slice(0, 10)
 }
 
+// 卡头上那几个额度数字什么时候该重新查一次。
+//
+// 签到会**新增一个额度包**，总量和剩余一起往上涨。签完不重新查一次，页面上
+// 就会一直停在签到前的总量——签到带来的那部分额度等于白领。所以签到成功后
+// 必定重查；另外已经签过的号过了 TTL 也补一次，否则一天下来数字只会随着
+// 网关重启与否随机新旧。
+export const WORKBUDDY_CREDITS_TTL_MS = 6 * 60 * 60 * 1000
+
+export function workbuddyCreditsStale(key = {}, now = Date.now(), ttl = WORKBUDDY_CREDITS_TTL_MS) {
+  const at = Number(key?.credits_at) || 0
+  if (!at) return true
+  return now - at > ttl
+}
+
 // ---------------------------------------------------------------------------
 // 剩余额度
 // ---------------------------------------------------------------------------
