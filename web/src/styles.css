@@ -735,6 +735,63 @@ body::before {
   font-family: var(--font-mono);
 }
 
+/* 平台卡头上的积分汇总：一个数字 + 一条细条，不展开也能看到这个平台的家底 */
+.provider-credits {
+  flex: 0 0 auto;
+  width: 138px;
+  margin-left: 4px;
+  padding-right: 2px;
+}
+.provider-credits .pc-line {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.provider-credits .pc-num {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.provider-credits .pc-of {
+  font-size: 10.5px;
+  color: var(--ink-4);
+}
+.provider-credits .pc-bar {
+  height: 3px;
+  margin-top: 5px;
+  border-radius: 2px;
+  background: var(--rule-soft);
+  overflow: hidden;
+}
+.provider-credits .pc-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--ink);
+  transition: width 0.3s ease;
+}
+.provider-credits .pc-fill.mid { background: var(--warn); }
+.provider-credits .pc-fill.low { background: var(--accent); }
+.provider-credits .pc-foot {
+  margin-top: 3px;
+  text-align: right;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  color: var(--ink-4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 窄屏（平板竖屏以下）把积分块藏掉 —— 卡头一行挤不下三个数字区 */
+@media (max-width: 720px) {
+  .provider-credits { display: none; }
+}
+
 .provider-stats { display: flex; gap: 0; flex-shrink: 0; }
 .provider-stats .stat {
   text-align: right;

@@ -77,10 +77,6 @@
       </div>
     </div>
 
-    <!-- 订阅积分：按量计费平台的余额汇总。放在指标台账之后、对接方式之前 ——
-         它属于"看得到家底"这一类，不需要滚动就能瞄一眼还剩多少。 -->
-    <CreditsPanel style="margin-top: 18px" />
-
     <div class="card" style="margin-top: 18px">
       <div class="section-title">对接方式</div>
       <p class="muted" style="margin-bottom: 12px">完全兼容 OpenAI API 协议，任何 OpenAI SDK 或 HTTP 客户端均可直接接入：</p>
@@ -193,7 +189,6 @@ import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import api from '../api.js'
 import PulseStrip from '../components/PulseStrip.vue'
-import CreditsPanel from '../components/CreditsPanel.vue'
 
 const PULSE_COUNT = 64
 

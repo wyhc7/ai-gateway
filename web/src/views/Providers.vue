@@ -67,6 +67,18 @@
             </div>
             <div class="url">{{ p.base_url }}</div>
           </div>
+          <!-- 平台级积分汇总：不用展开、不用点进任何一个号，卡头就写清这个平台
+               还剩多少。只有 WorkBuddy 系有 credits_* 字段，其余平台这里是空的。 -->
+          <div v-if="creditStats[p.id]" class="provider-credits" :title="creditStats[p.id].tip">
+            <div class="pc-line">
+              <span class="pc-num">{{ creditStats[p.id].remainText }}</span>
+              <span class="pc-of">/ {{ creditStats[p.id].sizeText }}</span>
+            </div>
+            <div class="pc-bar">
+              <div class="pc-fill" :class="creditStats[p.id].cls" :style="{ width: creditStats[p.id].pctNum + '%' }"></div>
+            </div>
+            <div class="pc-foot">{{ creditStats[p.id].pct }} 剩余 · {{ creditStats[p.id].count }} 号</div>
+          </div>
           <div class="provider-stats">
             <div class="stat"><div class="num">{{ p.keys.length }}</div><div class="label">Key</div></div>
             <div class="stat"><div class="num">{{ p.models.length }}</div><div class="label">模型</div></div>
@@ -1941,6 +1953,68 @@ function creditsTip(k) {
 // 低于总量 10% 转琥珀色：签到攒出来的额度本来就不多，别等归零才提醒
 function creditsLow(k) {
   return Number(k.credits_size) > 0 && Number(k.credits_remain) <= Number(k.credits_size) / 10
+}
+
+// 卡头上的平台积分汇总，按平台 id 索引。
+//
+// 只算 WorkBuddy 系 —— 商汤 / NVIDIA / chatgpt2api 的 key 是按次计费或固定凭据，
+// 压根没有 credits_* 字段。要是把它们也当 0 加进来，「还剩多少积分」这个大数字
+// 就被稀释成一个既不是余额也不是次数的怪数，干脆不进汇总。
+//
+// 阈值跟展开后每个号的徽章用同一套：<10% 红、<30% 琥珀，别一个平台两套口径。
+const creditStats = computed(() => {
+  const out = {}
+  for (const p of providers.value) {
+    if (!isWorkbuddyProvider(p)) continue
+    const keys = (p.keys || []).filter((k) => k.credits_remain != null || k.credits_size != null)
+    if (keys.length === 0) continue
+
+    let remain = 0
+    let used = 0
+    let size = 0
+    let latest = 0
+    for (const k of keys) {
+      remain += Number(k.credits_remain) || 0
+      used += Number(k.credits_used) || 0
+      size += Number(k.credits_size) || 0
+      const at = Number(k.credits_at) || 0
+      if (at > latest) latest = at
+    }
+
+    const ratio = size > 0 ? remain / size : 0
+    const pctNum = Math.min(100, Math.max(0, ratio * 100))
+    const unit = keys.find((k) => k.credits_unit)?.credits_unit || 'credits'
+
+    out[p.id] = {
+      remain,
+      used,
+      size,
+      count: keys.length,
+      pctNum,
+      pct: size > 0 ? `${pctNum.toFixed(1)}%` : '—',
+      remainText: remain.toLocaleString('en-US'),
+      sizeText: size.toLocaleString('en-US'),
+      cls: size <= 0 ? '' : ratio < 0.1 ? 'low' : ratio < 0.3 ? 'mid' : '',
+      tip: [
+        `${p.name}：剩余 ${remain.toLocaleString('en-US')} / ${size.toLocaleString('en-US')} ${unit}`,
+        `已用 ${used.toLocaleString('en-US')}`,
+        `${keys.length} 个账号合计`,
+        latest ? `数据更新于 ${new Date(latest).toLocaleString()}（${agoText(latest)}）` : '尚未查询过额度'
+      ].join(' · ')
+    }
+  }
+  return out
+})
+
+// 「几分钟前」比绝对时间更适合描述余额新鲜度 —— 人关心的是这个数还准不准
+function agoText(ts) {
+  const min = Math.round((Date.now() - Number(ts)) / 60000)
+  if (!Number.isFinite(min) || min < 0) return '刚刚'
+  if (min < 1) return '刚刚'
+  if (min < 60) return `${min} 分钟前`
+  const h = Math.round(min / 60)
+  if (h < 24) return `${h} 小时前`
+  return `${Math.round(h / 24)} 天前`
 }
 
 async function exportProviders() {
