@@ -96,10 +96,10 @@
                   <div class="mono ellipsis">系统事件</div>
                 </template>
               </td>
-              <td data-label="平台"><span class="ellipsis" :title="row.provider_name">{{ row.provider_name || '—' }}</span></td>
-              <td data-label="Key"><span class="mono muted-cell ellipsis" :title="row.key">{{ row.key || '—' }}</span></td>
+              <td data-label="平台" :class="{ 'is-empty': !row.provider_name }"><span class="ellipsis" :title="row.provider_name">{{ row.provider_name || '—' }}</span></td>
+              <td data-label="Key" :class="{ 'is-empty': !row.key }"><span class="mono muted-cell ellipsis" :title="row.key">{{ row.key || '—' }}</span></td>
               <td class="right" data-label="耗时"><span :class="durationClass(row.duration_ms)">{{ fmtDuration(row.duration_ms) }}</span></td>
-              <td data-label="详情">
+              <td data-label="详情" :class="{ 'is-empty': !row.error && !row.detail && row.ok !== false }">
                 <div v-if="row.error" class="err-text ellipsis" :title="row.error">{{ row.error }}</div>
                 <div v-else-if="row.detail" class="muted-cell ellipsis" :title="row.detail">{{ row.detail }}</div>
                 <div v-else-if="row.ok === false" class="err-text ellipsis">请求失败</div>

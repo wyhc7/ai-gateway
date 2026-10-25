@@ -1222,6 +1222,9 @@ body::before {
   .provider-credits .pc-bar { flex: 1 1 auto; min-width: 40px; margin-top: 0; height: 4px; }
   .provider-credits .pc-foot { flex: 0 0 auto; margin-top: 0; }
 
+  /* 空值行在手机上整行收起 —— 一条日志七行里五行是「—」的话，一屏只能看两条 */
+  .data-table.mobile-cards tbody td.is-empty { display: none; }
+
   /* 窄屏表格：横向滚动在手机上等于「看不到的交互」，改成一行一张卡片。
      每格左边的小标签来自模板里的 data-label。 */
   .data-table.mobile-cards { display: block; width: 100%; min-width: 0; }
