@@ -1186,13 +1186,21 @@ body::before {
   .el-message-box { width: 88% !important; max-width: 92% !important; }
   .el-drawer { --el-drawer-width: 86% !important; }
 
-  .provider-head { flex-wrap: wrap; padding: 13px 14px; gap: 11px; }
+  .provider-head { flex-wrap: wrap; padding: 13px 14px; gap: 11px; align-items: flex-start; }
   .provider-avatar { width: 36px; height: 36px; font-size: 15px; order: 1; }
-  .provider-info { order: 2; flex: 1 1 120px; }
+  .provider-info { order: 2; flex: 1 1 120px; min-width: 0; }
   .provider-info .name { flex-wrap: wrap; gap: 6px; font-size: 14px; }
-  .provider-info .url { word-break: break-all; white-space: normal; line-height: 1.5; }
-  .chev { order: 4; }
-  .provider-stats { order: 3; margin-left: auto; }
+  /* 手机上一串 URL 折成两行会从单词中间劈开（…api.nvid / ia.com），
+     改成和桌面一致的单行省略，宁可截断也不劈词 */
+  .provider-info .url {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    word-break: normal;
+    line-height: 1.5;
+  }
+  .chev { order: 4; margin-top: 10px; }
+  .provider-stats { order: 3; margin-left: auto; margin-top: 2px; }
   .provider-stats .stat { padding: 0 10px; }
   .provider-stats .stat .num { font-size: 14px; }
 
@@ -1221,8 +1229,8 @@ body::before {
   .data-table.mobile-cards tbody { display: block; }
   .data-table.mobile-cards tbody tr {
     display: block;
-    padding: 11px 12px;
-    border-bottom: 1px solid var(--rule-soft);
+    padding: 12px 13px;
+    border-bottom: 1px solid var(--rule);
   }
   .data-table.mobile-cards tbody tr:last-child { border-bottom: none; }
   .data-table.mobile-cards tbody tr:hover td { background: transparent; }
@@ -1230,15 +1238,24 @@ body::before {
     display: flex;
     align-items: flex-start;
     gap: 10px;
-    padding: 3px 0;
+    padding: 2px 0;
     border: none;
     text-align: left;
     font-size: 12px;
-    line-height: 1.5;
+    line-height: 1.55;
   }
+  /* 第一格当卡片标题：一行粗体，不挂标签 */
+  .data-table.mobile-cards tbody td:first-child {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .data-table.mobile-cards tbody td:first-child::before { content: none; }
   .data-table.mobile-cards tbody td::before {
     content: attr(data-label);
-    flex: 0 0 58px;
+    flex: 0 0 52px;
     padding-top: 2px;
     font-family: var(--font-mono);
     font-size: 9px;
@@ -1251,7 +1268,15 @@ body::before {
   .data-table.mobile-cards tbody td.table-empty { display: block; padding: 34px 0; text-align: center; }
   .data-table.mobile-cards tbody .key-detail-row td { display: block; padding-top: 8px; }
   .data-table.mobile-cards tbody .key-detail-row td::before { content: none; }
-  .data-table.mobile-cards .ellipsis { white-space: normal; word-break: break-all; }
+  /* 长 URL / UUID 折两行就够，再多会把一张卡片撑成一面墙 */
+  .data-table.mobile-cards .ellipsis {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-all;
+    white-space: normal;
+  }
 
   /* 页头：描述折行时别被日/夜切换器挤成一条缝 */
   .page-head { align-items: flex-start; }
