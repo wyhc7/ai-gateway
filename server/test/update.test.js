@@ -722,6 +722,233 @@ describe('npm 的环境：脚本必须解析到和网关同一个 node', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// 强制更新（force）
+// ---------------------------------------------------------------------------
+
+describe('normalizeForceMode：档位取值必须严格', () => {
+  test('三个档位名原样接受，大小写与空白可容忍', () => {
+    assert.equal(up.normalizeForceMode('soft'), 'soft')
+    assert.equal(up.normalizeForceMode('NORMAL'), 'normal')
+    assert.equal(up.normalizeForceMode('  hard  '), 'hard')
+  })
+
+  test('布尔式开关一律映射到 normal（不默认最狠的一档）', () => {
+    for (const v of ['1', 'true', 'yes', 'on', true]) {
+      assert.equal(up.normalizeForceMode(v), 'normal', `${v} 应映射到 normal`)
+    }
+  })
+
+  test('关闭态与非值返回 null', () => {
+    for (const v of ['', '0', 'false', 'no', 'off', null, undefined, false]) {
+      assert.equal(up.normalizeForceMode(v), null, `${String(v)} 应视为不强制`)
+    }
+  })
+
+  // 静默降级成常规更新最危险：用户以为「强制过了」，实际什么都没丢，下次照旧卡死。
+  test('拼错的档位返回 null，绝不猜成相近的那档', () => {
+    assert.equal(up.normalizeForceMode('sof'), null)
+    assert.equal(up.normalizeForceMode('har'), null)
+    assert.equal(up.normalizeForceMode('nuke'), null)
+    assert.equal(up.normalizeForceMode('super'), null)
+  })
+})
+
+describe('forceModeEffects：每一档丢什么必须说得清楚', () => {
+  test('soft 只丢工作区改动，不丢提交、不删未跟踪文件', () => {
+    const e = up.forceModeEffects('soft')
+    assert.equal(e.discardTracked, true)
+    assert.equal(e.discardCommits, false)
+    assert.equal(e.cleanUntracked, false)
+    assert.equal(e.risks.length, 1)
+  })
+
+  test('normal 再丢本地未推提交', () => {
+    const e = up.forceModeEffects('normal')
+    assert.equal(e.discardCommits, true)
+    assert.equal(e.cleanUntracked, false)
+    assert.equal(e.risks.length, 2)
+  })
+
+  // hard 的 clean -fd 是最容易被低估的一步：残留脚本、旧产物都会没。
+  test('hard 额外清未跟踪文件，并且明确写出运行时目录不受影响', () => {
+    const e = up.forceModeEffects('hard')
+    assert.equal(e.cleanUntracked, true)
+    assert.equal(e.risks.length, 3)
+    assert.ok(e.risks.some((r) => /未跟踪/.test(r)))
+    assert.ok(e.risks.some((r) => /\.gitignore/.test(r)), '必须讲明 .gitignore 里的运行时目录不会被删')
+  })
+
+  test('非法档位退回「常规更新」语义，什么都不丢', () => {
+    const e = up.forceModeEffects('nuke')
+    assert.equal(e.mode, null)
+    assert.equal(e.discardTracked, false)
+    assert.deepEqual(e.risks, [])
+  })
+})
+
+describe('forceResolvedBlockers：越过什么要说出来', () => {
+  test('没有档位时不解阻挡（常规更新仍按原规则拒绝）', () => {
+    assert.deepEqual(up.forceResolvedBlockers({ dirty: ['a.js'] }, null, { ahead: 3 }), [])
+  })
+
+  test('只丢工作区改动时，只报那一条', () => {
+    const out = up.forceResolvedBlockers({ dirty: ['server/a.js', 'web/b.js'] }, 'soft', { ahead: 0 })
+    assert.equal(out.length, 1)
+    assert.match(out[0], /2 个已跟踪文件的改动将被丢弃/)
+  })
+
+  // soft 档不丢提交，所以有未推提交时它解不了阻挡 —— 这条由上层的 available 判断，
+  // 这里确认它不会虚报「已解决」。
+  test('soft 档不会把本地未推提交算成已解决', () => {
+    const out = up.forceResolvedBlockers({ dirty: [] }, 'soft', { ahead: 2 })
+    assert.deepEqual(out, [])
+  })
+
+  test('normal / hard 会把未推提交一并报出来', () => {
+    for (const mode of ['normal', 'hard']) {
+      const out = up.forceResolvedBlockers({ dirty: [] }, mode, { ahead: 2 })
+      assert.equal(out.length, 1, `${mode} 应报未推提交`)
+      assert.match(out[0], /2 个未推送的提交将被丢弃/)
+    }
+  })
+})
+
+describe('强制更新：真的能越过阻挡把代码对齐到上游', () => {
+  test('工作区脏：常规拒绝，soft 丢掉改动后更新成功', async () => {
+    const { work, origin } = await fixture('force-dirty')
+    useRepo(work)
+    up.clearUpdateCache()
+
+    // 上游推一个新提交
+    const clone = join(SANDBOX, 'force-dirty', 'upstream')
+    await gitAt(['clone', '-q', origin, clone])
+    await gitAt(['config', 'user.email', 'test@example.com'], clone)
+    await gitAt(['config', 'user.name', 'Test'], clone)
+    writeFileSync(join(clone, 'NEW.md'), 'upstream\n')
+    await commit(clone, 'upstream: add NEW.md')
+    await gitAt(['push', '-q', 'origin', 'main'], clone)
+
+    // 本地把 README 改脏
+    writeFileSync(join(work, 'README.md'), '# local edit that must be discarded\n')
+
+    const normal = await up.applyUpdate()
+    assert.equal(normal.ok, false, '常规更新必须拒绝脏工作区')
+    assert.match(normal.message, /未提交的改动/)
+
+    const forced = await up.applyUpdate({ force: 'soft' })
+    assert.equal(forced.ok, true, `强制更新应成功：${JSON.stringify(forced.steps)}`)
+    assert.equal(forced.force_mode, 'soft')
+    // 本地改动被还原成上游内容
+    assert.equal(readFileSync(join(work, 'README.md'), 'utf8'), '# fixture\n')
+    assert.equal(existsSync(join(work, 'NEW.md')), true)
+    assert.ok(forced.steps.some((s) => s.name === '丢弃本地改动'))
+    assert.ok(forced.steps.some((s) => s.name === '备份当前版本'), '强制更新必须先留回滚点')
+  })
+
+  test('本地有未推提交：soft 档做不到，normal 档硬对齐上游', async () => {
+    const { work, origin } = await fixture('force-ahead')
+    useRepo(work)
+    up.clearUpdateCache()
+
+    const clone = join(SANDBOX, 'force-ahead', 'upstream')
+    await gitAt(['clone', '-q', origin, clone])
+    await gitAt(['config', 'user.email', 'test@example.com'], clone)
+    await gitAt(['config', 'user.name', 'Test'], clone)
+    writeFileSync(join(clone, 'UP.md'), 'up\n')
+    await commit(clone, 'upstream: add UP.md')
+    await gitAt(['push', '-q', 'origin', 'main'], clone)
+
+    // 本地制造一个未推提交
+    writeFileSync(join(work, 'LOCAL.md'), 'local only\n')
+    const localSha = await commit(work, 'local: never pushed')
+
+    const soft = await up.applyUpdate({ force: 'soft' })
+    assert.equal(soft.ok, false, 'soft 档不丢提交，历史没法快进时必须失败')
+
+    const forced = await up.applyUpdate({ force: 'normal' })
+    assert.equal(forced.ok, true, `normal 档应成功：${JSON.stringify(forced.steps)}`)
+    assert.equal(forced.force_mode, 'normal')
+
+    // 本地提交被丢弃：HEAD 与上游一致，LOCAL.md 不在了
+    const head = await gitAt(['rev-parse', 'HEAD'], work)
+    const upstreamHead = await gitAt(['rev-parse', 'HEAD'], clone)
+    assert.equal(head, upstreamHead, 'normal 档必须把 HEAD 对齐到上游')
+    assert.equal(existsSync(join(work, 'LOCAL.md')), false, '本地未推提交里的文件必须消失')
+
+    // 但备份引用还在，能救回来
+    const refs = await gitAt(['for-each-ref', '--format=%(refname)', 'refs/force-backup/'], work)
+    assert.ok(refs.includes('refs/force-backup/'), '必须留下备份引用')
+    const backupSha = await gitAt(['rev-parse', 'refs/force-backup/'.replace(/\/$/, '') + '/' + refs.split('refs/force-backup/')[1].split('/')[0]], work)
+    assert.equal(backupSha, localSha, '备份引用必须指向被丢弃的那个提交')
+  })
+
+  test('hard 档清掉未跟踪文件，但不碰 .gitignore 里的运行时目录', async () => {
+    const { work, origin } = await fixture('force-hard')
+    useRepo(work)
+    up.clearUpdateCache()
+
+    const clone = join(SANDBOX, 'force-hard', 'upstream')
+    await gitAt(['clone', '-q', origin, clone])
+    await gitAt(['config', 'user.email', 'test@example.com'], clone)
+    await gitAt(['config', 'user.name', 'Test'], clone)
+    writeFileSync(join(clone, 'UP.md'), 'up\n')
+    await commit(clone, 'upstream: add UP.md')
+    await gitAt(['push', '-q', 'origin', 'main'], clone)
+
+    // 未跟踪的残渣 + 一个被 ignore 的运行时目录
+    writeFileSync(join(work, 'stale-script.sh'), 'echo old\n')
+    writeFileSync(join(work, '.gitignore'), 'data/\n')
+    await commit(work, 'chore: add gitignore')
+    await gitAt(['push', '-q', 'origin', 'main'], work)
+    mkdirSync(join(work, 'junkdir'), { recursive: true })
+    writeFileSync(join(work, 'junkdir', 'x.txt'), 'junk\n')
+    mkdirSync(join(work, 'data'), { recursive: true })
+    writeFileSync(join(work, 'data', 'gateway.json'), '{"keep":true}\n')
+
+    const forced = await up.applyUpdate({ force: 'hard' })
+    assert.equal(forced.ok, true, `hard 档应成功：${JSON.stringify(forced.steps)}`)
+    assert.ok(forced.steps.some((s) => s.name === '清理未跟踪文件'))
+    assert.equal(existsSync(join(work, 'junkdir')), false, '未跟踪目录必须被删')
+    assert.equal(existsSync(join(work, 'data', 'gateway.json')), true, '.gitignore 里的运行时数据绝不能被删')
+  })
+
+  test('非法档位等同常规更新，不会偷偷把本地改动扔掉', async () => {
+    const { work } = await fixture('force-invalid')
+    useRepo(work)
+    up.clearUpdateCache()
+
+    writeFileSync(join(work, 'README.md'), '# keep me\n')
+    const r = await up.applyUpdate({ force: 'nuke' })
+    // 没有新提交，所以是 up_to_date；关键是本地改动还在
+    assert.equal(readFileSync(join(work, 'README.md'), 'utf8'), '# keep me\n', '非法档位绝不能丢东西')
+    assert.equal(r.force_mode ?? null, null)
+  })
+
+  // git 看着干净、但产物坏了（web/dist 被手工动过、上次构建跑一半、依赖装坏）：
+  // 这时 behind = 0、has_update = false，而人恰恰最需要「硬对齐 + 重跑一遍」。
+  // 强制更新因此不能绑在 has_update 上。
+  test('已是最新时强制更新仍然真的重部署，而不是报「无需更新」', async () => {
+    const { work } = await fixture('force-redeploy', {
+      'server/package.json': JSON.stringify({ name: 'srv', version: '1.0.0' }),
+      'web/package.json': JSON.stringify({ name: 'web', version: '1.0.0' })
+    })
+    useRepo(work)
+    up.clearUpdateCache()
+
+    // 本地把已跟踪文件改脏（模拟产物被手工动过）
+    writeFileSync(join(work, 'server', 'package.json'), JSON.stringify({ name: 'srv', version: 'HAND-EDITED' }))
+
+    const r = await up.applyUpdate({ force: 'normal' })
+    assert.equal(r.ok, true, `强制重部署应成功：${JSON.stringify(r.steps)}`)
+    assert.equal(r.up_to_date, undefined, '不能报「无需更新」')
+    assert.ok(r.steps.some((s) => s.name === '强制重部署'), '必须走重部署分支')
+    assert.ok(r.steps.some((s) => s.name === '构建管理界面'), '重部署必须重跑构建')
+    // 手工改动被打回上游内容
+    assert.equal(readFileSync(join(work, 'server', 'package.json'), 'utf8'), JSON.stringify({ name: 'srv', version: '1.0.0' }))
+  })
+})
+
 describe('自重启：不提权，靠 Restart=on-failure', () => {
   // 这些用例只钉「判定逻辑」，绝不真的退出进程 —— 测试进程本身不能死。
 

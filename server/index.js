@@ -33,7 +33,7 @@ import { startWorkbuddyLogin, pollWorkbuddyLogin, cancelWorkbuddyLogin, refreshW
 import { workbuddyRealmFor, expiryToMs, jwtExpiresAtMs } from './workbuddy-core.js'
 import { fetchWorkbuddyCheckinStatus, performWorkbuddyCheckin, beijingDayKey, fetchWorkbuddyCredits } from './workbuddy-checkin.js'
 import { addLog, getLogs, initLogger } from './logger.js'
-import { checkUpdate, applyUpdate } from './update.js'
+import { checkUpdate, applyUpdate, normalizeForceMode, FORCE_MODES } from './update.js'
 import {
   startDeviceFlow,
   pollDeviceFlow,
@@ -1718,16 +1718,27 @@ app.get('/api/update/check', api(async (req, res) => {
 
 // 更新失败也回 200：HTTP 层没出错，出错的是更新过程本身，而前端要拿到完整步骤
 // 日志才能指出卡在哪一步。前端按 result.ok 分支，而不是按响应码。
+//
+// force：强制更新档位（soft / normal / hard）。不传就是常规更新。
+// 非法值直接 400 —— 静默降级成常规更新会让人以为「强制过了」，而实际上什么都没丢，
+// 下一次照样卡在同一个地方。
 app.post('/api/update/apply', api(async (req, res) => {
-  const result = await applyUpdate()
+  const raw = req.body?.force
+  const forceMode = normalizeForceMode(raw)
+  if (raw !== undefined && raw !== null && raw !== '' && raw !== false && forceMode === null) {
+    return res.status(400).json({ error: { message: `force 取值非法：${raw}，可用值为 ${FORCE_MODES.join(' / ')}` } })
+  }
+  const result = await applyUpdate({ force: forceMode })
   addLog({
     type: 'system',
     method: 'POST',
     path: '/api/update/apply',
     status: result.ok ? 200 : 500,
     detail: result.ok
-      ? (result.up_to_date ? '检查更新：已是最新版本' : `已更新 ${result.from} → ${result.to}${result.restart?.ok ? '' : `（${result.restart?.message || '需手动重启'}）`}`)
-      : `更新失败：${result.message}`
+      ? (result.up_to_date
+          ? '检查更新：已是最新版本'
+          : `已更新 ${result.from} → ${result.to}${result.forced ? `（强制 ${result.force_mode}）` : ''}${result.restart?.ok ? '' : `（${result.restart?.message || '需手动重启'}）`}`)
+      : `更新失败${forceMode ? `（强制 ${forceMode}）` : ''}：${result.message}`
   })
   res.json(result)
 }))

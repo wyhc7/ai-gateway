@@ -132,7 +132,12 @@ export const api = {
 
   // 系统更新（比对上游仓库并一键更新）
   checkUpdate: (force = false) => request(`/api/update/check${force ? '?force=1' : ''}`),
-  applyUpdate: () => request('/api/update/apply', { method: 'POST' })
+  // forceMode：soft / normal / hard（强制更新档位）。不传就是常规更新。
+  applyUpdate: (forceMode = null) =>
+    request('/api/update/apply', {
+      method: 'POST',
+      body: JSON.stringify(forceMode ? { force: forceMode } : {})
+    })
 }
 
 export function notifyError(err, fallback = '操作失败') {

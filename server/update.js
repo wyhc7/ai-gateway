@@ -24,6 +24,76 @@ export const GIT_TIMEOUT_MS = 20 * 1000
 export const NPM_TIMEOUT_MS = 10 * 60 * 1000
 export const MAX_COMMITS = 50
 
+// ---------------------------------------------------------------------------
+// 强制更新（force）
+//
+// 常规更新是保守的：工作区脏就拒绝、只做 --ff-only、永不 reset --hard。
+// 它挡的是「网页上一个按钮把服务器本地改动冲掉」，这个理由依然成立。
+//
+// 但真到了部署目录被人手工改过、本地有未推提交、历史分叉的时候，保守路径会
+// 永久卡死——界面只显示「需人工处理」，而人手里没有 SSH 就只能干看着。
+// 强制更新就是给这种场景的**显式逃生门**：用户必须自己选定档位，档位越狠，
+// 丢掉的东西越多，界面上一档一档写清楚丢什么。
+//
+// 三档按「破坏性」递增，最小够用：
+//   soft   只丢掉已跟踪文件上的本地改动（git checkout -- .），历史必须能快进。
+//          适用于「有人改了配置文件没提交」这种最常见的卡死。
+//   normal 允许丢掉本地未推送的提交，直接 reset --hard 到上游。
+//          适用于「本地被 commit 过脏东西」或分叉到没法 ff 的仓库。
+//   hard   normal + 清掉未跟踪文件与目录（git clean -fd）。
+//          适用于「残留的旧产物/旧脚本把构建搞坏」。.gitignore 里的东西不动
+//          （data/、web/dist、node_modules 都是运行时产物，删了等于把服务拆了）。
+// ---------------------------------------------------------------------------
+
+export const FORCE_MODES = ['soft', 'normal', 'hard']
+
+/** 规范化档位；非法值返回 null（调用方据此报 400，而不是默默当成某一档）。 */
+export function normalizeForceMode(raw) {
+  const s = String(raw ?? '').trim().toLowerCase()
+  if (!s || s === '0' || s === 'false' || s === 'no' || s === 'off') return null
+  if (s === '1' || s === 'true' || s === 'yes' || s === 'on') return 'normal'
+  return FORCE_MODES.includes(s) ? s : null
+}
+
+/** 某一档会丢哪些东西——界面与日志都直接用它，避免两处说法不一致。 */
+export function forceModeEffects(mode) {
+  const m = FORCE_MODES.includes(mode) ? mode : null
+  if (!m) return { mode: null, discardTracked: false, discardCommits: false, cleanUntracked: false, label: '常规更新', risks: [] }
+  const risks = []
+  if (m === 'soft') risks.push('已跟踪文件上的本地改动会被丢弃')
+  if (m === 'normal') risks.push('已跟踪文件上的本地改动会被丢弃', '本地未推送的提交会被丢弃')
+  if (m === 'hard') risks.push('已跟踪文件上的本地改动会被丢弃', '本地未推送的提交会被丢弃', '未跟踪的文件与目录会被删除（.gitignore 里的运行时目录除外）')
+  return {
+    mode: m,
+    discardTracked: true,
+    discardCommits: m !== 'soft',
+    cleanUntracked: m === 'hard',
+    label: { soft: '强制（保留历史）', normal: '强制（对齐上游）', hard: '强制（彻底重置）' }[m],
+    risks
+  }
+}
+
+/**
+ * 在强制模式下，哪些「阻挡项」可以被越过。
+ *
+ * 常规更新的 blockers 是硬拒绝；强制更新把它们换成一个「将被丢弃的清单」，
+ * 让人在按下按钮之前就看见自己要付什么。返回空数组表示这一档也救不了
+ * （例如根本不是 git 仓库、没有 origin），必须原样拒绝。
+ */
+export function forceResolvedBlockers(local, mode, { ahead = 0 } = {}) {
+  const m = FORCE_MODES.includes(mode) ? mode : null
+  if (!m) return []
+  const cleared = []
+  const dirty = Array.isArray(local?.dirty) ? local.dirty : []
+  if (dirty.length) {
+    cleared.push(`工作区 ${dirty.length} 个已跟踪文件的改动将被丢弃（${dirty.slice(0, 3).join('、')}${dirty.length > 3 ? ' 等' : ''}）`)
+  }
+  if (ahead > 0 && m !== 'soft') {
+    cleared.push(`本地 ${ahead} 个未推送的提交将被丢弃`)
+  }
+  return cleared
+}
+
 /** 仓库根目录。默认取 server/ 的上一级；测试用 UPDATE_REPO_DIR 指向临时仓库。 */
 export function repoDir() {
   return resolve(process.env.UPDATE_REPO_DIR || join(HERE, '..'))
@@ -450,6 +520,28 @@ async function computeCheck() {
     blockers.push(`本地有 ${ahead} 个未推送的提交，快进合并会失败`)
   }
 
+  // 强制更新的可用档位：把所有阻挡项在每一档下「能不能越过、越过后丢什么」都算出来，
+  // 界面据此渲染，而不是在前端另写一套判断（两处口径一定会分叉）。
+  //
+  // ⚠️ 这里**不要求 has_update**。原因：真实场景里「git 看是干净的、但产物是坏的」
+  // 很常见——web/dist 被手工改过、上次构建只跑了一半、依赖装坏。这种时候
+  // behind = 0、has_update = false，而人恰恰最需要「把工作区硬对齐到上游再重跑一遍」。
+  // 强制更新因此不绑在 has_update 上：它是对齐 + 重部署，不是「有更新才准用」。
+  const forceOptions = FORCE_MODES.map((mode) => {
+    const cleared = forceResolvedBlockers(local, mode, { ahead })
+    const effects = forceModeEffects(mode)
+    // soft 档过不去的唯一情形：本地有未推提交（它要求历史必须能快进）
+    const blocked = mode === 'soft' && ahead > 0
+    return {
+      mode,
+      label: effects.label,
+      risks: effects.risks,
+      cleared,
+      available: !blocked,
+      unavailable_reason: blocked ? '本地有未推送的提交，这一档要求历史能快进' : null
+    }
+  })
+
   return {
     ...base,
     latest: {
@@ -471,6 +563,8 @@ async function computeCheck() {
     plan: planSteps(paths),
     can_update: hasUpdate && blockers.length === 0,
     blocked_reason: blockers.length ? blockers.join('；') : null,
+    can_force: forceOptions.some((o) => o.available),
+    force_options: forceOptions,
     restart: { unit: serviceUnit(), auto: process.env.UPDATE_NO_RESTART !== '1' }
   }
 }
@@ -629,8 +723,14 @@ export async function triggerRestartForTest() {
  *
  * 失败时也返回 HTTP 200：请求本身没出错，出错的是更新过程，而前端需要拿到完整
  * 的步骤日志才能指出卡在哪一步——走 error.message 通道会把细节全丢掉。
+ *
+ * `options.force` 是强制更新档位（soft / normal / hard，见 FORCE_MODES）。
+ * 不传就是常规更新：工作区脏拒绝、只做快进合并、绝不 reset --hard。
+ * 传了就必须按档位把「该丢的东西」真的丢掉，否则后面的 ff / reset 一定会失败。
  */
-export async function applyUpdate() {
+export async function applyUpdate({ force = null } = {}) {
+  const forceMode = normalizeForceMode(force)
+  const effects = forceModeEffects(forceMode)
   const steps = []
   // 合并成功之后才可能失败在装依赖/构建上。这时代码已经进来了，只是新版本的
   // 运行条件没备齐——把这一点单独告诉前端，人才知道该「修完重试」而不是「重头再来」。
@@ -638,7 +738,7 @@ export async function applyUpdate() {
   const done = (name, detail) => steps.push({ name, ok: true, detail })
   const fail = (name, detail) => {
     steps.push({ name, ok: false, detail })
-    return { ok: false, message: detail, steps, merged_to: mergedTo }
+    return { ok: false, message: detail, steps, merged_to: mergedTo, force: forceMode }
   }
 
   clearUpdateCache()
@@ -653,8 +753,10 @@ export async function applyUpdate() {
   if (!local.isRepo) {
     return fail('读取本地版本', '当前部署目录不是 git 仓库，无法自动更新。请用 deploy/linux/complete-deploy.sh --update。')
   }
-  if (local.dirty.length) {
-    return fail('检查工作区', `工作区有未提交的改动（${local.dirty.slice(0, 5).join('、')}），已中止以免覆盖。请先提交或还原后再更新。`)
+  // 工作区脏：常规更新拒绝；强制更新按档位丢弃已跟踪改动。
+  // 这里必须真的 checkout 掉，否则后面的 ff/reset 会因为「本地改动会被覆盖」失败。
+  if (local.dirty.length && !effects.discardTracked) {
+    return fail('检查工作区', `工作区有未提交的改动（${local.dirty.slice(0, 5).join('、')}），已中止以免覆盖。请先提交或还原后再更新，或改用强制更新。`)
   }
   if (!local.remote) {
     return fail('检查远程', '仓库没有配置 origin 远程，无法拉取更新。')
@@ -696,9 +798,52 @@ export async function applyUpdate() {
   // 这时没有东西可以合并，该做的是把没跑完的步骤补上，而不是报「已是最新」。
   const resumeDeploy = !behind && Boolean(deployedRevision && !sameRevision(deployedRevision, before))
 
-  if (!behind && !resumeDeploy) {
+  // 强制「对齐上游」：本地领先（有未推提交）或历史分叉时，behind 可能是 0 而
+  // 本地其实偏离了上游。normal/hard 档的语义就是「以上游为准」，这种偏离必须
+  // 被识别出来，否则会返回「已是最新」而把强制更新吞掉——那比不做更让人困惑。
+  const diverged = (await git(['rev-list', '--count', `FETCH_HEAD..HEAD`]).trim()) !== '0'
+
+  // 强制重部署：git 干净、也没落后，但人明确要求强制——说明想要的是
+  // 「把工作区硬对齐到上游，然后依赖/构建全部重跑一遍」。
+  // 典型场景：web/dist 被手工动过、上次构建只跑了一半、依赖装坏。
+  // 这种时候没有提交要合并，但必须真的重跑部署步骤，否则按钮点了等于没点。
+  const forceRedeploy = Boolean(forceMode) && !behind && !resumeDeploy && !diverged
+
+  if (!behind && !resumeDeploy && !(effects.discardCommits && diverged) && !forceRedeploy) {
     done('比对版本', '已是最新，无需更新')
-    return { ok: true, up_to_date: true, from: shortSha(before), to: shortSha(before), steps, restart: { ok: true, mode: 'none', message: '未做任何改动' } }
+    return { ok: true, up_to_date: true, from: shortSha(before), to: shortSha(before), steps, restart: { ok: true, mode: 'none', message: '未做任何改动' }, force: forceMode }
+  }
+
+  // —— 强制执行前的「保命」：先把当前 HEAD 记进一个具名 ref ——
+  //
+  // reset --hard 之后提交在 reflog 里还能捞，但 reflog 会被 gc 清掉，且没人记得
+  // 「刚才那个 sha 是多少」。留一个 force-backup/<时间戳> 分支，事后一行
+  // `git reset --hard <那个 ref>` 就能整条还原。这是强制更新唯一不该省的一步。
+  //
+  // 只要走了强制路径就备份（包括「已最新但要重部署」那一支）：那时虽然不丢提交，
+  // 但 reset --hard 会把工作区打回上游，手工改过的文件一样会消失。
+  if (forceMode) {
+    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+    const backupRef = `refs/force-backup/${stamp}`
+    try {
+      await git(['update-ref', backupRef, before])
+      done('备份当前版本', `${shortSha(before)} → ${backupRef}（可用 git reset --hard ${backupRef} 还原）`)
+    } catch (err) {
+      // 备份失败不中止：多数情况下 update-ref 失败只是因为权限/只读，而更新本身还能做。
+      // 但必须让人看见「这次没有后路」。
+      done('备份当前版本', `未能创建备份引用（${firstLine(commandError(err))}），本次强制更新没有回滚点`)
+    }
+  }
+
+  // 丢掉已跟踪文件上的本地改动。checkout -- . 只动已跟踪文件，
+  // 未跟踪的东西（data/、web/dist、脚本残渣）不碰——那是 hard 档的事。
+  if (effects.discardTracked && local.dirty.length) {
+    try {
+      await git(['checkout', '--', '.'])
+      done('丢弃本地改动', `${local.dirty.length} 个文件已还原：${local.dirty.slice(0, 5).join('、')}${local.dirty.length > 5 ? ' 等' : ''}`)
+    } catch (err) {
+      return fail('丢弃本地改动', `git checkout 失败：${commandError(err)}`)
+    }
   }
 
   // 变更面：正常更新看「合并前 → 目标」；补做部署看「上次部署成功的提交 → 当前 HEAD」。
@@ -726,13 +871,50 @@ export async function applyUpdate() {
     done('比对版本', comparable
       ? `上次部署停在 ${shortSha(deployedRevision)}，补做后续步骤（${paths.length} 个文件）`
       : `无法比对到 ${shortSha(diffFrom)}，改为全量重跑`)
+  } else if (forceRedeploy) {
+    // 没有任何提交要合并，但人要求强制重跑：对齐到上游 + 全量重装重建。
+    // 此时 diff 是空的，planSteps 会给「什么都不做」，必须显式改回全量——
+    // 否则一次「强制重部署」会变成「什么也没干，只重启了一下」。
+    try {
+      await git(['reset', '--hard', target])
+      mergedTo = shortSha(target)
+      // hard 档的语义是「彻底重置」，重部署路径上同样要清未跟踪残渣：
+      // 残留的旧产物正是「git 干净但构建坏掉」的头号原因，不清等于白强制一次。
+      if (effects.cleanUntracked) {
+        const cleaned = await git(['clean', '-fd'])
+        const lines = String(cleaned || '').split('\n').map((s) => s.trim()).filter(Boolean)
+        done('清理未跟踪文件', lines.length ? `删除 ${lines.length} 项（${lines.slice(0, 5).join('、')}${lines.length > 5 ? ' 等' : ''}）` : '没有需要清理的未跟踪文件')
+      }
+      plan = { installServer: true, installWeb: true, buildWeb: true }
+      done('强制重部署', `已对齐到 ${shortSha(target)}，本次无提交变更，改为全量重装与重建`)
+    } catch (err) {
+      return fail('强制重部署', `git reset --hard 失败：${commandError(err)}`)
+    }
+  } else if (effects.discardCommits) {
+    // normal / hard：直接对齐上游，不试 ff。乱历史下 ff 必然失败，
+    // 而这一档的语义就是「以上游为准，本地未推提交作废」。
+    try {
+      await git(['reset', '--hard', target])
+      mergedTo = shortSha(target)
+      // reset --hard 不会删未跟踪文件；hard 档再清一次。
+      // -d 递归到目录，-x 不加：.gitignore 里的 data/、web/dist、node_modules
+      // 都是运行时产物，删掉等于把服务拆了，绝不是「重置代码」该干的事。
+      if (effects.cleanUntracked) {
+        const cleaned = await git(['clean', '-fd'])
+        const lines = String(cleaned || '').split('\n').map((s) => s.trim()).filter(Boolean)
+        done('清理未跟踪文件', lines.length ? `删除 ${lines.length} 项（${lines.slice(0, 5).join('、')}${lines.length > 5 ? ' 等' : ''}）` : '没有需要清理的未跟踪文件')
+      }
+      done('强制对齐上游', `${shortSha(before)} → ${mergedTo}（丢弃本地分支位置，${paths.length} 个文件）`)
+    } catch (err) {
+      return fail('强制对齐上游', `git reset --hard 失败：${commandError(err)}`)
+    }
   } else {
     try {
       await git(['merge', '--ff-only', target])
       mergedTo = shortSha(target)
       done('合并代码', `${shortSha(before)} → ${mergedTo}（${paths.length} 个文件）`)
     } catch (err) {
-      return fail('合并代码', `快进合并失败：${commandError(err)}`)
+      return fail('合并代码', `快进合并失败：${commandError(err)}${effects.discardCommits ? '' : '。若确认要丢掉本地提交，请用强制更新（对齐上游档）'}`)
     }
   }
 
@@ -777,6 +959,8 @@ export async function applyUpdate() {
     from: shortSha(before),
     to: shortSha(target),
     resumed: resumeDeploy,
+    forced: Boolean(forceMode),
+    force_mode: forceMode,
     deployed_recorded: recorded,
     commits,
     files: paths.length,

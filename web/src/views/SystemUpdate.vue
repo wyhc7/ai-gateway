@@ -129,6 +129,62 @@
             已禁用自动重启（UPDATE_NO_RESTART=1），更新后需手动重启。
           </span>
         </div>
+
+        <!-- 强制更新：常规更新被挡死时的逃生门。
+             平时收起来，只有常规路径不可用（或用户主动展开）才露出，避免它变成日常入口。 -->
+        <div v-if="result.can_force" class="force-block">
+          <div class="force-head">
+            <span class="force-title">强制更新</span>
+            <span class="muted force-sub">
+              常规更新被上面的原因挡住时用这里。<b>它会丢弃服务器上的本地改动</b>，按档位丢弃的东西不同。
+            </span>
+            <button class="files-toggle" @click="showForce = !showForce">
+              {{ showForce ? '收起' : '展开' }}
+            </button>
+          </div>
+
+          <template v-if="showForce">
+            <div class="force-modes">
+              <label
+                v-for="o in result.force_options || []"
+                :key="o.mode"
+                :class="['force-mode', { off: !o.available, on: forceMode === o.mode }]"
+              >
+                <input
+                  type="radio"
+                  name="force-mode"
+                  :value="o.mode"
+                  :disabled="!o.available || updating"
+                  :checked="forceMode === o.mode"
+                  @change="forceMode = o.mode"
+                />
+                <span class="force-mode-body">
+                  <span class="force-mode-label">{{ o.label }}</span>
+                  <span v-if="o.available" class="force-mode-risks">
+                    <span v-for="(r, i) in o.risks" :key="i" class="force-risk">{{ r }}</span>
+                  </span>
+                  <span v-else class="force-mode-reason">{{ o.unavailable_reason }}</span>
+                  <span v-if="o.cleared && o.cleared.length" class="force-mode-cleared">
+                    本次将越过的阻挡：{{ o.cleared.join('；') }}
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            <div class="apply-bar force-apply">
+              <el-button
+                type="danger"
+                :disabled="!forceMode || updating"
+                :loading="updating"
+                @click="applyForced"
+              >{{ updating ? '更新中…' : `强制执行${forceMode ? '（' + forceModeLabel(forceMode) + '）' : ''}` }}</el-button>
+              <span v-if="!forceMode" class="muted">先选一档。</span>
+              <span v-else class="muted mono">
+                执行前会先把当前版本存成 refs/force-backup/&lt;时间戳&gt; 分支，事后可 git reset --hard 还原。
+              </span>
+            </div>
+          </template>
+        </div>
       </div>
     </template>
 
@@ -185,6 +241,15 @@ const restarting = ref(false)
 const restarted = ref(false)
 const restartTimedOut = ref(false)
 const waitedSeconds = ref(0)
+
+// 强制更新：档位选择与展开状态。默认收起，避免它变成日常入口。
+const showForce = ref(false)
+const forceMode = ref('')
+
+function forceModeLabel(mode) {
+  const found = (result.value?.force_options || []).find((o) => o.mode === mode)
+  return found?.label || mode
+}
 
 const current = computed(() => result.value?.current || {})
 const latest = computed(() => result.value?.latest || {})
@@ -295,7 +360,43 @@ async function apply() {
   } catch {
     return
   }
+  await runApply(null)
+}
 
+/**
+ * 强制更新。
+ *
+ * 确认框要让人看见「具体丢什么」而不是一句「确定吗」——强制更新的全部风险都在
+ * 那句 risks 里，藏起来等于把决定权从人手里拿走。档位越狠，确认框的措辞越硬。
+ */
+async function applyForced() {
+  const mode = forceMode.value
+  if (!mode) return
+  const opt = (result.value?.force_options || []).find((o) => o.mode === mode)
+  const risks = (opt?.risks || []).map((r) => `· ${r}`).join('\n')
+  const cleared = (opt?.cleared || []).map((r) => `· ${r}`).join('\n')
+  const tail = mode === 'hard'
+    ? '\n\n这是最狠的一档，未跟踪的文件也会被删除。执行前会留一个 refs/force-backup/ 备份引用。'
+    : '\n\n执行前会留一个 refs/force-backup/ 备份引用，事后可以用 git reset --hard 还原。'
+  try {
+    await ElMessageBox.confirm(
+      `将以【${opt?.label || mode}】强制更新到上游 ${latest.value.short || ''}。\n\n会丢弃：\n${risks}${cleared ? `\n\n本次将越过：\n${cleared}` : ''}${tail}`,
+      '确认强制更新',
+      {
+        confirmButtonText: '确认强制执行',
+        cancelButtonText: '取消',
+        type: 'error',
+        dangerouslyUseHTMLString: false
+      }
+    )
+  } catch {
+    return
+  }
+  await runApply(mode)
+}
+
+/** 常规与强制共用的执行流程：调接口 → 处理结果 → 等重启。 */
+async function runApply(forceMode) {
   const prevUptime = await readUptime()
   updating.value = true
   applyResult.value = null
@@ -304,7 +405,7 @@ async function apply() {
   waitedSeconds.value = 0
 
   try {
-    applyResult.value = await api.applyUpdate()
+    applyResult.value = await api.applyUpdate(forceMode)
   } catch (e) {
     ElMessage.error(e?.message || '更新失败')
     updating.value = false
@@ -326,7 +427,7 @@ async function apply() {
     return
   }
 
-  ElMessage.success('代码已更新')
+  ElMessage.success(applyResult.value.forced ? '代码已强制更新' : '代码已更新')
   if (applyResult.value.restart?.ok) {
     restarting.value = true
     const ok = await waitForRestart(prevUptime)
@@ -565,6 +666,98 @@ onMounted(() => check(false))
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+/* ---------- 强制更新（逃生门） ----------
+   视觉上必须跟常规更新拉开距离：一条实线隔开、标题用告警色、
+   档位卡片选中时才上边框。目的是让人「多看一眼」，而不是顺手点。 */
+.force-block {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--rule-soft);
+}
+
+.force-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.force-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+
+.force-sub {
+  font-size: 11.5px;
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.force-modes {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.force-mode {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  gap: 10px;
+  align-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--rule-soft);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.force-mode:hover { border-color: var(--accent-line); }
+.force-mode.on { border-color: var(--accent); background: var(--accent-soft, rgba(220, 38, 38, 0.04)); }
+
+.force-mode.off {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.force-mode input { margin-top: 2px; accent-color: var(--accent); }
+.force-mode-body { display: grid; gap: 4px; min-width: 0; }
+
+.force-mode-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.force-mode-risks { display: grid; gap: 2px; }
+
+.force-risk {
+  font-size: 11.5px;
+  color: var(--warn-ink, var(--ink-3));
+  line-height: 1.5;
+}
+
+.force-risk::before { content: '− '; color: var(--accent); }
+
+.force-mode-reason {
+  font-size: 11.5px;
+  color: var(--ink-4);
+}
+
+.force-mode-cleared {
+  font-size: 11px;
+  color: var(--ink-4);
+  line-height: 1.5;
+  margin-top: 2px;
+}
+
+.force-apply { margin-top: 14px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .force-mode { transition: none; }
 }
 
 /* ---------- 步骤日志 ---------- */
