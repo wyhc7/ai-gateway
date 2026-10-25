@@ -3,6 +3,7 @@ import Dashboard from './views/Dashboard.vue'
 import Providers from './views/Providers.vue'
 import ApiKeys from './views/ApiKeys.vue'
 import TestChat from './views/TestChat.vue'
+import ImageGen from './views/ImageGen.vue'
 import Logs from './views/Logs.vue'
 import SystemUpdate from './views/SystemUpdate.vue'
 
@@ -14,6 +15,7 @@ const router = createRouter({
     { path: '/providers', component: Providers, meta: { title: '平台管理', desc: '配置平台、管理多 Key、自动拉取模型列表' } },
     { path: '/keys', component: ApiKeys, meta: { title: '访问密钥', desc: '给调用方发放 Key，并按模型粒度限制可用范围' } },
     { path: '/test', component: TestChat, meta: { title: '对话测试', desc: '选择平台与模型，实时验证转发与故障切换' } },
+    { path: '/image', component: ImageGen, meta: { title: '生图', desc: '输入提示词直接出图，自动记录历史与剩余额度' } },
     { path: '/logs', component: Logs, meta: { title: '运行日志', desc: '实时查看最近请求日志，快速定位故障' } },
     { path: '/update', component: SystemUpdate, meta: { title: '系统更新', desc: '比对上游仓库，查看更新内容并一键升级' } }
   ]

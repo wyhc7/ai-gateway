@@ -53,6 +53,12 @@
             </svg>
             <span class="nav-text">对话测试</span>
           </RouterLink>
+          <RouterLink to="/image" @click="onNav" title="生图">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="3" width="18" height="18" rx="2.5" /><circle cx="8.5" cy="8.5" r="1.8" /><path d="M21 15.5l-4.5-4.5L6 21" />
+            </svg>
+            <span class="nav-text">生图</span>
+          </RouterLink>
           <RouterLink to="/logs" @click="onNav" title="运行日志">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
