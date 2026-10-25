@@ -259,6 +259,7 @@ export function parseWorkbuddyAuthFile(raw) {
   if (!Array.isArray(obj) && Array.isArray(obj?.accounts) && obj.accounts.length === 1) {
     obj = obj.accounts[0]
   }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null
   const auth = obj.auth || obj
   const account = obj.account || obj
 
@@ -266,9 +267,12 @@ export function parseWorkbuddyAuthFile(raw) {
   const refresh_token = auth.refreshToken || auth.refresh_token || ''
   const uid = account.uid || account.UID || auth.uid || jwtSubject(access_token)
   const domain = auth.domain || account.domain || ''
-  // 过期时间：先认文件里的绝对字段，缺失时回落到 JWT 的 exp（同为权威值）
-  const expires_at = auth.expiresAt || auth.expires_at || jwtExpiresAtMs(access_token) || 0
-  const nickname = account.nickname || jwtNickname(access_token) || ''
+  // 过期时间：先认文件里的绝对字段（秒或毫秒都行，由 expiryToMs 归一），
+  // 缺失时回落到 JWT 的 exp（同为权威值）。
+  const expires_at = expiryToMs(auth.expiresAt ?? auth.expires_at) || jwtExpiresAtMs(access_token) || 0
+  // 昵称：文件里的 nickname 可能是打码串（"188****1530"），JWT 的
+  // preferred_username 才是完整值；两边都没有才留空。
+  const nickname = pickWorkbuddyNickname(account.nickname, access_token)
 
   // 少了 uid 或 token 就没法调上游，与其存一个半残的 Key，不如当场说清楚
   if (!access_token || !uid) return null
@@ -354,6 +358,34 @@ export function jwtExpiresAtMs(token) {
   return typeof p?.exp === 'number' && Number.isFinite(p.exp) ? p.exp * 1000 : undefined
 }
 
+/**
+ * 把「可能是秒、也可能是毫秒」的绝对过期时刻统一成毫秒；空值/非法返回 0。
+ *
+ * 存在的理由（实测，2026-10-25）：导出文件的 `expiresAt` 是**秒**
+ * （`1795260343`），而网关内部 `expires_at` 一律是毫秒（见 store / jwtExpiresAtMs）。
+ * 前端 `submitWbJsonImport` 曾经直接拿秒值去减 `Date.now()`，减出负数被
+ * `Math.max(0,…)` 抹成 0，落库后 `expires_at = 0` → `workbuddyTokenNeedsRefresh`
+ * 判 false → 该账号**永不主动续期**，表现成「导入成功但过一阵全红」。
+ *
+ * 判据取 1e12（2001-09-09 之后的毫秒都大于它，而秒值要到 33658 年才达到），
+ * 所以 `n > 1e12` 视为毫秒，其余视为秒。与 applyWorkbuddyTokenData 同一判据。
+ */
+export function expiryToMs(raw) {
+  if (raw === undefined || raw === null || raw === '') return 0
+  const s = String(raw).trim()
+  if (!s) return 0
+  // 纯数字（含小数）才是时间戳。负数直接判 0：否则 "-1" 会掉进下面的
+  // Date.parse 被当成「2001-01-01 前一毫秒」，凭空造出一个过期的既成事实。
+  if (/^-?\d+(\.\d+)?$/.test(s)) {
+    const n = Number(s)
+    if (!Number.isFinite(n) || n <= 0) return 0
+    return n > 1e12 ? Math.round(n) : Math.round(n * 1000)
+  }
+  // 非纯数字时按日期字符串解（上游部分端点给 ISO 时间戳）
+  const parsed = Date.parse(s)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
 /** 从 JWT 的 `iat`（秒）读签发毫秒时间戳，用于把相对秒数换成绝对时刻。 */
 export function jwtIssuedAtMs(token) {
   const p = jwtPayload(token)
@@ -372,6 +404,25 @@ export function jwtNickname(token) {
 export function jwtSubject(token) {
   const p = jwtPayload(token)
   return typeof p?.sub === 'string' ? p.sub : ''
+}
+
+/**
+ * 选一个能看的昵称。
+ *
+ * 导出文件里的 `nickname` 常是**打码串**（`"188****1530"` / `"193****5767"`），
+ * 而 JWT 的 `preferred_username` 是完整值（`"18859341530"`）。直接取前者会让
+ * 账号列表显示成一串星号，用户以为「没认出我的号」。所以：
+ *   1. 文件昵称不含 `*` 且非空 → 用它（用户可能自己改过名）；
+ *   2. 否则用 JWT 的完整值；
+ *   3. 都没有才退回文件里的打码串（总比空着好），最后才是空串。
+ * 服务端与前端各有一份等价实现（前端不能 import server 模块）。
+ */
+export function pickWorkbuddyNickname(fileNickname, accessToken) {
+  const fromFile = typeof fileNickname === 'string' ? fileNickname.trim() : ''
+  if (fromFile && !fromFile.includes('*')) return fromFile
+  const fromJwt = jwtNickname(accessToken)
+  if (fromJwt) return fromJwt
+  return fromFile
 }
 
 // ---------------------------------------------------------------------------

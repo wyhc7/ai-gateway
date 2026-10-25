@@ -1469,21 +1469,49 @@ function openImportCredentialDialog(p) {
 // 与扁平两种都收，用户手工改过文件也不至于认不出来。
 // 拆成对象版 + 文本版两层：批量导入要吃「一个或一串」登录态，对象版是共用的
 // 那一半，文本版只是包一层 JSON.parse。
+// 把「秒或毫秒」的绝对过期时刻统一成毫秒；缺失/非法返回 0。
+// 与服务端 workbuddy-core.js 的 expiryToMs 同源：导出文件的 expiresAt 是秒
+// （1795260343），网关内部 expires_at 一律毫秒。判据 1e12 见服务端注释。
+function wbExpiryToMs(raw) {
+  if (raw === undefined || raw === null || raw === '') return 0
+  const s = String(raw).trim()
+  if (!s) return 0
+  // 负数直接判 0：否则 "-1" 会掉进 Date.parse 被当成有效日期
+  if (/^-?\d+(\.\d+)?$/.test(s)) {
+    const n = Number(s)
+    if (!Number.isFinite(n) || n <= 0) return 0
+    return n > 1e12 ? Math.round(n) : Math.round(n * 1000)
+  }
+  const parsed = Date.parse(s)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+// 选一个能看的昵称：文件里的 nickname 常是打码串（"188****1530"），
+// JWT 的 preferred_username 才是完整值。与服务端 pickWorkbuddyNickname 同源。
+function wbPickNickname(fileNickname, accessToken) {
+  const fromFile = typeof fileNickname === 'string' ? fileNickname.trim() : ''
+  if (fromFile && !fromFile.includes('*')) return fromFile
+  const fromJwt = jwtClaim(accessToken, 'preferred_username') || jwtClaim(accessToken, 'nickname')
+  if (fromJwt) return fromJwt
+  return fromFile
+}
+
 function parseWorkbuddyAuthObject(obj) {
-  if (!obj || typeof obj !== 'object') return null
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null
   const auth = obj.auth || obj
   const account = obj.account || obj
   const access_token = auth.accessToken || auth.access_token || ''
   const uid = account.uid || account.UID || auth.uid || ''
   if (!access_token || !uid) return null
-  // 昵称：文件里常为空，真值在 access_token 的 JWT 声明里（与服务端一致）
-  const nickname = account.nickname || jwtClaim(access_token, 'nickname') || jwtClaim(access_token, 'preferred_username') || ''
+  // 昵称：文件里常为空或打码，真值在 access_token 的 JWT 声明里（与服务端一致）
+  const nickname = wbPickNickname(account.nickname, access_token)
   return {
     access_token,
     refresh_token: auth.refreshToken || auth.refresh_token || '',
     uid,
     domain: auth.domain || account.domain || '',
-    expires_at: auth.expiresAt || auth.expires_at || 0,
+    // 单位归一：导出文件给秒，内部一律毫秒，否则提交时减 Date.now() 会算出负数
+    expires_at: wbExpiryToMs(auth.expiresAt ?? auth.expires_at),
     name: nickname
   }
 }
@@ -1495,6 +1523,9 @@ function parseWorkbuddyAuthFile(raw) {
   } catch {
     return null
   }
+  // 批量导出外壳（{ format, accounts:[...] }）在单条口也认，取第一个账号：
+  // 用户手里只有这种文件，粘到「导入 Token」里报读不到 token 是最常见的困惑。
+  if (!Array.isArray(obj) && Array.isArray(obj?.accounts)) obj = obj.accounts[0]
   return parseWorkbuddyAuthObject(obj)
 }
 
@@ -1587,7 +1618,9 @@ function openWbJsonDialog() {
 function parseWbJsonText() {
   const { entries, error } = parseWorkbuddyAuthEntries(wbJsonText.value)
   wbJsonParseError.value = error
-  if (entries.length) wbJsonEntries.value.push(...entries)
+  // 替换而不是追加：textarea 里的文本就是「这一次要导入的东西」，
+  // push 会把上一次的结果留在预览区，用户看到旧条目以为新文本没解析成功。
+  wbJsonEntries.value = entries
 }
 
 // 多文件：逐个读、逐个解析，坏文件只报错不影响好文件。读完全部清掉 input 的
@@ -1595,6 +1628,8 @@ function parseWbJsonText() {
 async function onWbJsonFiles(e) {
   const files = [...(e.target.files || [])]
   const errors = []
+  // 新一轮选文件视为重来：先清空，避免上一次的预览条目混进来
+  wbJsonEntries.value = []
   for (const f of files) {
     try {
       const { entries, error } = parseWorkbuddyAuthEntries(await f.text())
@@ -1613,14 +1648,16 @@ async function submitWbJsonImport() {
   if (!wbJsonEntries.value.length) return
   wbJsonImporting.value = true
   try {
-    // 字段形状与 addKey 的 oauth 分支对齐（expires_in 是剩余秒数）
+    // 直接把绝对毫秒传给服务端（字段名沿用 expires_at，服务端 expiryToMs 会再归一
+    // 一次，秒/毫秒都收）。曾经这里折成相对秒数 expires_in，一旦单位错就变 0，
+    // 落库后账号永不续期。
     const entries = wbJsonEntries.value.map((e) => ({
       name: e.name || '',
       access_token: e.access_token,
       refresh_token: e.refresh_token || '',
       uid: e.uid,
       domain: e.domain || '',
-      expires_in: e.expires_at ? Math.max(0, Math.floor((e.expires_at - Date.now()) / 1000)) : 0
+      expires_at: e.expires_at || 0
     }))
     const r = await api.importWorkbuddyJson({ entries })
     wbJsonResults.value = r

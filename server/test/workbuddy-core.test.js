@@ -26,6 +26,8 @@ const {
   jwtIssuedAtMs,
   jwtNickname,
   jwtSubject,
+  expiryToMs,
+  pickWorkbuddyNickname,
   STATE_REQUEST_TIMEOUT_MS,
   LOGIN_TIMEOUT_MS,
   CODE_TOKEN_NOT_READY,
@@ -362,6 +364,49 @@ describe('凭据解析与 JWT 兜底', () => {
     assert.equal(out, null)
   })
 
+  // 导出文件里的 expiresAt 是**秒**（1795260343），网关内部 expires_at 一律毫秒。
+  // 直接原样取走会让下游减 Date.now() 得负数 → 0 → workbuddyTokenNeedsRefresh 判
+  // false → 账号永不主动续期。这条就是那个事故的钉子。
+  test('导出文件的 expiresAt 是秒时，解析结果必须是毫秒', () => {
+    const sec = 1795260343
+    const out = parseWorkbuddyAuthFile(JSON.stringify({
+      uid: 'u-sec', accessToken: 'at-sec', expiresAt: sec
+    }))
+    assert.equal(out.expires_at, sec * 1000)
+    assert.ok(out.expires_at > 1e12, '必须是毫秒量级')
+    assert.ok(out.expires_at > Date.now(), '换算后必须在未来')
+  })
+
+  test('expiresAt 已经是毫秒时不被二次放大', () => {
+    const ms = 1795260343000
+    const out = parseWorkbuddyAuthFile(JSON.stringify({ uid: 'u-ms', accessToken: 'at-ms', expiresAt: ms }))
+    assert.equal(out.expires_at, ms)
+  })
+
+  // 导出文件的 nickname 常是打码串（"188****1530"），JWT 的 preferred_username
+  // 才是完整值。直接取打码串会让账号列表显示成一串星号。
+  test('打码昵称让位给 JWT 里的完整用户名', () => {
+    const token = jwt({ preferred_username: '18859341530' })
+    const out = parseWorkbuddyAuthFile(JSON.stringify({
+      uid: 'u-mask', accessToken: token, nickname: '188****1530'
+    }))
+    assert.equal(out.nickname, '18859341530')
+  })
+
+  test('文件里的昵称不含星号时优先用它（用户可能改过名）', () => {
+    const token = jwt({ preferred_username: '18859341530' })
+    const out = parseWorkbuddyAuthFile(JSON.stringify({
+      uid: 'u-named', accessToken: token, nickname: '我的小号'
+    }))
+    assert.equal(out.nickname, '我的小号')
+  })
+
+  test('空对象 / 数组直接喂进来返回 null，不再静默读出空凭据', () => {
+    assert.equal(parseWorkbuddyAuthFile('{}'), null)
+    assert.equal(parseWorkbuddyAuthFile('[]'), null)
+    assert.equal(parseWorkbuddyAuthFile('null'), null)
+  })
+
   // 实测 /v2/plugin/auth/token 不返回绝对 expiresAt，只给 expiresIn。
   // 缺绝对字段时 JWT 的 exp 是权威兜底，否则 UI 永远显示「有效期未知」。
   test('缺 uid 时回落到 JWT 的 sub', () => {
@@ -428,6 +473,47 @@ describe('续期数据合并', () => {
   test('续期响应缺昵称时不覆盖已有值', () => {
     const out = applyWorkbuddyTokenData({ nickname: '原有昵称' }, { accessToken: jwt({}) })
     assert.equal(out.nickname, '原有昵称')
+  })
+})
+
+describe('过期时刻单位归一（expiryToMs）', () => {
+  // 导出文件的 expiresAt 是秒，网关内部一律毫秒。这一对是整套单位问题的地基。
+  test('秒值放大成毫秒', () => {
+    assert.equal(expiryToMs(1795260343), 1795260343000)
+    assert.equal(expiryToMs('1795260343'), 1795260343000)
+  })
+
+  test('毫秒值原样返回', () => {
+    assert.equal(expiryToMs(1795260343000), 1795260343000)
+    assert.equal(expiryToMs('1795260343000'), 1795260343000)
+  })
+
+  test('ISO 时间字符串也能解', () => {
+    assert.equal(expiryToMs('2026-11-21T11:25:43.000Z'), Date.parse('2026-11-21T11:25:43.000Z'))
+  })
+
+  test('空值 / 非法 / 非正数一律 0（调用方据此判「没有过期时刻」）', () => {
+    for (const v of [undefined, null, '', '   ', 'abc', 0, -1, NaN]) {
+      assert.equal(expiryToMs(v), 0, `输入 ${String(v)} 应得 0`)
+    }
+  })
+})
+
+describe('昵称选择（pickWorkbuddyNickname）', () => {
+  test('文件昵称是打码串时用 JWT 完整值', () => {
+    const token = jwt({ preferred_username: '18859341530' })
+    assert.equal(pickWorkbuddyNickname('188****1530', token), '18859341530')
+  })
+
+  test('文件昵称正常时优先用它', () => {
+    const token = jwt({ preferred_username: '18859341530' })
+    assert.equal(pickWorkbuddyNickname('我的小号', token), '我的小号')
+  })
+
+  test('JWT 也没有时退回打码串，最后才是空串', () => {
+    assert.equal(pickWorkbuddyNickname('188****1530', jwt({})), '188****1530')
+    assert.equal(pickWorkbuddyNickname('', jwt({})), '')
+    assert.equal(pickWorkbuddyNickname(undefined, ''), '')
   })
 })
 

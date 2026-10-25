@@ -180,6 +180,30 @@ test('WorkBuddy 登录态 JSON 批量导入', async () => {
     const expKey = (await keysOf(port, cnId)).find((k) => k.uid === 'uid-exp')
     assert.ok(expKey.expires_at > Date.now() + 3000000 && expKey.expires_at <= Date.now() + 3600000, 'expires_in 应按剩余秒数换算')
 
+    // 5b. 导出文件的绝对 expiresAt 是秒：导入后必须落成毫秒且在将来。
+    // 曾经前端把秒当毫秒减 Date.now()，算出负数被抹成 0，落库 expires_at = 0，
+    // 而 workbuddyTokenNeedsRefresh 对 0 直接返回 false —— 账号永不主动续期。
+    const expSec = Math.floor(Date.now() / 1000) + 7200
+    const r5b = await importJson(port, [{ access_token: 'at-sec', uid: 'uid-sec', domain: 'www.codebuddy.cn', expires_at: expSec }])
+    assert.equal((await r5b.json()).added, 1)
+    const secKey = (await keysOf(port, cnId)).find((k) => k.uid === 'uid-sec')
+    assert.equal(secKey.expires_at, expSec * 1000, '秒值必须换算成毫秒')
+    assert.ok(secKey.expires_at > Date.now(), '换算后必须在将来')
+
+    // 5c. 已经是毫秒的绝对值不被二次放大
+    const expMs = Date.now() + 7200 * 1000
+    const r5c = await importJson(port, [{ access_token: 'at-ms', uid: 'uid-ms', domain: 'www.codebuddy.cn', expires_at: expMs }])
+    assert.equal((await r5c.json()).added, 1)
+    const msKey = (await keysOf(port, cnId)).find((k) => k.uid === 'uid-ms')
+    assert.equal(msKey.expires_at, expMs)
+
+    // 5d. 绝对 expires_at 优先于会算错的 expires_in（前端曾经发 0）
+    const expSec2 = Math.floor(Date.now() / 1000) + 3600
+    const r5d = await importJson(port, [{ access_token: 'at-both', uid: 'uid-both', domain: 'www.codebuddy.cn', expires_at: expSec2, expires_in: 0 }])
+    assert.equal((await r5d.json()).added, 1)
+    const bothKey = (await keysOf(port, cnId)).find((k) => k.uid === 'uid-both')
+    assert.equal(bothKey.expires_at, expSec2 * 1000, 'expires_in=0 不能把绝对值冲掉')
+
     // 6. 空 entries 直接 400
     const r6 = await importJson(port, [])
     assert.equal(r6.status, 400)

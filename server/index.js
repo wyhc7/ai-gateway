@@ -30,7 +30,7 @@ import { TEMPLATES } from './templates.js'
 import { SUBSCRIPTION_PLANS, findPlan } from './subscription-plans.js'
 import { filterModelsForProvider, isImageModel } from './providers-image-only.js'
 import { startWorkbuddyLogin, pollWorkbuddyLogin, cancelWorkbuddyLogin, refreshWorkbuddyToken, ensureWorkbuddyToken } from './workbuddy-oauth.js'
-import { workbuddyRealmFor } from './workbuddy-core.js'
+import { workbuddyRealmFor, expiryToMs, jwtExpiresAtMs } from './workbuddy-core.js'
 import { fetchWorkbuddyCheckinStatus, performWorkbuddyCheckin, beijingDayKey, fetchWorkbuddyCredits } from './workbuddy-checkin.js'
 import { addLog, getLogs, initLogger } from './logger.js'
 import { checkUpdate, applyUpdate } from './update.js'
@@ -619,8 +619,14 @@ app.post('/api/providers/import-workbuddy-json', api(async (req, res) => {
       })
       continue
     }
+    // 过期时刻的优先级：绝对 expires_at（秒/毫秒自适配）> 相对 expires_in > JWT exp。
+    // 之所以不信 expires_in：它是「前端算出来的剩余秒数」，前端一旦把文件里的秒值
+    // 当毫秒减 Date.now()，就会算出负数并被抹成 0，落库 expires_at = 0 → 该账号
+    // 永不主动续期（workbuddyTokenNeedsRefresh 对 0 直接返回 false）。
+    const absolute = expiryToMs(entry?.expires_at ?? entry?.expiresAt)
     const expiresIn = Number(entry?.expires_in)
-    const expires_at = Number.isFinite(expiresIn) && expiresIn > 0 ? Date.now() + expiresIn * 1000 : 0
+    const relative = Number.isFinite(expiresIn) && expiresIn > 0 ? Date.now() + expiresIn * 1000 : 0
+    const expires_at = absolute || relative || jwtExpiresAtMs(access_token) || 0
     const refresh_token = String(entry?.refresh_token || '').trim()
 
     const existing = (target.keys || []).find(

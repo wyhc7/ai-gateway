@@ -49,3 +49,8 @@ out/
 
 # 例外：扫描器本身的名字里带 secret，但它必须进仓库才有意义
 !scripts/check-secrets.mjs
+
+# WorkBuddy / CodeBuddy 登录态导出文件 —— 里面是活的 accessToken / refreshToken，
+# 提交上去等于把账号送人。导入用的样本文件一律不进仓库。
+workbuddy-*.json
+workbuddy-accounts-*.json
