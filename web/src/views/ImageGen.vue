@@ -112,7 +112,7 @@
 
     <!-- 大图预览 -->
     <el-dialog v-model="previewVisible" width="82%" :show-close="true" append-to-body class="gen-dialog">
-      <img v-if="previewItem" :src="previewItem.url" style="width: 100%; display: block; border-radius: 8px" />
+      <img v-if="previewItem" :src="previewItem.url" :alt="previewItem.prompt || '生成结果预览'" style="width: 100%; display: block; border-radius: 8px" />
       <div v-if="previewItem" class="preview-prompt mono">{{ previewItem.prompt }}</div>
     </el-dialog>
   </div>
@@ -524,5 +524,23 @@ function clearHistory() {
   25% { content: '.'; }
   50% { content: '..'; }
   75% { content: '...'; }
+}
+
+/* 手机端：390px 下那一行「生图 · 模型 · 剩余 · 池内账号」会挤成一坨，
+   按钮也会被挤到左下角。拆成三行，按钮仍靠右。 */
+@media (max-width: 767px) {
+  .gen-head { align-items: flex-start; gap: 4px; }
+  .gen-head > .muted {
+    flex: 1 1 100%;
+    font-size: 11.5px;
+    line-height: 1.6;
+    margin-bottom: 6px;
+  }
+  .gen-controls { gap: 12px; }
+  .ctrl-grow { display: none; }
+  .gen-controls > .el-button:first-of-type { margin-left: auto; }
+  .gen-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .gen-empty { padding: 40px 12px; }
+  .hist-list { grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); }
 }
 </style>

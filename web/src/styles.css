@@ -787,10 +787,8 @@ body::before {
   text-overflow: ellipsis;
 }
 
-/* 窄屏（平板竖屏以下）把积分块藏掉 —— 卡头一行挤不下三个数字区 */
-@media (max-width: 720px) {
-  .provider-credits { display: none; }
-}
+/* 窄屏不藏积分块 —— 见文件末尾「响应式：手机端」里把它改成卡头下方的一整条。
+   手机上这个数字恰恰是最该看的，藏起来等于把这块的存在意义抹掉。 */
 
 .provider-stats { display: flex; gap: 0; flex-shrink: 0; }
 .provider-stats .stat {
@@ -1189,11 +1187,75 @@ body::before {
   .el-drawer { --el-drawer-width: 86% !important; }
 
   .provider-head { flex-wrap: wrap; padding: 13px 14px; gap: 11px; }
-  .provider-avatar { width: 36px; height: 36px; font-size: 15px; }
+  .provider-avatar { width: 36px; height: 36px; font-size: 15px; order: 1; }
+  .provider-info { order: 2; flex: 1 1 120px; }
   .provider-info .name { flex-wrap: wrap; gap: 6px; font-size: 14px; }
   .provider-info .url { word-break: break-all; white-space: normal; line-height: 1.5; }
-  .provider-stats { margin-left: auto; }
+  .chev { order: 4; }
+  .provider-stats { order: 3; margin-left: auto; }
+  .provider-stats .stat { padding: 0 10px; }
   .provider-stats .stat .num { font-size: 14px; }
+
+  /* 积分块：从「卡头右侧一列」变成「卡头下方一整条」。
+     换行不换内容 —— 手机上这一条是他最想看的数，不能消失。 */
+  .provider-credits {
+    order: 5;
+    flex: 1 1 100%;
+    width: auto;
+    margin-left: 0;
+    padding: 9px 0 0;
+    border-top: 1px dashed var(--rule-soft);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .provider-credits .pc-line { flex: 0 0 auto; justify-content: flex-start; gap: 5px; }
+  .provider-credits .pc-num { font-size: 15px; }
+  .provider-credits .pc-bar { flex: 1 1 auto; min-width: 40px; margin-top: 0; height: 4px; }
+  .provider-credits .pc-foot { flex: 0 0 auto; margin-top: 0; }
+
+  /* 窄屏表格：横向滚动在手机上等于「看不到的交互」，改成一行一张卡片。
+     每格左边的小标签来自模板里的 data-label。 */
+  .data-table.mobile-cards { display: block; width: 100%; min-width: 0; }
+  .data-table.mobile-cards thead { display: none; }
+  .data-table.mobile-cards tbody { display: block; }
+  .data-table.mobile-cards tbody tr {
+    display: block;
+    padding: 11px 12px;
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  .data-table.mobile-cards tbody tr:last-child { border-bottom: none; }
+  .data-table.mobile-cards tbody tr:hover td { background: transparent; }
+  .data-table.mobile-cards tbody td {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 3px 0;
+    border: none;
+    text-align: left;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .data-table.mobile-cards tbody td::before {
+    content: attr(data-label);
+    flex: 0 0 58px;
+    padding-top: 2px;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-4);
+    white-space: nowrap;
+  }
+  .data-table.mobile-cards tbody td[data-label='']::before { content: none; }
+  .data-table.mobile-cards tbody td.table-empty { display: block; padding: 34px 0; text-align: center; }
+  .data-table.mobile-cards tbody .key-detail-row td { display: block; padding-top: 8px; }
+  .data-table.mobile-cards tbody .key-detail-row td::before { content: none; }
+  .data-table.mobile-cards .ellipsis { white-space: normal; word-break: break-all; }
+
+  /* 页头：描述折行时别被日/夜切换器挤成一条缝 */
+  .page-head { align-items: flex-start; }
+  .page-head .seg { flex-shrink: 0; margin-top: 2px; }
 
   .key-item { flex-wrap: wrap; gap: 8px; padding: 9px 11px; }
   .key-item .mask { flex-basis: 100%; order: 3; }
@@ -1207,6 +1269,9 @@ body::before {
 }
 
 @media (max-width: 480px) {
-  .provider-stats { display: none; }
+  /* 不藏 Key/模型 计数，只是压小 —— 藏掉会让卡头两行的信息量偏斜 */
+  .provider-stats .stat { padding: 0 7px; }
+  .provider-stats .stat .num { font-size: 13px; }
+  .provider-stats .stat .label { font-size: 8px; letter-spacing: 0.08em; }
   .el-dialog__footer { display: flex; justify-content: flex-end; gap: 8px; }
 }

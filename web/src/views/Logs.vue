@@ -66,7 +66,7 @@
     <!-- 日志表 -->
     <div style="margin-top: 16px">
       <div class="table-scroll">
-        <table class="data-table">
+        <table class="data-table mobile-cards">
           <thead>
             <tr>
               <th style="width: 152px">时间</th>
@@ -81,10 +81,10 @@
           </thead>
           <tbody>
             <tr v-for="(row, i) in pagedLogs" :key="row.id || i">
-              <td class="mono time-cell">{{ row.time }}</td>
-              <td><span :class="['badge', typeBadge(row.type)]">{{ typeLabel(row.type) }}</span></td>
-              <td><span :class="['badge', statusBadge(row.status)]">{{ statusText(row) }}</span></td>
-              <td>
+              <td class="mono time-cell" data-label="时间">{{ row.time }}</td>
+              <td data-label="类型"><span :class="['badge', typeBadge(row.type)]">{{ typeLabel(row.type) }}</span></td>
+              <td data-label="状态"><span :class="['badge', statusBadge(row.status)]">{{ statusText(row) }}</span></td>
+              <td data-label="模型">
                 <template v-if="row.type === 'chat'">
                   <div class="mono ellipsis" :title="row.model">{{ row.model || '—' }}</div>
                   <div v-if="row.stream" class="sub-line">流式</div>
@@ -96,10 +96,10 @@
                   <div class="mono ellipsis">系统事件</div>
                 </template>
               </td>
-              <td><span class="ellipsis" :title="row.provider_name">{{ row.provider_name || '—' }}</span></td>
-              <td><span class="mono muted-cell ellipsis" :title="row.key">{{ row.key || '—' }}</span></td>
-              <td class="right"><span :class="durationClass(row.duration_ms)">{{ fmtDuration(row.duration_ms) }}</span></td>
-              <td>
+              <td data-label="平台"><span class="ellipsis" :title="row.provider_name">{{ row.provider_name || '—' }}</span></td>
+              <td data-label="Key"><span class="mono muted-cell ellipsis" :title="row.key">{{ row.key || '—' }}</span></td>
+              <td class="right" data-label="耗时"><span :class="durationClass(row.duration_ms)">{{ fmtDuration(row.duration_ms) }}</span></td>
+              <td data-label="详情">
                 <div v-if="row.error" class="err-text ellipsis" :title="row.error">{{ row.error }}</div>
                 <div v-else-if="row.detail" class="muted-cell ellipsis" :title="row.detail">{{ row.detail }}</div>
                 <div v-else-if="row.ok === false" class="err-text ellipsis">请求失败</div>
@@ -107,7 +107,7 @@
               </td>
             </tr>
             <tr v-if="logs.length === 0">
-              <td colspan="8" class="table-empty">暂无日志</td>
+              <td colspan="8" class="table-empty" data-label="">暂无日志</td>
             </tr>
           </tbody>
         </table>

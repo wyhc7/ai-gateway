@@ -101,7 +101,7 @@
     <div style="margin-top: 18px">
       <div class="section-title">平台运行状态</div>
       <div class="table-scroll">
-        <table class="data-table">
+        <table class="data-table mobile-cards">
           <thead>
             <tr>
               <th>平台</th>
@@ -118,21 +118,21 @@
           <tbody>
             <template v-for="row in providers" :key="row.id">
               <tr>
-              <td class="cell-strong">{{ row.name }}</td>
-              <td><span class="badge badge-blue">{{ protocolLabel(row.protocol) }}</span></td>
-              <td>
+              <td class="cell-strong" data-label="平台">{{ row.name }}</td>
+              <td data-label="协议"><span class="badge badge-blue">{{ protocolLabel(row.protocol) }}</span></td>
+              <td data-label="状态">
                 <span :class="['badge', row.enabled ? 'badge-green' : 'badge-gray']">
                   <span class="badge-dot" :class="row.enabled ? 'green' : 'gray'"></span>{{ row.enabled ? '启用' : '停用' }}
                 </span>
               </td>
-              <td class="right num">{{ row.keyCount ?? (row.keys || []).length }}</td>
-              <td class="right num">{{ row.modelCount ?? (row.models || []).length }}</td>
-              <td class="right">
+              <td class="right num" data-label="Key">{{ row.keyCount ?? (row.keys || []).length }}</td>
+              <td class="right num" data-label="模型">{{ row.modelCount ?? (row.models || []).length }}</td>
+              <td class="right" data-label="请求">
                 <span class="num cell-strong">{{ fmtNum(row.stats?.requests ?? 0) }}</span>
                 <span :class="rateClass(row)">{{ rateOf(row) }}</span>
               </td>
-              <td class="right num muted-cell">{{ fmtNum(row.stats?.tokens ?? 0) }}</td>
-              <td>
+              <td class="right num muted-cell" data-label="Token">{{ fmtNum(row.stats?.tokens ?? 0) }}</td>
+              <td data-label="Key 健康">
                 <button
                   v-if="(keyStatsMap[row.id]?.total ?? 0) > 0"
                   class="key-summary"
@@ -149,7 +149,7 @@
                 </button>
                 <span v-else class="muted-cell">—</span>
               </td>
-              <td class="muted-cell">{{ row.models_updated_at ? formatTime(row.models_updated_at) : '未拉取' }}</td>
+              <td class="muted-cell" data-label="模型更新">{{ row.models_updated_at ? formatTime(row.models_updated_at) : '未拉取' }}</td>
             </tr>
             <tr v-if="expandedKeys === row.id" class="key-detail-row">
               <td colspan="9">
@@ -170,7 +170,7 @@
             </tr>
             </template>
             <tr v-if="providers.length === 0">
-              <td colspan="9" class="table-empty">暂无平台，前往「平台管理」添加。</td>
+              <td colspan="9" class="table-empty" data-label="">暂无平台，前往「平台管理」添加。</td>
             </tr>
           </tbody>
         </table>

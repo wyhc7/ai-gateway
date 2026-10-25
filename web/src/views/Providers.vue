@@ -678,7 +678,7 @@
       </div>
       <div class="wb-json-toolbar">
         <el-button size="small" plain @click="wbJsonFileInput?.click()">选择 .json 文件</el-button>
-        <input ref="wbJsonFileInput" type="file" accept=".json,.txt" multiple style="display: none" @change="onWbJsonFiles" />
+        <input ref="wbJsonFileInput" type="file" accept=".json,.txt" multiple aria-label="选择 WorkBuddy 账号 JSON 文件" style="display: none" @change="onWbJsonFiles" />
         <span v-if="wbJsonFiles.length" class="wb-json-files">{{ wbJsonFiles.join('、') }}</span>
       </div>
       <el-input
