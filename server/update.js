@@ -201,6 +201,13 @@ export function planSteps(paths) {
  * 会停下来等输入用户名密码，把一次「检查更新」挂成永久 pending。
  * safe.directory 是为了绕过「仓库属主与进程用户不一致」时 git 的拒绝执行——
  * 部署脚本 chown 给 ai-gateway，而手工排障时可能以 root 跑。
+ *
+ * 返回值**保证是字符串**。理由：调用方一律 `(await git([...])).trim()`，只要
+ * 这里返回过 undefined / Buffer / null，就会炸成一句
+ * `git(...).trim is not a function` —— 报错指向调用点的行号，而根因在返回值，
+ * 排查时会往完全错误的方向找。宁可在这里归一。
+ *
+ * 编码也必须显式给 utf8：不给 encoding 时 execFile 回 Buffer，Buffer 没有 trim。
  */
 async function git(args, { timeout = GIT_TIMEOUT_MS } = {}) {
   const dir = repoDir()
@@ -208,9 +215,13 @@ async function git(args, { timeout = GIT_TIMEOUT_MS } = {}) {
     timeout,
     maxBuffer: 8 * 1024 * 1024,
     windowsHide: true,
+    encoding: 'utf8',
     env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' }
   })
-  return stdout
+  if (typeof stdout === 'string') return stdout
+  // 子进程无输出、或被 Buffer 化时统一成空串，让调用方的 .trim() 永远安全
+  if (stdout === undefined || stdout === null) return ''
+  return Buffer.isBuffer(stdout) ? stdout.toString('utf8') : String(stdout)
 }
 
 /**
@@ -751,20 +762,27 @@ export async function applyUpdate({ force = null } = {}) {
   }
 
   if (!local.isRepo) {
-    return fail('读取本地版本', '当前部署目录不是 git 仓库，无法自动更新。请用 deploy/linux/complete-deploy.sh --update。')
+    return fail('读取本地版本', `当前部署目录不是 git 仓库，无法自动更新。请用 deploy/linux/complete-deploy.sh --update。${local.message ? `（${local.message}）` : ''}`)
   }
   // 工作区脏：常规更新拒绝；强制更新按档位丢弃已跟踪改动。
   // 这里必须真的 checkout 掉，否则后面的 ff/reset 会因为「本地改动会被覆盖」失败。
-  if (local.dirty.length && !effects.discardTracked) {
-    return fail('检查工作区', `工作区有未提交的改动（${local.dirty.slice(0, 5).join('、')}），已中止以免覆盖。请先提交或还原后再更新，或改用强制更新。`)
+  // dirty 用 Array.isArray 兜底：isRepo 分支本该给数组，但 readLocal 的各个提前
+  // return 分支字段并不齐全，直接 .length 会在 undefined 上炸。
+  const dirtyPaths = Array.isArray(local.dirty) ? local.dirty : []
+  if (dirtyPaths.length && !effects.discardTracked) {
+    return fail('检查工作区', `工作区有未提交的改动（${dirtyPaths.slice(0, 5).join('、')}），已中止以免覆盖。请先提交或还原后再更新，或改用强制更新。`)
   }
   if (!local.remote) {
     return fail('检查远程', '仓库没有配置 origin 远程，无法拉取更新。')
   }
-
-  const branch = updateBranch()
-  const before = local.revision
+  // revision 必须是字符串：下面所有 git 命令与 shortSha 都拿它当身份用，
+  // undefined 会一路漂到 (await git(...)).trim() 或者 update-ref 才炸。
+  const before = typeof local.revision === 'string' ? local.revision : ''
+  if (!before) {
+    return fail('读取本地版本', '读不到当前 HEAD 的提交 id，仓库可能处于空分支状态，无法比对上游。')
+  }
   const deployedRevision = readDeployed()?.revision || null
+  const branch = updateBranch()
 
   // 属主体检必须排在 git 之前。
   //
@@ -801,7 +819,10 @@ export async function applyUpdate({ force = null } = {}) {
   // 强制「对齐上游」：本地领先（有未推提交）或历史分叉时，behind 可能是 0 而
   // 本地其实偏离了上游。normal/hard 档的语义就是「以上游为准」，这种偏离必须
   // 被识别出来，否则会返回「已是最新」而把强制更新吞掉——那比不做更让人困惑。
-  const diverged = (await git(['rev-list', '--count', `FETCH_HEAD..HEAD`]).trim()) !== '0'
+  // ⚠️ 括号位置有讲究：`.trim()` 必须作用在 await 的结果上。
+  // 写成 `(await git(...).trim())` 会先取 Promise 的 trim —— 那是 undefined，
+  // 运行时直接 TypeError: git(...).trim is not a function。
+  const diverged = Number((await git(['rev-list', '--count', `FETCH_HEAD..HEAD`])).trim()) > 0
 
   // 强制重部署：git 干净、也没落后，但人明确要求强制——说明想要的是
   // 「把工作区硬对齐到上游，然后依赖/构建全部重跑一遍」。

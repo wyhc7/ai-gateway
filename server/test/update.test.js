@@ -121,6 +121,41 @@ describe('shortSha：界面上一律用 7 位短 sha 指代版本', () => {
   })
 })
 
+// 事故：`(await git([...]).trim())` —— .trim() 作用在 Promise 上而不是结果上，
+// 运行时抛 TypeError: git(...).trim is not a function。报错行号指向调用点，
+// 根因却在「await 的括号位置」，排查时极易往错方向找。这里把两种写法都钉住。
+describe('await git() 的括号位置：.trim() 必须作用在结果上', () => {
+  test('错法会抛 TypeError，且错误信息与事故现场一致', () => {
+    const fakeGit = (x) => Promise.resolve(x)
+    assert.throws(
+      () => fakeGit('2').trim(),
+      (e) => e instanceof TypeError && /trim is not a function/.test(e.message)
+    )
+  })
+
+  test('对法在 async 里拿到字符串结果', async () => {
+    const fakeGit = (x) => Promise.resolve(x)
+    const n = Number((await fakeGit('2')).trim())
+    assert.equal(n, 2)
+    assert.ok(n > 0)
+  })
+
+  // git() 内部必须显式给 encoding: 'utf8' 并把非字符串归一。
+  // 否则子进程无输出时 stdout 是 undefined / Buffer，调用方的 trim 立刻炸。
+  test('所有 rev-list 调用点的括号都正确', () => {
+    const src = readFileSync(new URL('../update.js', import.meta.url), 'utf8')
+    // 错法：await 被 trim 包在外面 —— (await git(...).trim())
+    const badPattern = /\(await git\([^)]*\)\.trim\(\)\)/g
+    const hits = [...src.matchAll(badPattern)].map((m) => m[0])
+    // 注释里会提到这个错法写法，所以只允许出现在注释行
+    for (const hit of hits) {
+      const lineStart = src.lastIndexOf('\n', src.indexOf(hit)) + 1
+      const line = src.slice(lineStart, src.indexOf('\n', src.indexOf(hit)))
+      assert.ok(/\/\//.test(line), `非注释行里出现了 Promise.trim 错法：${line.trim()}`)
+    }
+  })
+})
+
 describe('dirtyTrackedPaths：只认已跟踪文件的改动', () => {
   test('未跟踪的运行时产物不算脏（部署目录天然有 data/、web/dist.bak.*）', () => {
     const porcelain = [
