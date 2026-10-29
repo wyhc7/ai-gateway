@@ -1000,6 +1000,11 @@ async function forwardWithFailover(provider, kind, body, res) {
   // 11128 的内容级兜底只做一次：中性化 system 之后若仍是 11128，那就是真的
   // 账号闸门或别的原因，再改内容也没意义，直接走原有失败路径。
   let contentNeutralRetried = false
+  // 11128 风控窗口的原地重试计数（按 Key）。窗口是秒级的，等一下就过，
+  // 所以换 Key / 冷却都不对——只在同一个 Key 上等一小会儿再试。
+  const reject11128Retries = new Map()
+  const REJECT_11128_RETRY_MAX = 3
+  const REJECT_11128_RETRY_DELAY_MS = 900
 
   /**
    * 11128 的内容级兜底：把 system 换成中性文本，重新序列化请求体。
@@ -1152,6 +1157,10 @@ async function forwardWithFailover(provider, kind, body, res) {
       const sawAccountReject = attempts.some((a) => a.includes('账号级拒绝'))
       const rejectTried = attempts.filter((a) => a.includes('账号级拒绝')).length
       const rejectBudgetLeft = rejectTried < ACCOUNT_REJECT_RETRY_MAX
+      // 同一个 Key 正在做 11128 原地重试：这条路径不往 attempts 里写「账号级拒绝」
+      // （否则会白白吃掉换 Key 的预算），所以必须单独放行，否则第二轮进不了下面
+      // 读 body 的分支 → accountReject 判不出来 → 直接把 400 透传给客户端。
+      const retrying11128 = rejectCode === 11128 && (reject11128Retries.get(key.id) || 0) > 0
 
       // —— 11128 的第二种成因：内容级指纹 ——
       //
@@ -1179,7 +1188,7 @@ async function forwardWithFailover(provider, kind, body, res) {
         continue
       }
 
-      if (resp.status === 400 && (attempts.length < 1 || (sawAccountReject && rejectBudgetLeft))) {
+      if (resp.status === 400 && (attempts.length < 1 || retrying11128 || (sawAccountReject && rejectBudgetLeft))) {
         const firstRead = !sawAccountReject
         let errText = ''
         if (firstRead) {
@@ -1211,11 +1220,37 @@ async function forwardWithFailover(provider, kind, body, res) {
             const sysText = collectWorkbuddySystemText(body)
             if (sysText) console.warn(`[11128 指纹留证] system 前 200 字：${sysText.slice(0, 200)}`)
           }
-          // 11128 的线上主因是出口 IP / 通道级风控（实测同一批 Key 里 9/10 正常，
-          // 风控窗口约 4 分钟，窗口内用原始 persona 也全是 300 例外）。给被拦的 Key
-          // 一个 30 秒短冷却：既不让客户端在同一请求里把整个池子反复撞一遍，
-          // 也不至于把平台冻死——风控一过就是下一个窗口。
-          if (rejectCode === 11128) applyCooldown(provider, key, 400)
+
+          // —— 11128 的真实成因：出口 IP 的秒级风控窗口 ——
+          //
+          // 2026-10-29 线上证据（同一台机器、同一批 Key）：
+          //   05:17:22~05:17:59  15 个请求全 200
+          //   05:19:02~05:19:11   连续 4 次全 400 / 11128
+          //   05:20 之后          各种规模的请求（含 350 KB、154 消息、77 工具）全 200
+          //
+          // 把「消息数 2~154 / tools 0~77 / 体积 318B~350KB / 敏感内容 27KB /
+          // 多模态 / role:tool / 并发 8 路」逐维复刻，全部 200 —— 说明拦的不是
+          // 请求形态，而是一个按 IP 计的、几秒到几十秒的风控窗口。
+          //
+          // 所以窗口内换 Key 毫无意义（拦的是 IP，不是账号），冷却更是反效果
+          // （窗口几秒就过，冷却 30 秒等于自己把平台多冻了一会儿）。
+          // 正确做法：原地等一小会儿再试同一个 Key，窗口一过就通。
+          const tried = reject11128Retries.get(key.id) || 0
+          if (rejectCode === 11128 && tried < REJECT_11128_RETRY_MAX) {
+            reject11128Retries.set(key.id, tried + 1)
+            key.last_error = `HTTP 400 code=11128（风控窗口，第 ${tried + 1} 次原地重试）`.slice(0, 200)
+            key.last_error_at = Date.now()
+            addLog({
+              type: 'system', method: 'POST', path: '/upstream',
+              status: 400,
+              detail: `11128 风控窗口：${key.name || key.id.slice(0, 8)} 等待 ${REJECT_11128_RETRY_DELAY_MS}ms 后原地重试（${tried + 1}/${REJECT_11128_RETRY_MAX}）`
+            })
+            await new Promise((r) => setTimeout(r, REJECT_11128_RETRY_DELAY_MS))
+            attempts.push(`${key.name || key.id.slice(0, 8)}: 11128 风控窗口，原地重试`)
+            i -= 1
+            continue
+          }
+
           // 真实原因落到这个 Key 上（不冷却：400 不是凭据失效，下一轮还会轮到它，
           // 持续命中时界面上能看到，而不是每次都被覆盖成干巴巴的「HTTP 400」）
           key.last_error = `HTTP 400 code=${rejectCode} ${rejectMsg}`.slice(0, 200)
