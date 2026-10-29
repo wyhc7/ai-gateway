@@ -17,7 +17,9 @@ const {
   workbuddyRealmFor,
   shapeWorkbuddyBody,
   normalizeWorkbuddyTools,
-  ensureWorkbuddySystemFirst
+  ensureWorkbuddySystemFirst,
+  neutralizeWorkbuddySystem,
+  collectWorkbuddySystemText
 } = await import('../workbuddy-lane.js')
 const { defaultModelsFor } = await import('../proxy.js')
 
@@ -354,5 +356,82 @@ describe('模型清单', () => {
   test('取不到模型时不得回落到写死清单', () => {
     // 上游全挂 → defaultModelsFor 返回空 → refreshModels 标注 unavailable 并清空
     assert.equal(defaultModelsFor('workbuddy-oauth'), null)
+  })
+})
+
+// 11128 的两种成因里，只有「账号级灰度闸门」能靠换 Key 解决。
+// 另一种是 system 里的模板句（精确字面量），换多少号都拦——那种情况必须改内容。
+// 下面钉的是兜底函数本身的行为，别让它误伤 user/tool，也别漏掉非首位的 system。
+describe('11128 内容级兜底：中性化 system', () => {
+  test('改掉 system，保留 user 原话与工具输出', () => {
+    const body = {
+      messages: [
+        { role: 'system', content: 'Main branch (you will usually use this for PRs)' },
+        { role: 'user', content: '帮我改这个函数' },
+        { role: 'tool', content: 'Main branch (you will usually use this for PRs)' }
+      ]
+    }
+    assert.equal(neutralizeWorkbuddySystem(body), true)
+    assert.equal(body.messages[0].content, 'You are a helpful assistant.')
+    assert.equal(body.messages[1].content, '帮我改这个函数', 'user 原话一个字都不能动')
+    assert.equal(
+      body.messages[2].content,
+      'Main branch (you will usually use this for PRs)',
+      'tool 输出不能动：改它只会破坏工具结果且换不来放行'
+    )
+  })
+
+  test('非首位的 system 也要改（11128 对它同样生效）', () => {
+    const body = {
+      messages: [
+        { role: 'system', content: '正常系统提示' },
+        { role: 'user', content: 'hi' },
+        { role: 'system', content: '另一段系统提示' }
+      ]
+    }
+    assert.equal(neutralizeWorkbuddySystem(body), true)
+    assert.equal(body.messages[0].content, 'You are a helpful assistant.')
+    assert.equal(body.messages[2].content, 'You are a helpful assistant.')
+  })
+
+  test('已经是中性文本就不用再改：返回 false，避免无意义的重试预算消耗', () => {
+    const body = { messages: [{ role: 'system', content: 'You are a helpful assistant.' }] }
+    assert.equal(neutralizeWorkbuddySystem(body), false)
+  })
+
+  test('没有 system 时返回 false —— 那说明 11128 不是内容级，不该走这条兜底', () => {
+    const body = { messages: [{ role: 'user', content: 'hi' }] }
+    assert.equal(neutralizeWorkbuddySystem(body), false)
+  })
+
+  test('结构异常不崩（messages 缺失 / 元素是 null / content 不是字符串）', () => {
+    assert.equal(neutralizeWorkbuddySystem({}), false)
+    assert.equal(neutralizeWorkbuddySystem({ messages: null }), false)
+    assert.equal(neutralizeWorkbuddySystem({ messages: [null, 42, { role: 'system' }] }), true)
+  })
+})
+
+describe('11128 诊断日志：system 原文收集', () => {
+  test('拼出全部 system 正文，用来收集新的指纹句', () => {
+    const body = {
+      messages: [
+        { role: 'system', content: 'AAA' },
+        { role: 'user', content: 'BBB' },
+        { role: 'system', content: 'CCC' }
+      ]
+    }
+    const text = collectWorkbuddySystemText(body)
+    assert.ok(text.includes('AAA'))
+    assert.ok(text.includes('CCC'))
+    assert.ok(!text.includes('BBB'), 'user 内容不进诊断日志')
+  })
+
+  test('content 是数组形态时退化成 JSON，不抛错', () => {
+    const body = { messages: [{ role: 'system', content: [{ type: 'text', text: 'DDD' }] }] }
+    assert.ok(collectWorkbuddySystemText(body).includes('DDD'))
+  })
+
+  test('没有 system 时返回空串', () => {
+    assert.equal(collectWorkbuddySystemText({ messages: [{ role: 'user', content: 'x' }] }), '')
   })
 })

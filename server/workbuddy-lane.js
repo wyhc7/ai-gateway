@@ -263,3 +263,41 @@ export function shapeWorkbuddyBody(body = {}, modelMeta = null, realm = null) {
   if (realm === 'cn') breakWorkbuddySystemShingles(obj)
   return obj
 }
+
+// 兜底用的中性 system：实测稳定放行（见 test/workbuddy-fingerprint.test.js 的用例）。
+const NEUTRAL_SYSTEM = 'You are a helpful assistant.'
+
+/**
+ * 把全部 system 消息的内容换成中性文本，返回是否改动过。
+ *
+ * **只用于「换遍 Key 仍然 11128」之后的最后一次重试**，不进常规整形：
+ * 它会把用户的 system 指令整段丢掉，模型行为会变。但到那一步本来就只有
+ * 两个结果——要么透传 400 让客户端彻底失败，要么丢掉 system 但把话说出来。
+ * 后者对用户有用得多，代价写进日志，让人看得见发生了什么。
+ *
+ * 为什么扫全部 system 而不只 messages[0]：11128 对非首位的 system 同样生效
+ * （与 workbuddy-fingerprint.js 里那条「改写所有 system 消息」的实测约束一致）。
+ */
+export function neutralizeWorkbuddySystem(body = {}) {
+  const msgs = body?.messages
+  if (!Array.isArray(msgs)) return false
+  let changed = false
+  for (const m of msgs) {
+    if (!m || typeof m !== 'object') continue
+    if (String(m.role || '').toLowerCase() !== 'system') continue
+    if (m.content === NEUTRAL_SYSTEM) continue
+    m.content = NEUTRAL_SYSTEM
+    changed = true
+  }
+  return changed
+}
+
+/** 抽出全部 system 正文拼成一行，供诊断日志用（截断由调用方做）。 */
+export function collectWorkbuddySystemText(body = {}) {
+  const msgs = body?.messages
+  if (!Array.isArray(msgs)) return ''
+  return msgs
+    .filter((m) => m && typeof m === 'object' && String(m.role || '').toLowerCase() === 'system')
+    .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? '')))
+    .join(' ⏎ ')
+}

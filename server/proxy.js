@@ -6,7 +6,7 @@ import { ensureAccessToken as ensureCodexToken, refreshAccessToken as refreshCod
 import { ensureWorkbuddyToken, refreshWorkbuddyToken } from './workbuddy-oauth.js'
 import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexAccountHeader } from './codex-responses.js'
 import { TEMPLATES } from './templates.js'
-import { isWorkbuddyProtocol, workbuddyHeaders, workbuddyChatBaseFor, shapeWorkbuddyBody, workbuddyRealmFor } from './workbuddy-lane.js'
+import { isWorkbuddyProtocol, workbuddyHeaders, workbuddyChatBaseFor, shapeWorkbuddyBody, workbuddyRealmFor, neutralizeWorkbuddySystem, collectWorkbuddySystemText } from './workbuddy-lane.js'
 import { fetchWorkbuddyCatalog, mergeWorkbuddyCatalogs } from './workbuddy-catalog.js'
 import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
 import { filterModelsForProvider, IMAGE_ONLY_FALLBACK_MODELS } from './providers-image-only.js'
@@ -997,6 +997,9 @@ async function forwardWithFailover(provider, kind, body, res) {
   // 后续轮不再读上游错误体（要保住透传路径的响应流），沿用这组值
   let rejectCode = null
   let rejectMsg = ''
+  // 11128 的内容级兜底只做一次：中性化 system 之后若仍是 11128，那就是真的
+  // 账号闸门或别的原因，再改内容也没意义，直接走原有失败路径。
+  let contentNeutralRetried = false
   // 生图不走对话的时间预算：图片生成动辄几十秒甚至数分钟，
   // 用 token 数推算时长对它毫无意义，直接给独立的固定预算。
   const totalTimeoutMs = kind === 'images' ? IMAGES_TOTAL_TIMEOUT_MS : jsonTotalTimeout(body?.max_tokens, body?.stream)
@@ -1090,6 +1093,43 @@ async function forwardWithFailover(provider, kind, body, res) {
       const sawAccountReject = attempts.some((a) => a.includes('账号级拒绝'))
       const rejectTried = attempts.filter((a) => a.includes('账号级拒绝')).length
       const rejectBudgetLeft = rejectTried < ACCOUNT_REJECT_RETRY_MAX
+
+      // —— 11128 的第二种成因：内容级指纹 ——
+      //
+      // 11128 有两个来源，换 Key 只对第一个有效：
+      //   1. 账号级灰度闸门：按账号挑，换号能跨过一批（ACCOUNT_REJECT_RETRY_MAX 就是为它设的）；
+      //   2. **system 里的模板句**：腾讯按精确字面量拦，换哪个号都拦——换个号只是
+      //      把整个池子按顺序打穿一遍，最后仍然把 400 透传给客户端。
+      //
+      // 实测（2026-10-29，同一账号 / 同一套头 / 同一模型，只换 system 一句话）：
+      //   'You are a helpful assistant.'                        → 200
+      //   'Main branch (you will usually use this for PRs)'      → 400 code=11128
+      //   'Main branch (PRs usually go here)'                    → 200
+      //   'Main branch (you will normally use this for PRs)'     → 200  ← 只差一个词就放行
+      // 后两条同时说明：这是逐字符字面量匹配，不是关键词；改对了就通。
+      //
+      // 所以连续两个 Key 都撞 11128 时不再继续烧账号，改用中性 system 拿当前
+      // Key 重试一次。丢掉 system 是有损的，但比「客户端彻底失败」强，
+      // 而且原文会打进日志——新指纹句靠这条日志收集，然后进 CONTENT_FINGERPRINTS。
+      if (
+        resp.status === 400 && rejectCode === 11128 && !contentNeutralRetried &&
+        rejectTried >= 2 && kind === 'chat' && isWorkbuddyProtocol(provider.protocol) &&
+        Array.isArray(body?.messages)
+      ) {
+        const sysText = collectWorkbuddySystemText(body)
+        if (neutralizeWorkbuddySystem(body)) {
+          contentNeutralRetried = true
+          console.warn(
+            `[11128 内容级] 连续 ${rejectTried} 个 Key 被拒，判定为 system 内容指纹而非账号闸门；` +
+            `已把 system 换成中性文本后重试。原 system 前 200 字：${sysText.slice(0, 200)}`
+          )
+          upstreamBody = serializeUpstreamBody(provider, body)
+          attempts.push(`${key.name || key.id.slice(0, 8)}: 11128 疑似内容级（system 中性化后重试）`)
+          i -= 1 // 重试同一个 Key：accounts 不该为一句 system 背锅
+          continue
+        }
+      }
+
       if (resp.status === 400 && (attempts.length < 1 || (sawAccountReject && rejectBudgetLeft))) {
         const firstRead = !sawAccountReject
         let errText = ''
