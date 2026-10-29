@@ -1000,6 +1000,29 @@ async function forwardWithFailover(provider, kind, body, res) {
   // 11128 的内容级兜底只做一次：中性化 system 之后若仍是 11128，那就是真的
   // 账号闸门或别的原因，再改内容也没意义，直接走原有失败路径。
   let contentNeutralRetried = false
+
+  /**
+   * 11128 内容级兜底：把 system 换成中性文本，重新序列化请求体。
+   * 返回 true 表示确实改过，调用方应 `i -= 1; continue` 重试同一个 Key。
+   *
+   * 之所以抽成函数而不是内联：调用点有两处（换到第 2 个 Key 时、以及即将透传前），
+   * 两处条件不同但动作必须完全一致，复制一遍迟早会漏掉一处。
+   */
+  function neutralizeForRetry() {
+    if (contentNeutralRetried) return false
+    if (rejectCode !== 11128) return false
+    if (kind !== 'chat' || !isWorkbuddyProtocol(provider.protocol)) return false
+    if (!Array.isArray(body?.messages)) return false
+    const sysText = collectWorkbuddySystemText(body)
+    if (!neutralizeWorkbuddySystem(body)) return false
+    contentNeutralRetried = true
+    console.warn(
+      '[11128 内容级] 换 Key 无效，判定为 system 内容被拦；已换成中性文本重试。' +
+      `原 system 前 200 字：${sysText.slice(0, 200)}`
+    )
+    upstreamBody = serializeUpstreamBody(provider, body)
+    return true
+  }
   // 生图不走对话的时间预算：图片生成动辄几十秒甚至数分钟，
   // 用 token 数推算时长对它毫无意义，直接给独立的固定预算。
   const totalTimeoutMs = kind === 'images' ? IMAGES_TOTAL_TIMEOUT_MS : jsonTotalTimeout(body?.max_tokens, body?.stream)
@@ -1098,7 +1121,7 @@ async function forwardWithFailover(provider, kind, body, res) {
       //
       // 11128 有两个来源，换 Key 只对第一个有效：
       //   1. 账号级灰度闸门：按账号挑，换号能跨过一批（ACCOUNT_REJECT_RETRY_MAX 就是为它设的）；
-      //   2. **system 里的模板句**：腾讯按精确字面量拦，换哪个号都拦——换个号只是
+      //   2. **system 里的内容**：腾讯按字面量/敏感内容拦，换哪个号都拦——换个号只是
       //      把整个池子按顺序打穿一遍，最后仍然把 400 透传给客户端。
       //
       // 实测（2026-10-29，同一账号 / 同一套头 / 同一模型，只换 system 一句话）：
@@ -1108,26 +1131,16 @@ async function forwardWithFailover(provider, kind, body, res) {
       //   'Main branch (you will normally use this for PRs)'     → 200  ← 只差一个词就放行
       // 后两条同时说明：这是逐字符字面量匹配，不是关键词；改对了就通。
       //
-      // 所以连续两个 Key 都撞 11128 时不再继续烧账号，改用中性 system 拿当前
-      // Key 重试一次。丢掉 system 是有损的，但比「客户端彻底失败」强，
-      // 而且原文会打进日志——新指纹句靠这条日志收集，然后进 CONTENT_FINGERPRINTS。
-      if (
-        resp.status === 400 && rejectCode === 11128 && !contentNeutralRetried &&
-        rejectTried >= 2 && kind === 'chat' && isWorkbuddyProtocol(provider.protocol) &&
-        Array.isArray(body?.messages)
-      ) {
-        const sysText = collectWorkbuddySystemText(body)
-        if (neutralizeWorkbuddySystem(body)) {
-          contentNeutralRetried = true
-          console.warn(
-            `[11128 内容级] 连续 ${rejectTried} 个 Key 被拒，判定为 system 内容指纹而非账号闸门；` +
-            `已把 system 换成中性文本后重试。原 system 前 200 字：${sysText.slice(0, 200)}`
-          )
-          upstreamBody = serializeUpstreamBody(provider, body)
-          attempts.push(`${key.name || key.id.slice(0, 8)}: 11128 疑似内容级（system 中性化后重试）`)
-          i -= 1 // 重试同一个 Key：accounts 不该为一句 system 背锅
-          continue
-        }
+      // 线上真实样本（2026-10-29）：某客户端把一整段「永不服软」式的 persona 塞进
+      // system，同样被 11128 拦下——这类内容与渠道校验无关，但只要出现在 system 里
+      // 就会被判非法调用。所以不能只盯着「模板句」名单，必须留一条不改名单也能放行的路。
+      //
+      // 换到第 2 个 Key 仍然 11128 时不再继续烧账号，改用中性 system 重试一次。
+      // 丢掉 system 是有损的，但比「客户端彻底失败」强，原文会打进日志。
+      if (resp.status === 400 && rejectTried >= 1 && neutralizeForRetry()) {
+        attempts.push(`${key.name || key.id.slice(0, 8)}: 11128 疑似内容级（system 中性化后重试）`)
+        i -= 1 // 重试同一个 Key：账号不该为一句 system 背锅
+        continue
       }
 
       if (resp.status === 400 && (attempts.length < 1 || (sawAccountReject && rejectBudgetLeft))) {
@@ -1207,6 +1220,14 @@ async function forwardWithFailover(provider, kind, body, res) {
       // 账号级拒绝撞满预算：透传给客户端前，把真实原因也记到这个 Key 上
       // （code/msg 沿用之前轮次读到的值，不再读本次 body——透传路径的响应流要保住）
       if (resp.status === 400 && sawAccountReject && rejectCode !== null) {
+        // 最后一班车：只有 1 个 Key 可用、或前面已经用光换号预算时，上面那个
+        // rejectTried >= 1 的分支根本没机会执行，内容级请求就会直接透传 400。
+        // 走到这里已经确定「换号救不了」，所以无条件试一次中性化。
+        if (neutralizeForRetry()) {
+          attempts.push(`${key.name || key.id.slice(0, 8)}: 11128 疑似内容级（中性化后末次重试）`)
+          i -= 1
+          continue
+        }
         key.last_error = `HTTP 400 code=${rejectCode} ${rejectMsg}`.slice(0, 200)
         key.last_error_at = Date.now()
         persist()
