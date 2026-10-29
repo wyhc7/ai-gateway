@@ -1002,13 +1002,19 @@ async function forwardWithFailover(provider, kind, body, res) {
   let contentNeutralRetried = false
 
   /**
-   * 11128 内容级兜底：把 system 换成中性文本，重新序列化请求体。
+   * 11128 的内容级兜底：把 system 换成中性文本，重新序列化请求体。
    * 返回 true 表示确实改过，调用方应 `i -= 1; continue` 重试同一个 Key。
    *
-   * 之所以抽成函数而不是内联：调用点有两处（换到第 2 个 Key 时、以及即将透传前），
-   * 两处条件不同但动作必须完全一致，复制一遍迟早会漏掉一处。
+   * **默认关闭**，因为线上证据表明它多数时候救不了场：2026-10-29 12:46~12:50
+   * 连续 8 次兜底（每次都换成中性 system 重试）全部仍然 11128；4 分钟后同一批
+   * Key 用原始 persona 直接 200 —— 那段时间拦的是出口 IP / 通道，不是内容。
+   * 这种情形下静默改写 system 是纯损失：用户的 persona 被悄悄换掉，请求照样失败。
+   *
+   * 需要时用 WORKBUDDY_NEUTRALIZE_ON_11128=1 打开（内容确属敏感时才有用）。
+   * 打开后仍只做一次，原文进日志。
    */
   function neutralizeForRetry() {
+    if (process.env.WORKBUDDY_NEUTRALIZE_ON_11128 !== '1') return false
     if (contentNeutralRetried) return false
     if (rejectCode !== 11128) return false
     if (kind !== 'chat' || !isWorkbuddyProtocol(provider.protocol)) return false
@@ -1017,7 +1023,7 @@ async function forwardWithFailover(provider, kind, body, res) {
     if (!neutralizeWorkbuddySystem(body)) return false
     contentNeutralRetried = true
     console.warn(
-      '[11128 内容级] 换 Key 无效，判定为 system 内容被拦；已换成中性文本重试。' +
+      '[11128 内容级] 已按开关把 system 换成中性文本重试（WORKBUDDY_NEUTRALIZE_ON_11128=1）。' +
       `原 system 前 200 字：${sysText.slice(0, 200)}`
     )
     upstreamBody = serializeUpstreamBody(provider, body)
@@ -1175,6 +1181,11 @@ async function forwardWithFailover(provider, kind, body, res) {
             const sysText = collectWorkbuddySystemText(body)
             if (sysText) console.warn(`[11128 指纹留证] system 前 200 字：${sysText.slice(0, 200)}`)
           }
+          // 11128 的线上主因是出口 IP / 通道级风控（实测同一批 Key 里 9/10 正常，
+          // 风控窗口约 4 分钟，窗口内用原始 persona 也全是 300 例外）。给被拦的 Key
+          // 一个 30 秒短冷却：既不让客户端在同一请求里把整个池子反复撞一遍，
+          // 也不至于把平台冻死——风控一过就是下一个窗口。
+          if (rejectCode === 11128) applyCooldown(provider, key, 400)
           // 真实原因落到这个 Key 上（不冷却：400 不是凭据失效，下一轮还会轮到它，
           // 持续命中时界面上能看到，而不是每次都被覆盖成干巴巴的「HTTP 400」）
           key.last_error = `HTTP 400 code=${rejectCode} ${rejectMsg}`.slice(0, 200)

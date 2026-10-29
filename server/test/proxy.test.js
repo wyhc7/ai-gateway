@@ -237,7 +237,26 @@ test('上游账号级拒绝 11128 连换多个 Key，换到好 Key 后正常返�
   assert.equal(res.json().choices[0].message.content, 'ok')
   const rejected = keys.filter((k) => k.last_error && k.last_error.includes('11128'))
   assert.equal(rejected.length, 3, '每个被 11128 拒的 Key 都应记下真实 code，而不是干巴巴的 HTTP 400')
-  assert.ok(provider.keys.every((k) => !k.cooldown_until), '400 不应给 Key 施加冷却')
+
+  // 2026-10-29 修正契约：11128 从「不冷却」改成「30 秒短冷却」。
+  //
+  // 原契约（400 一律不冷却）的理由是「400 不是凭据失效，下一轮还会轮到它，
+  // 持续命中时界面上能看到，而不是每次被覆盖成 HTTP 400」。可见性这条现在由
+  // last_error 上面的断言继续保证，没有被放弃。
+  //
+  // 改的是另一半：线上实测 12:46~12:50 通道风控期间，不冷却的结果是同一客户端
+  // 请求连撞 3 个 Key、后续每个请求继续撞同一批（每次白等 6 秒才失败），而风控
+  // 窗口内换 Key 根本救不了——9/10 的 Key 在窗口外是好的，窗口内却全撞。
+  // 给 30 秒短冷却后：第一个请求仍然换满 3 个（本用例就是这条路径），
+  // 之后的请求不再空撞已确认被拦的 Key，风控一过自动恢复。
+  assert.equal(
+    provider.keys.filter((k) => k.cooldown_until).length, 3,
+    '被 11128 拒的 Key 必须进冷却，否则风控窗口内会被反复空撞'
+  )
+  assert.ok(
+    provider.keys.every((k) => !k.cooldown_until || k.cooldown_until - Date.now() <= 31_000),
+    '必须是 30 秒级短冷却，不能把平台冻结 10 分钟'
+  )
 })
 
 test('账号级拒绝 11140（风控）同样连换 Key，撞满预算后透传上游错误体', async (t) => {
