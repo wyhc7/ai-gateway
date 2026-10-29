@@ -435,3 +435,60 @@ describe('11128 诊断日志：system 原文收集', () => {
     assert.equal(collectWorkbuddySystemText({ messages: [{ role: 'user', content: 'x' }] }), '')
   })
 })
+
+// 2026-10-29：用线上截获的真实请求体逐变量隔离，确认 11128 的唯一触发源是
+// system 里的长内容（tools / max_tokens / stream_options / store 全排除）。
+// 同一段文本放进 user 就放行，所以把 system 后半段挪进第一条 user。
+test('超长 system 的后半段挪进 user，前段留在 system', async () => {
+  const { splitLongWorkbuddySystem } = await import('../workbuddy-lane.js')
+  const long = 'A'.repeat(6000) + 'B'.repeat(6000)
+  const obj = {
+    messages: [
+      { role: 'system', content: long },
+      { role: 'user', content: 'hi' }
+    ]
+  }
+  const changed = splitLongWorkbuddySystem(obj, 0.5, 1000)
+  assert.equal(changed, true, '超过阈值应切分')
+  const sys = obj.messages[0]
+  const usr = obj.messages[1]
+  assert.ok([...sys.content].length <= 6000 + 5, 'system 只保留前一半')
+  assert.ok(sys.content.startsWith('A'), 'system 留下的是前段')
+  assert.ok(usr.content.includes('[system-continuation]'), '搬过去的段落要有标记，免得模型当成用户提问')
+  assert.ok(usr.content.includes('B'), '后段内容确实进了 user')
+  assert.ok(usr.content.trim().endsWith('hi'), '原有 user 内容仍在末尾')
+})
+
+test('短 system 不动，不能无差别改写正常请求', async () => {
+  const { splitLongWorkbuddySystem } = await import('../workbuddy-lane.js')
+  const obj = { messages: [{ role: 'system', content: 'You are a helpful assistant.' }, { role: 'user', content: 'hi' }] }
+  assert.equal(splitLongWorkbuddySystem(obj, 0.5, 8000), false, '短 system 不该被切')
+  assert.equal(obj.messages[0].content, 'You are a helpful assistant.', '原样保留')
+})
+
+test('ratio 设 1 时关闭切分（保留回老行为的口子）', async () => {
+  const { splitLongWorkbuddySystem } = await import('../workbuddy-lane.js')
+  const obj = { messages: [{ role: 'system', content: 'X'.repeat(20000) }, { role: 'user', content: 'hi' }] }
+  // ratio=1 -> cut 在末尾 -> tail 为空 -> 不改动
+  assert.equal(splitLongWorkbuddySystem(obj, 1, 1000), false, '切分为空就不该动')
+  assert.equal(obj.messages[0].content.length, 20000)
+})
+
+test('没有 user 消息时，搬过去的内容自己补一条 user', async () => {
+  const { splitLongWorkbuddySystem } = await import('../workbuddy-lane.js')
+  const obj = { messages: [{ role: 'system', content: 'A'.repeat(5000) + 'B'.repeat(5000) }] }
+  assert.equal(splitLongWorkbuddySystem(obj, 0.5, 1000), true)
+  const added = obj.messages.find((m) => m.role === 'user')
+  assert.ok(added && added.content.includes('[system-continuation]'), '要补一条 user 承载后半段')
+})
+
+test('system 是数组形态（多段 text）时保持原样不切', async () => {
+  const { splitLongWorkbuddySystem } = await import('../workbuddy-lane.js')
+  const obj = {
+    messages: [
+      { role: 'system', content: [{ type: 'text', text: 'A'.repeat(20000) }] },
+      { role: 'user', content: 'hi' }
+    ]
+  }
+  assert.equal(splitLongWorkbuddySystem(obj, 0.5, 1000), false, '非字符串 content 不冒险切')
+})

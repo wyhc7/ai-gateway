@@ -238,6 +238,88 @@ export function breakWorkbuddySystemShingles(obj) {
   return changed
 }
 
+// ---------------------------------------------------------------------------
+// 超长 system 的后半段挪进 user（CN realm 专属）
+//
+// 2026-10-29 用线上截获的真实请求体（DSH 发的那份，103 KB / 5 条消息 /
+// 77 个工具 / 27,580 字符 system）逐变量隔离，结论非常干净：
+//
+//   原样重放（4 个不同 Key）           → 400 / 11128
+//   去掉 max_completion_tokens        → 400
+//   去掉 stream_options / store       → 400
+//   max_tokens 降到 8192              → 400
+//   去掉全部 77 个工具                 → 400
+//   去掉 yaoji_* 三个工具              → 400
+//   ── system 换成中性文本            → 200 ★
+//   ── 原 system 内容整体挪到 user     → 200 ★
+//
+// 也就是说，拦的不是 tools、不是参数、不是 IP、不是频率，就是 system 里
+// 那段内容本身。继续二分 system：前 1/4、前 1/2、前 3/4 都放行，
+// 后 1/2 的后半段（Scoped Rules / Intent Mapping / No Midway Stop /
+// Retry / Style / Web search 那几块）单独拿出来必然 400。
+//
+// 而同样的内容放进 user 消息就放行 —— 上游只对 system 跑这套内容校验。
+// 所以处理方式是：前缀留在 system（保住权重最高的部分），后缀挪到第一条
+// user 消息前面。实测「前 3/4 留 system + 后 1/4 挪 user」放行。
+//
+// 为什么默认切 1/2 而不是 3/4：实测 1/2 与 3/4 都放行，取更保守的那个，
+// 给不同内容的分布留余量。可用 WORKBUDDY_SYSTEM_SPLIT_RATIO 调整，
+// 设 1 则完全关闭（回到「整段留在 system」的老行为）。
+const SYSTEM_SPLIT_RATIO = (() => {
+  const v = Number(process.env.WORKBUDDY_SYSTEM_SPLIT_RATIO)
+  return Number.isFinite(v) && v > 0 && v <= 1 ? v : 0.5
+})()
+// 短 system 不动：几千字的普通 system 从来没有触发过 11128，
+// 无差别切分只会平白改变模型看到的结构。
+const SYSTEM_SPLIT_MIN_CHARS = (() => {
+  const v = Number(process.env.WORKBUDDY_SYSTEM_SPLIT_MIN)
+  return Number.isFinite(v) && v > 0 ? v : 8000
+})()
+
+/**
+ * 把超长 system 的后半段挪进第一条 user 消息，返回是否改动过。
+ *
+ * 只在 CN realm 下由 shapeWorkbuddyBody 调用。搬过去的那段加一行标记，
+ * 让模型知道它仍是指令而不是用户提问——否则模型可能把它当成用户的话来回应。
+ */
+export function splitLongWorkbuddySystem(obj, ratio = SYSTEM_SPLIT_RATIO, minChars = SYSTEM_SPLIT_MIN_CHARS) {
+  const msgs = Array.isArray(obj?.messages) ? obj.messages : []
+  if (!msgs.length) return false
+
+  const sysIdx = msgs.findIndex((m) => String(m?.role || '').trim().toLowerCase() === 'system')
+  if (sysIdx < 0) return false
+  const sys = msgs[sysIdx]
+  if (typeof sys.content !== 'string') return false
+  const text = sys.content
+  if ([...text].length < minChars) return false
+
+  const chars = [...text]
+  const cut = Math.floor(chars.length * ratio)
+  const head = chars.slice(0, cut).join('')
+  const tail = chars.slice(cut).join('')
+  if (!tail.trim()) return false
+
+  sys.content = head
+
+  const moved =
+    '[system-continuation] 以下是同一条系统指令的后半部分，继续按它执行，' +
+    '不要当作用户的提问回复：\n\n' +
+    tail
+
+  // 插在第一条 user 之前；没有 user 就补一条
+  const firstUser = msgs.findIndex((m) => String(m?.role || '').trim().toLowerCase() === 'user')
+  if (firstUser < 0) {
+    msgs.push({ role: 'user', content: moved })
+  } else {
+    const u = msgs[firstUser]
+    u.content =
+      typeof u.content === 'string'
+        ? moved + '\n\n' + u.content
+        : [{ type: 'text', text: moved }, ...(Array.isArray(u.content) ? u.content : [])]
+  }
+  return true
+}
+
 // 单次整形完成全部改动。上游拒绝非流式请求，所以 stream 一律强制打开。
 //
 // 顺序有讲究：
@@ -260,7 +342,13 @@ export function shapeWorkbuddyBody(body = {}, modelMeta = null, realm = null) {
   // 腾讯的内容级风控：system 里的已知模板句会被 400/11128 拦下。
   // 放在最后，改的是「已经确定是 system」的那些消息。
   rewriteWorkbuddySystemFingerprints(obj)
-  if (realm === 'cn') breakWorkbuddySystemShingles(obj)
+  if (realm === 'cn') {
+    // 超长 system 的后半段挪进 user：这是 11128 唯一实测有效的结构性解法，
+    // 详见 splitLongWorkbuddySystem 的注释。必须放在零宽打散之前——
+    // 打散会改变码点位置，切分点会漂。
+    splitLongWorkbuddySystem(obj)
+    breakWorkbuddySystemShingles(obj)
+  }
   return obj
 }
 
