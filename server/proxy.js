@@ -1107,10 +1107,11 @@ async function forwardWithFailover(provider, kind, body, res) {
       // 而这份文件是「等下一次 11128 自己掉下来」的证据，必须每次都存。
       // 只用构造的近似请求测过全是 200，说明触发条件藏在真实内容里
       //（DSH 发的那 77 个工具的真实 schema、27KB 的 system）。
-      // 写 /tmp、文件名带时间戳；排查完人工删除，不进仓库也不进 config。
+      // 写 data 目录（服务可写、已 gitignore）；不能写 /tmp —— systemd 的
+      // PrivateTmp=true 会放进私有命名空间，外面看不到、重启就清空。
       if (resp.status === 400 && isWorkbuddyProtocol(provider.protocol) && kind === 'chat') {
         try {
-          const dumpPath = '/tmp/wb11128-' + Date.now() + '.json'
+          const dumpPath = (process.env.DATA_DIR || '/opt/ai-gateway/data') + '/wb11128-' + Date.now() + '.json'
           writeFileSync(dumpPath, typeof upstreamBody === 'string' ? upstreamBody : JSON.stringify(upstreamBody))
           console.warn('[11128 落盘] 完整请求体已保存: ' + dumpPath)
         } catch { /* 落盘失败不影响主流程 */ }
