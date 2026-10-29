@@ -11,57 +11,6 @@ import { fetchWorkbuddyCatalog, mergeWorkbuddyCatalogs } from './workbuddy-catal
 import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
 import { filterModelsForProvider, IMAGE_ONLY_FALLBACK_MODELS } from './providers-image-only.js'
 
-// ---------------------------------------------------------------------------
-// 出站代理（出口 IP 控制）
-//
-// 为什么需要：上游按**出口 IP** 做风控。这台机器在洛杉矶，而 WorkBuddy 国内版
-// 是腾讯的国内服务 —— 一个美国 IP 高频调用它，在风控眼里就是「非官方客户端」，
-// 表现为 400 / code 11128（实测 05:17 全 200、05:19 连 4 次全 400、05:20 又全 200，
-// 按 IP 计的秒级窗口）。换 Key 没用，因为拦的是 IP。
-//
-// 三种配法，优先级从高到低：
-//   1. key.proxy          单个账号走自己的出口（最贴近真实多用户）
-//   2. provider.proxy     整个平台走同一个出口
-//   3. AI_GATEWAY_OUTBOUND_PROXY  环境变量兜底
-// 都不配就直连，行为与之前完全一致。
-//
-// 注意：Node 的 fetch **不读** HTTPS_PROXY 环境变量（实测），必须显式传 dispatcher，
-// 所以下面用 undici 的 ProxyAgent。undici 缺失时退化为直连，不影响主流程。
-let ProxyAgentCtor = null
-try {
-  ({ ProxyAgent: ProxyAgentCtor } = await import('undici'))
-} catch {
-  /* undici 不可用：代理功能关闭，其余照常 */
-}
-
-const proxyAgentCache = new Map()
-
-/** 解析该请求应使用的出口代理 URL（空串 = 直连）。 */
-export function outboundProxyFor(provider, key) {
-  return String(key?.proxy || provider?.proxy || process.env.AI_GATEWAY_OUTBOUND_PROXY || '').trim()
-}
-
-/**
- * 取（并缓存）该代理对应的 undici dispatcher。
- * 缓存是必须的：ProxyAgent 内部带连接池，每次新建会漏 socket。
- */
-function dispatcherFor(provider, key) {
-  const url = outboundProxyFor(provider, key)
-  if (!url || !ProxyAgentCtor) return undefined
-  let agent = proxyAgentCache.get(url)
-  if (!agent) {
-    try {
-      agent = new ProxyAgentCtor(url)
-      proxyAgentCache.set(url, agent)
-    } catch (err) {
-      // 代理地址写错不该让整个请求 500：退回直连并留下痕迹
-      console.warn(`[出站代理] 无法创建 ProxyAgent（${url}）：${err.message}；本次直连`)
-      return undefined
-    }
-  }
-  return agent
-}
-
 
 // 允许「协议级默认模型」兜底的协议白名单。
 //
@@ -208,7 +157,7 @@ const UPSTREAM_ACCOUNT_REJECT_CODES = new Set([11128, 11140])
 // 11128 不一样：2026-10-29 的线上数据表明它是腾讯侧的**周期性间歇拦截**——
 //   06:11 那一分钟只有 4 个请求，全 11128；05:17 那一分钟 50 个请求，全 200。
 // 与请求频率、体积、消息数、tools 数、system 长度、出口 IP 都无关
-// （直连与 4 个不同代理在同一分钟内测全部 200）；窗口约 10~30 秒、间隔约 50 分钟。
+// （同一分钟内反复测全部 200）；窗口约 10~30 秒、间隔约 50 分钟。
 // 撞 3 次就放弃等于「只试了 3/9 个账号就认输」，而窗口往往再多试几次就过了。
 // 所以 11128 的预算单独放宽到覆盖整个 Key 池（见 retryBudgetFor）。
 const ACCOUNT_REJECT_RETRY_MAX = 3
@@ -806,12 +755,10 @@ export async function refreshModels(providerId) {
     let timer = null
     try {
       timer = setTimeout(() => controller.abort(), 60000)
-      const md = dispatcherFor(provider, key)
       const resp = await fetch(url, {
         method: plan.modelsMethod,
         headers: buildHeaders(provider, plan, token, key),
         signal: controller.signal,
-        ...(md ? { dispatcher: md } : {})
       })
       clearTimeout(timer)
       if (resp.ok) {
@@ -917,13 +864,10 @@ export async function previewModels({ base_url, protocol, api_key, extra_headers
   let timer = null
   try {
     timer = setTimeout(() => controller.abort(), 30000)
-    // previewModels 拿不到具体 Key（只拿到平台配置），所以只按平台级代理走
-    const pd = dispatcherFor(target, null)
     const resp = await fetch(url, {
       method: plan.modelsMethod,
       headers,
       signal: controller.signal,
-      ...(pd ? { dispatcher: pd } : {})
     })
     clearTimeout(timer)
     if (!resp.ok) {
@@ -1071,7 +1015,7 @@ async function forwardWithFailover(provider, kind, body, res) {
   let contentNeutralRetried = false
   // 11128 风控窗口的原地重试计数（按 Key）。
   // 只原地试 1 次、等 200ms：窗口是秒级的，试一次足够判断「是不是刚好卡在窗口里」，
-  // 试再多也只是在同一个 IP 上耗时间。真正的跨窗口手段是换 Key（各 Key 走不同代理 IP），
+  // 试再多也只是在同一个号上耗时间。真正的跨窗口手段是换 Key，
   // 那由下面 rejectBudgetLeft 的 11128 专用预算控制。
   const reject11128Retries = new Map()
   const REJECT_11128_RETRY_MAX = 1
@@ -1151,13 +1095,11 @@ async function forwardWithFailover(provider, kind, body, res) {
       // 连接与等待响应头阶段用短超时：上游半开连接时快速失败并切换 Key，
       // 而不是让客户端挂到总时长超时（此前为 30 分钟）
       timer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS)
-      const dispatcher = dispatcherFor(provider, key)
       const resp = await fetch(upstream, {
         method: kind === 'chat' || kind === 'images' ? 'POST' : plan.modelsMethod,
         headers: buildHeaders(provider, plan, token, key),
         body: upstreamBody,
         signal: controller.signal,
-        ...(dispatcher ? { dispatcher } : {})
       })
       // 诊断开关：只在上游回 400 时把「我方真实发出的请求」打出来。
       // 11128 反复排查时，靠猜请求体与请求头一直对不上线上现象——只有把实际
@@ -1236,7 +1178,7 @@ async function forwardWithFailover(provider, kind, body, res) {
       const rejectTried = attempts.filter((a) => a.includes('账号级拒绝')).length
       // 11128 是腾讯侧的周期性间歇拦截（与请求本身无关，见 ACCOUNT_REJECT_RETRY_MAX
       // 上面的实测记录），所以它的预算放到「能走遍整个 Key 池」——每个 Key 走不同
-      // 代理 IP，多试几个才可能跨过窗口。11140 是真账号限制，维持 3 次即可。
+      // 多试几个号才可能跨过窗口。11140 是真账号限制，维持 3 次即可。
       const rejectBudget = rejectCode === 11128
         ? Math.max(ACCOUNT_REJECT_RETRY_MAX, keys.length)
         : ACCOUNT_REJECT_RETRY_MAX

@@ -12,7 +12,7 @@ const dataDir = mkdtempSync(join(tmpdir(), 'ai-gateway-test-'))
 process.env.DATA_DIR = dataDir
 
 const { state } = await import('../store.js')
-const { handleChat, withUsageOption, estimateTokens, shouldSendHeartbeat, heartbeatTickInterval, jsonTotalTimeout, CONNECT_TIMEOUT_MS, PRE_HEADER_TIMEOUT_MS, outboundProxyFor } = await import('../proxy.js')
+const { handleChat, withUsageOption, estimateTokens, shouldSendHeartbeat, heartbeatTickInterval, jsonTotalTimeout, CONNECT_TIMEOUT_MS, PRE_HEADER_TIMEOUT_MS } = await import('../proxy.js')
 
 after(() => {
   rmSync(dataDir, { recursive: true, force: true })
@@ -244,8 +244,8 @@ test('上游账号级拒绝 11128 先原地重试，撞满后换 Key，最终成
   // 前 3 次都落在同一个 Key 上（原地重试），所以只有它记下 11128。
   // 这跟旧契约（每次 11128 都换 Key、3 个 Key 各记一次）不同，是有意的：
   // 窗口是按 IP 算的，换 Key 只是把同一个窗口白撞到别的账号上。
-  // 11128 的路径现在是：原地重试 1 次 → 仍失败就换 Key（各 Key 走不同代理 IP，
-  // 换 IP 才是跨过腾讯周期性窗口的实际手段）。所以会有 2 个 Key 各被撞过一次。
+  // 11128 的路径现在是：原地重试 1 次 → 仍失败就换 Key（多账号分摊，
+  // 换号是跨过腾讯周期性窗口的实际手段）。所以会有 2 个 Key 各被撞过一次。
   const rejected = keys.filter((k) => k.last_error && k.last_error.includes('11128'))
   assert.equal(rejected.length, 2, '11128 会撞到 2 个 Key（原地重试 1 次后才换号），而不是扩散到全池')
   assert.ok(
@@ -810,57 +810,4 @@ test('冷却后的 Key 在冷却结束后恢复可用', async (t) => {
   await handleChat({ body: { model: provider.testModel, messages: [{ role: 'user', content: 'hi' }] } }, res)
   assert.equal(res.statusCode, 200, '冷却过期的 Key 应重新投入使用')
   resetProvider(provider)
-})
-
-// 出站代理的取值优先级：上游按出口 IP 做风控，所以「这个请求从哪个 IP 出去」
-// 是一等配置，取值顺序不能乱 —— Key 级最具体，环境变量最粗，平台级居中。
-test('出站代理：Key 级 > 平台级 > 环境变量 > 直连', () => {
-  const saved = process.env.AI_GATEWAY_OUTBOUND_PROXY
-  try {
-    delete process.env.AI_GATEWAY_OUTBOUND_PROXY
-    assert.equal(outboundProxyFor({}, { proxy: 'http://key:8080' }), 'http://key:8080', 'Key 级优先')
-    assert.equal(
-      outboundProxyFor({ proxy: 'http://plat:3128' }, { proxy: 'http://key:8080' }),
-      'http://key:8080',
-      '同时存在时 Key 级赢'
-    )
-    assert.equal(outboundProxyFor({ proxy: 'http://plat:3128' }, {}), 'http://plat:3128', '没有 Key 级就用平台级')
-    assert.equal(outboundProxyFor({}, {}), '', '都没配就直连')
-
-    process.env.AI_GATEWAY_OUTBOUND_PROXY = 'http://env:9999'
-    assert.equal(outboundProxyFor({}, {}), 'http://env:9999', '环境变量兜底')
-    assert.equal(outboundProxyFor({ proxy: 'http://plat:3128' }, {}), 'http://plat:3128', '平台级压过环境变量')
-  } finally {
-    if (saved === undefined) delete process.env.AI_GATEWAY_OUTBOUND_PROXY
-    else process.env.AI_GATEWAY_OUTBOUND_PROXY = saved
-  }
-})
-
-test('出站代理：空白字符串按未配置处理，不会拼出坏 URL', () => {
-  const saved = process.env.AI_GATEWAY_OUTBOUND_PROXY
-  try {
-    delete process.env.AI_GATEWAY_OUTBOUND_PROXY
-    assert.equal(outboundProxyFor({}, { proxy: '   ' }), '', '纯空白等于没配')
-    assert.equal(outboundProxyFor({}, { proxy: null }), '', 'null 等于没配')
-    assert.equal(outboundProxyFor({}, { proxy: undefined }), '', 'undefined 等于没配')
-  } finally {
-    if (saved === undefined) delete process.env.AI_GATEWAY_OUTBOUND_PROXY
-    else process.env.AI_GATEWAY_OUTBOUND_PROXY = saved
-  }
-})
-
-// 代理 URL 含 user:password@，和 api_key 同级敏感。列表接口与导出都必须掩码，
-// 否则任何能开管理界面 / 拿到备份文件的人都读得到出口代理凭据。
-test('序列化 Key 时隐藏代理密码，但保留可辨识的 host:port', () => {
-  // 直接验证脱敏规则本身（index.js 会启动 HTTP 服务，不能在测试里 import）
-  const maskProxyPassword = (url) => String(url || '').replace(
-    /^(https?:\/\/)([^:/@]+):([^@]*)@/i, (_m, scheme, user) => `${scheme}${user}:***@`)
-  assert.equal(
-    maskProxyPassword('http://user:secret@127.0.0.1:8080'),
-    'http://user:***@127.0.0.1:8080',
-    '密码必须被掩掉，用户名与 host:port 保留（便于确认配的是哪个代理）'
-  )
-  assert.equal(maskProxyPassword('http://127.0.0.1:8080'), 'http://127.0.0.1:8080', '无凭据的原样返回')
-  assert.equal(maskProxyPassword(''), '', '空值安全')
-  assert.ok(/\*\*\*/.test(maskProxyPassword('http://u:p@h:1')), '掩码结果要含 ***，前端据此判断「别覆盖」')
 })

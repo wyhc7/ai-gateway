@@ -215,26 +215,8 @@ function maskKey(value) {
 
 // OAuth 凭据比静态 Key 更敏感：refresh_token 长期有效，泄露等于把整个订阅账号交出去。
 // 列表接口一律只回掩码和状态，明文绝不出现在响应里。
-// 代理 URL 里通常带 `user:password@`。它和 api_key 一样是凭据，
-// 列表接口绝不能把密码回给浏览器，否则任何能开管理界面的人都读得到。
-// 掩码后的形态照样能看出「配了哪个代理、走哪个端口」，只是密码变成 ***。
-function maskProxyPassword(url) {
-  const s = String(url || '')
-  if (!s) return ''
-  // http://user:pass@host:port -> http://user:***@host:port
-  return s.replace(/^(https?:\/\/)([^:/@]+):([^@]*)@/i, (_, scheme, user) => `${scheme}${user}:***@`)
-}
-
-// 判断前端回传的代理是否只是「原样的掩码」——那种情况应当保留服务端原值，
-// 否则用户点一次保存就会把真实的代理密码覆盖成字面量 ***。
-function isMaskedProxy(url) {
-  return /\*\*\*/.test(String(url || ''))
-}
-
 function serializeKey(k) {
   const out = { ...k }
-  out.proxy = maskProxyPassword(k.proxy)
-  out.proxy_present = Boolean(k.proxy)
   if (k.type === 'oauth') {
     out.access_token = k.access_token ? maskKey(k.access_token) : ''
     out.refresh_token = k.refresh_token ? '***（已保存）' : ''
@@ -257,9 +239,6 @@ function serializeKey(k) {
 function serializeProvider(p) {
   return {
     ...p,
-    // 平台级代理同样含凭据，列出一律掩码
-    proxy: maskProxyPassword(p.proxy),
-    proxy_present: Boolean(p.proxy),
     keys: (p.keys || []).map(serializeKey)
   }
 }
@@ -467,11 +446,6 @@ app.put('/api/providers/:id', (req, res) => {
   if (base_url !== undefined) p.base_url = base_url
   if (protocol !== undefined) p.protocol = protocol
   if (enabled !== undefined) p.enabled = Boolean(enabled)
-  // 平台级出站代理：整个平台的 Key 共用一个出口。空串 = 清空（回直连），
-  // undefined = 不动——同 Key 级语义，别让改个名字顺手清掉代理配置。
-  if (req.body.proxy !== undefined && !isMaskedProxy(req.body.proxy)) {
-    p.proxy = String(req.body.proxy || '').trim()
-  }
   if (extra_headers !== undefined) p.extra_headers = extra_headers
   // image_only 是只增不减的锁：只生图平台在编辑表单里被拖进文本模型，
   // 也在这里被剔掉。允许关掉它等于给「只生图」留后门，不提供这个开关。
@@ -571,15 +545,10 @@ app.put('/api/providers/:id/keys/:keyId', (req, res) => {
   if (!p) return res.status(404).json({ error: { message: '平台不存在' } })
   const key = p.keys.find((k) => k.id === req.params.keyId)
   if (!key) return res.status(404).json({ error: { message: 'Key 不存在' } })
-  const { api_key, name, enabled, access_token, refresh_token, expires_in, account_id, email, proxy } = req.body
+  const { api_key, name, enabled, access_token, refresh_token, expires_in, account_id, email } = req.body
   if (api_key !== undefined && api_key) key.api_key = api_key
   if (name !== undefined) key.name = name
   if (enabled !== undefined) key.enabled = Boolean(enabled)
-  // 出站代理：让这个账号从指定 IP 出去。上游按出口 IP 做风控，所以是账号级配置。
-  // 传空串 = 清空（回到直连），undefined = 不动。两种语义要分开，
-  // 否则「只想改个名字」会把已配好的代理顺手抹掉。
-  // 前端拿到的是掩码（密码是 ***），原样回传时必须保留服务端真实值。
-  if (proxy !== undefined && !isMaskedProxy(proxy)) key.proxy = String(proxy || '').trim()
   if (key.type === 'oauth') {
     if (access_token) key.access_token = access_token
     if (refresh_token) key.refresh_token = refresh_token
@@ -1600,9 +1569,6 @@ function isMasked(v) {
 function sanitizeKeyForExport(k) {
   const out = { ...k }
   for (const f of SECRET_FIELDS) if (f in out) out[f] = maskSecret(out[f])
-  // 代理 URL 里带 user:password@，和 api_key 同级敏感。备份文件常被转手，
-  // 明文代理密码等于把出口凭证一起送人。
-  if (out.proxy) out.proxy = maskProxyPassword(out.proxy)
   delete out.last_error
   delete out.last_error_at
   return out
