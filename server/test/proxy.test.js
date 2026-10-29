@@ -12,7 +12,7 @@ const dataDir = mkdtempSync(join(tmpdir(), 'ai-gateway-test-'))
 process.env.DATA_DIR = dataDir
 
 const { state } = await import('../store.js')
-const { handleChat, withUsageOption, estimateTokens, shouldSendHeartbeat, heartbeatTickInterval, jsonTotalTimeout, CONNECT_TIMEOUT_MS, PRE_HEADER_TIMEOUT_MS } = await import('../proxy.js')
+const { handleChat, withUsageOption, estimateTokens, shouldSendHeartbeat, heartbeatTickInterval, jsonTotalTimeout, CONNECT_TIMEOUT_MS, PRE_HEADER_TIMEOUT_MS, outboundProxyFor } = await import('../proxy.js')
 
 after(() => {
   rmSync(dataDir, { recursive: true, force: true })
@@ -808,4 +808,41 @@ test('冷却后的 Key 在冷却结束后恢复可用', async (t) => {
   await handleChat({ body: { model: provider.testModel, messages: [{ role: 'user', content: 'hi' }] } }, res)
   assert.equal(res.statusCode, 200, '冷却过期的 Key 应重新投入使用')
   resetProvider(provider)
+})
+
+// 出站代理的取值优先级：上游按出口 IP 做风控，所以「这个请求从哪个 IP 出去」
+// 是一等配置，取值顺序不能乱 —— Key 级最具体，环境变量最粗，平台级居中。
+test('出站代理：Key 级 > 平台级 > 环境变量 > 直连', () => {
+  const saved = process.env.AI_GATEWAY_OUTBOUND_PROXY
+  try {
+    delete process.env.AI_GATEWAY_OUTBOUND_PROXY
+    assert.equal(outboundProxyFor({}, { proxy: 'http://key:8080' }), 'http://key:8080', 'Key 级优先')
+    assert.equal(
+      outboundProxyFor({ proxy: 'http://plat:3128' }, { proxy: 'http://key:8080' }),
+      'http://key:8080',
+      '同时存在时 Key 级赢'
+    )
+    assert.equal(outboundProxyFor({ proxy: 'http://plat:3128' }, {}), 'http://plat:3128', '没有 Key 级就用平台级')
+    assert.equal(outboundProxyFor({}, {}), '', '都没配就直连')
+
+    process.env.AI_GATEWAY_OUTBOUND_PROXY = 'http://env:9999'
+    assert.equal(outboundProxyFor({}, {}), 'http://env:9999', '环境变量兜底')
+    assert.equal(outboundProxyFor({ proxy: 'http://plat:3128' }, {}), 'http://plat:3128', '平台级压过环境变量')
+  } finally {
+    if (saved === undefined) delete process.env.AI_GATEWAY_OUTBOUND_PROXY
+    else process.env.AI_GATEWAY_OUTBOUND_PROXY = saved
+  }
+})
+
+test('出站代理：空白字符串按未配置处理，不会拼出坏 URL', () => {
+  const saved = process.env.AI_GATEWAY_OUTBOUND_PROXY
+  try {
+    delete process.env.AI_GATEWAY_OUTBOUND_PROXY
+    assert.equal(outboundProxyFor({}, { proxy: '   ' }), '', '纯空白等于没配')
+    assert.equal(outboundProxyFor({}, { proxy: null }), '', 'null 等于没配')
+    assert.equal(outboundProxyFor({}, { proxy: undefined }), '', 'undefined 等于没配')
+  } finally {
+    if (saved === undefined) delete process.env.AI_GATEWAY_OUTBOUND_PROXY
+    else process.env.AI_GATEWAY_OUTBOUND_PROXY = saved
+  }
 })
