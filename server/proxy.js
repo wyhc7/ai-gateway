@@ -1076,6 +1076,22 @@ async function forwardWithFailover(provider, kind, body, res) {
         body: upstreamBody,
         signal: controller.signal
       })
+      // 诊断开关：只在上游回 400 时把「我方真实发出的请求」打出来。
+      // 11128 反复排查时，靠猜请求体与请求头一直对不上线上现象——只有把实际
+      // 发出去的那一份留证才能定位。Authorization 与 token 一律脱敏。
+      // 用 WORKBUDDY_DEBUG_DUMP=1 打开，排查完关掉。
+      if (resp.status === 400 && process.env.WORKBUDDY_DEBUG_DUMP === '1' && isWorkbuddyProtocol(provider.protocol)) {
+        try {
+          const sent = buildHeaders(provider, plan, token, key)
+          const shown = Object.fromEntries(Object.entries(sent).map(([k2, v]) => [
+            k2,
+            /authorization|token|api-key|cookie/i.test(k2) ? '***masked***' : String(v).slice(0, 120)
+          ]))
+          console.warn(`[11128 dump] url=${upstream}`)
+          console.warn(`[11128 dump] headers=${JSON.stringify(shown)}`)
+          console.warn(`[11128 dump] body=${String(upstreamBody).slice(0, 2500)}`)
+        } catch { /* 诊断失败不影响主流程 */ }
+      }
       // 已收到响应头，改为总时长超时，长推理模型的持续输出不受影响
       clearTimeout(timer)
       timer = setTimeout(() => controller.abort(), totalTimeoutMs)
