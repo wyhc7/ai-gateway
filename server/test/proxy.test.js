@@ -846,3 +846,19 @@ test('出站代理：空白字符串按未配置处理，不会拼出坏 URL', (
     else process.env.AI_GATEWAY_OUTBOUND_PROXY = saved
   }
 })
+
+// 代理 URL 含 user:password@，和 api_key 同级敏感。列表接口与导出都必须掩码，
+// 否则任何能开管理界面 / 拿到备份文件的人都读得到出口代理凭据。
+test('序列化 Key 时隐藏代理密码，但保留可辨识的 host:port', () => {
+  // 直接验证脱敏规则本身（index.js 会启动 HTTP 服务，不能在测试里 import）
+  const maskProxyPassword = (url) => String(url || '').replace(
+    /^(https?:\/\/)([^:/@]+):([^@]*)@/i, (_m, scheme, user) => `${scheme}${user}:***@`)
+  assert.equal(
+    maskProxyPassword('http://user:secret@127.0.0.1:8080'),
+    'http://user:***@127.0.0.1:8080',
+    '密码必须被掩掉，用户名与 host:port 保留（便于确认配的是哪个代理）'
+  )
+  assert.equal(maskProxyPassword('http://127.0.0.1:8080'), 'http://127.0.0.1:8080', '无凭据的原样返回')
+  assert.equal(maskProxyPassword(''), '', '空值安全')
+  assert.ok(/\*\*\*/.test(maskProxyPassword('http://u:p@h:1')), '掩码结果要含 ***，前端据此判断「别覆盖」')
+})
