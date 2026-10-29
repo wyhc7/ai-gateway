@@ -1154,6 +1154,14 @@ async function forwardWithFailover(provider, kind, body, res) {
           ? rejectCode !== null
           : true // 上一轮已确认是账号级拒绝，本轮沿用同样策略继续换 Key
         if (accountReject) {
+          // 11128 可能是 system 内容指纹，而内容指纹只能靠「原句」加进
+          // CONTENT_FINGERPRINTS 才能无损修掉。兜底分支只在连撞两个 Key 时
+          // 记录原文，只撞一次就换号放过的那句会被永久漏掉——所以这里在
+          // 第一次读到 11128 时就把 system 留证，与兜底是否触发无关。
+          if (firstRead && rejectCode === 11128 && isWorkbuddyProtocol(provider.protocol) && Array.isArray(body?.messages)) {
+            const sysText = collectWorkbuddySystemText(body)
+            if (sysText) console.warn(`[11128 指纹留证] system 前 200 字：${sysText.slice(0, 200)}`)
+          }
           // 真实原因落到这个 Key 上（不冷却：400 不是凭据失效，下一轮还会轮到它，
           // 持续命中时界面上能看到，而不是每次都被覆盖成干巴巴的「HTTP 400」）
           key.last_error = `HTTP 400 code=${rejectCode} ${rejectMsg}`.slice(0, 200)
