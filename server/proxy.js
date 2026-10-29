@@ -201,8 +201,16 @@ const UPSTREAM_CROWD_COOLDOWN_MS = 5000
 // 命中时单个请求会连续撞上多个账号（线上复现：连撞后把 400 透传给了客户端）。
 // 这类错换 Key 大概率就好——闸门/风控是按账号挑的，不换就只能干等透传。
 const UPSTREAM_ACCOUNT_REJECT_CODES = new Set([11128, 11140])
-// 账号级拒绝最多换几个 Key：灰度按批次挑账号，3 个足够跨过一批；
-// 撞满还失败说明是全线闸门，换了也白换，直接透传让客户端看到真实错误。
+// 账号级拒绝最多换几个 Key。
+//
+// 11140（账号真被限制）换 3 个足够判断「是全线还是个别」，再多只是白等。
+//
+// 11128 不一样：2026-10-29 的线上数据表明它是腾讯侧的**周期性间歇拦截**——
+//   06:11 那一分钟只有 4 个请求，全 11128；05:17 那一分钟 50 个请求，全 200。
+// 与请求频率、体积、消息数、tools 数、system 长度、出口 IP 都无关
+// （直连与 4 个不同代理在同一分钟内测全部 200）；窗口约 10~30 秒、间隔约 50 分钟。
+// 撞 3 次就放弃等于「只试了 3/9 个账号就认输」，而窗口往往再多试几次就过了。
+// 所以 11128 的预算单独放宽到覆盖整个 Key 池（见 retryBudgetFor）。
 const ACCOUNT_REJECT_RETRY_MAX = 3
 
 // 超时分两段：连接阶段（含等待响应头）用短超时快速失败，
@@ -1061,11 +1069,18 @@ async function forwardWithFailover(provider, kind, body, res) {
   // 11128 的内容级兜底只做一次：中性化 system 之后若仍是 11128，那就是真的
   // 账号闸门或别的原因，再改内容也没意义，直接走原有失败路径。
   let contentNeutralRetried = false
-  // 11128 风控窗口的原地重试计数（按 Key）。窗口是秒级的，等一下就过，
-  // 所以换 Key / 冷却都不对——只在同一个 Key 上等一小会儿再试。
+  // 11128 风控窗口的原地重试计数（按 Key）。
+  // 只原地试 1 次、等 200ms：窗口是秒级的，试一次足够判断「是不是刚好卡在窗口里」，
+  // 试再多也只是在同一个 IP 上耗时间。真正的跨窗口手段是换 Key（各 Key 走不同代理 IP），
+  // 那由下面 rejectBudgetLeft 的 11128 专用预算控制。
   const reject11128Retries = new Map()
-  const REJECT_11128_RETRY_MAX = 3
-  const REJECT_11128_RETRY_DELAY_MS = 900
+  const REJECT_11128_RETRY_MAX = 1
+  const REJECT_11128_RETRY_DELAY_MS = 200
+  // 11128 换 Key 的总时长上限。预算放到「走遍整个池」后，最坏情况是
+  // 9 个 Key × 每个 4~6 秒 = 50 秒以上，而客户端一般 60~120 秒就超时了。
+  // 超过这个上限就认输并透传真实错误，不能让请求无限挂着。
+  const REJECT_11128_TOTAL_BUDGET_MS = toMs(process.env.REJECT_11128_TOTAL_BUDGET_MS, 45000)
+  let first11128At = 0
 
   /**
    * 11128 的内容级兜底：把 system 换成中性文本，重新序列化请求体。
@@ -1219,7 +1234,15 @@ async function forwardWithFailover(provider, kind, body, res) {
       // 透传路径（流式/非流式）行为与原逻辑完全一致。
       const sawAccountReject = attempts.some((a) => a.includes('账号级拒绝'))
       const rejectTried = attempts.filter((a) => a.includes('账号级拒绝')).length
-      const rejectBudgetLeft = rejectTried < ACCOUNT_REJECT_RETRY_MAX
+      // 11128 是腾讯侧的周期性间歇拦截（与请求本身无关，见 ACCOUNT_REJECT_RETRY_MAX
+      // 上面的实测记录），所以它的预算放到「能走遍整个 Key 池」——每个 Key 走不同
+      // 代理 IP，多试几个才可能跨过窗口。11140 是真账号限制，维持 3 次即可。
+      const rejectBudget = rejectCode === 11128
+        ? Math.max(ACCOUNT_REJECT_RETRY_MAX, keys.length)
+        : ACCOUNT_REJECT_RETRY_MAX
+      if (rejectCode === 11128 && !first11128At) first11128At = Date.now()
+      const within11128Budget = !first11128At || Date.now() - first11128At < REJECT_11128_TOTAL_BUDGET_MS
+      const rejectBudgetLeft = rejectTried < rejectBudget && within11128Budget
       // 同一个 Key 正在做 11128 原地重试：这条路径不往 attempts 里写「账号级拒绝」
       // （否则会白白吃掉换 Key 的预算），所以必须单独放行，否则第二轮进不了下面
       // 读 body 的分支 → accountReject 判不出来 → 直接把 400 透传给客户端。

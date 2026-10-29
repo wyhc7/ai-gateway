@@ -244,8 +244,10 @@ test('上游账号级拒绝 11128 先原地重试，撞满后换 Key，最终成
   // 前 3 次都落在同一个 Key 上（原地重试），所以只有它记下 11128。
   // 这跟旧契约（每次 11128 都换 Key、3 个 Key 各记一次）不同，是有意的：
   // 窗口是按 IP 算的，换 Key 只是把同一个窗口白撞到别的账号上。
+  // 11128 的路径现在是：原地重试 1 次 → 仍失败就换 Key（各 Key 走不同代理 IP，
+  // 换 IP 才是跨过腾讯周期性窗口的实际手段）。所以会有 2 个 Key 各被撞过一次。
   const rejected = keys.filter((k) => k.last_error && k.last_error.includes('11128'))
-  assert.equal(rejected.length, 1, '11128 应集中在被重试的那个 Key 上，而不是扩散到全池')
+  assert.equal(rejected.length, 2, '11128 会撞到 2 个 Key（原地重试 1 次后才换号），而不是扩散到全池')
   assert.ok(
     keys.filter((k) => k.cooldown_until).length === 0,
     '11128 不该冷却 Key：窗口几秒就过，冷却反而把平台多冻一会儿'
