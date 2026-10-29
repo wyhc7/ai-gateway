@@ -446,6 +446,9 @@ app.put('/api/providers/:id', (req, res) => {
   if (base_url !== undefined) p.base_url = base_url
   if (protocol !== undefined) p.protocol = protocol
   if (enabled !== undefined) p.enabled = Boolean(enabled)
+  // 平台级出站代理：整个平台的 Key 共用一个出口。空串 = 清空（回直连），
+  // undefined = 不动——同 Key 级语义，别让改个名字顺手清掉代理配置。
+  if (req.body.proxy !== undefined) p.proxy = String(req.body.proxy || '').trim()
   if (extra_headers !== undefined) p.extra_headers = extra_headers
   // image_only 是只增不减的锁：只生图平台在编辑表单里被拖进文本模型，
   // 也在这里被剔掉。允许关掉它等于给「只生图」留后门，不提供这个开关。
@@ -545,10 +548,14 @@ app.put('/api/providers/:id/keys/:keyId', (req, res) => {
   if (!p) return res.status(404).json({ error: { message: '平台不存在' } })
   const key = p.keys.find((k) => k.id === req.params.keyId)
   if (!key) return res.status(404).json({ error: { message: 'Key 不存在' } })
-  const { api_key, name, enabled, access_token, refresh_token, expires_in, account_id, email } = req.body
+  const { api_key, name, enabled, access_token, refresh_token, expires_in, account_id, email, proxy } = req.body
   if (api_key !== undefined && api_key) key.api_key = api_key
   if (name !== undefined) key.name = name
   if (enabled !== undefined) key.enabled = Boolean(enabled)
+  // 出站代理：让这个账号从指定 IP 出去。上游按出口 IP 做风控，所以是账号级配置。
+  // 传空串 = 清空（回到直连），undefined = 不动。两种语义要分开，
+  // 否则「只想改个名字」会把已配好的代理顺手抹掉。
+  if (proxy !== undefined) key.proxy = String(proxy || '').trim()
   if (key.type === 'oauth') {
     if (access_token) key.access_token = access_token
     if (refresh_token) key.refresh_token = refresh_token
