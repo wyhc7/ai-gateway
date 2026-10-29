@@ -8,6 +8,7 @@ import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexA
 import { TEMPLATES } from './templates.js'
 import { isWorkbuddyProtocol, workbuddyHeaders, workbuddyChatBaseFor, shapeWorkbuddyBody, workbuddyRealmFor, neutralizeWorkbuddySystem, collectWorkbuddySystemText } from './workbuddy-lane.js'
 import { fetchWorkbuddyCatalog, mergeWorkbuddyCatalogs } from './workbuddy-catalog.js'
+import { writeFileSync } from 'node:fs'
 import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
 import { filterModelsForProvider, IMAGE_ONLY_FALLBACK_MODELS } from './providers-image-only.js'
 
@@ -1120,6 +1121,15 @@ async function forwardWithFailover(provider, kind, body, res) {
             ` stream=${b.stream} max_tokens=${b.max_tokens ?? '-'}`
           )
           if (resp.status === 400) {
+            // 把完整请求体落盘：这是复现 11128 的唯一精确素材。
+            // 只用构造的近似请求测过全是 200，说明触发条件藏在真实内容里
+            //（DSH 那 77 个工具的真实 schema / 27KB system）。
+            // 写 /tmp、文件名带时间戳，排查完人工删除；不进仓库也不进 config。
+            try {
+              const dumpPath = '/tmp/wb11128-' + Date.now() + '.json'
+              writeFileSync(dumpPath, typeof upstreamBody === 'string' ? upstreamBody : JSON.stringify(upstreamBody))
+              console.warn('[11128 落盘] 完整请求体已保存: ' + dumpPath)
+            } catch { /* 落盘失败不影响主流程 */ }
             const sent = buildHeaders(provider, plan, token, key)
             const shown = Object.fromEntries(Object.entries(sent).map(([k2, v]) => [
               k2,
