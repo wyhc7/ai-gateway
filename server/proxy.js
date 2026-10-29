@@ -1080,16 +1080,30 @@ async function forwardWithFailover(provider, kind, body, res) {
       // 11128 反复排查时，靠猜请求体与请求头一直对不上线上现象——只有把实际
       // 发出去的那一份留证才能定位。Authorization 与 token 一律脱敏。
       // 用 WORKBUDDY_DEBUG_DUMP=1 打开，排查完关掉。
-      if (resp.status === 400 && process.env.WORKBUDDY_DEBUG_DUMP === '1' && isWorkbuddyProtocol(provider.protocol)) {
+      if (process.env.WORKBUDDY_DEBUG_DUMP === '1' && isWorkbuddyProtocol(provider.protocol) && kind === 'chat') {
         try {
-          const sent = buildHeaders(provider, plan, token, key)
-          const shown = Object.fromEntries(Object.entries(sent).map(([k2, v]) => [
-            k2,
-            /authorization|token|api-key|cookie/i.test(k2) ? '***masked***' : String(v).slice(0, 120)
-          ]))
-          console.warn(`[11128 dump] url=${upstream}`)
-          console.warn(`[11128 dump] headers=${JSON.stringify(shown)}`)
-          console.warn(`[11128 dump] body=${String(upstreamBody).slice(0, 2500)}`)
+          const b = typeof upstreamBody === 'string' ? JSON.parse(upstreamBody) : (upstreamBody || {})
+          const msgs = Array.isArray(b.messages) ? b.messages : []
+          const hasImage = msgs.some((m) => Array.isArray(m?.content))
+          const sysLen = msgs
+            .filter((m) => String(m?.role || '').toLowerCase() === 'system')
+            .reduce((n, m) => n + String(m?.content || '').length, 0)
+          // 摘要行：成功与失败都记，靠 status 对比才能看出「哪种请求会被拦」
+          console.warn(
+            `[wb-dump] status=${resp.status} model=${b.model} msgs=${msgs.length} sysLen=${sysLen}` +
+            ` tools=${(b.tools || []).length} multi=${hasImage} bytes=${String(upstreamBody).length}` +
+            ` stream=${b.stream} max_tokens=${b.max_tokens ?? '-'}`
+          )
+          if (resp.status === 400) {
+            const sent = buildHeaders(provider, plan, token, key)
+            const shown = Object.fromEntries(Object.entries(sent).map(([k2, v]) => [
+              k2,
+              /authorization|token|api-key|cookie/i.test(k2) ? '***masked***' : String(v).slice(0, 120)
+            ]))
+            console.warn(`[wb-dump] 400 url=${upstream}`)
+            console.warn(`[wb-dump] 400 headers=${JSON.stringify(shown)}`)
+            console.warn(`[wb-dump] 400 body=${String(upstreamBody).slice(0, 3000)}`)
+          }
         } catch { /* 诊断失败不影响主流程 */ }
       }
       // 已收到响应头，改为总时长超时，长推理模型的持续输出不受影响
