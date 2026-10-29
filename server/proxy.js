@@ -1102,6 +1102,20 @@ async function forwardWithFailover(provider, kind, body, res) {
         body: upstreamBody,
         signal: controller.signal,
       })
+      // 11128 时落盘完整请求体 —— 这是唯一能精确复现的素材。
+      // 不挂在 WORKBUDDY_DEBUG_DUMP 开关下：那个开关是给人看日志用的，
+      // 而这份文件是「等下一次 11128 自己掉下来」的证据，必须每次都存。
+      // 只用构造的近似请求测过全是 200，说明触发条件藏在真实内容里
+      //（DSH 发的那 77 个工具的真实 schema、27KB 的 system）。
+      // 写 /tmp、文件名带时间戳；排查完人工删除，不进仓库也不进 config。
+      if (resp.status === 400 && isWorkbuddyProtocol(provider.protocol) && kind === 'chat') {
+        try {
+          const dumpPath = '/tmp/wb11128-' + Date.now() + '.json'
+          writeFileSync(dumpPath, typeof upstreamBody === 'string' ? upstreamBody : JSON.stringify(upstreamBody))
+          console.warn('[11128 落盘] 完整请求体已保存: ' + dumpPath)
+        } catch { /* 落盘失败不影响主流程 */ }
+      }
+
       // 诊断开关：只在上游回 400 时把「我方真实发出的请求」打出来。
       // 11128 反复排查时，靠猜请求体与请求头一直对不上线上现象——只有把实际
       // 发出去的那一份留证才能定位。Authorization 与 token 一律脱敏。
@@ -1121,15 +1135,7 @@ async function forwardWithFailover(provider, kind, body, res) {
             ` stream=${b.stream} max_tokens=${b.max_tokens ?? '-'}`
           )
           if (resp.status === 400) {
-            // 把完整请求体落盘：这是复现 11128 的唯一精确素材。
-            // 只用构造的近似请求测过全是 200，说明触发条件藏在真实内容里
-            //（DSH 那 77 个工具的真实 schema / 27KB system）。
-            // 写 /tmp、文件名带时间戳，排查完人工删除；不进仓库也不进 config。
-            try {
-              const dumpPath = '/tmp/wb11128-' + Date.now() + '.json'
-              writeFileSync(dumpPath, typeof upstreamBody === 'string' ? upstreamBody : JSON.stringify(upstreamBody))
-              console.warn('[11128 落盘] 完整请求体已保存: ' + dumpPath)
-            } catch { /* 落盘失败不影响主流程 */ }
+
             const sent = buildHeaders(provider, plan, token, key)
             const shown = Object.fromEntries(Object.entries(sent).map(([k2, v]) => [
               k2,
