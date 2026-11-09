@@ -88,6 +88,10 @@ export function ruleMatches(rule, modelId) {
 
 // 判断一把客户端 Key 能否使用某个模型。
 // 语义：denied 优先于 allowed；allowed 为空数组 = 不限制。
+//
+// 账号级授权在这里兜底：Key 本身不限制时，再看它所属账号被授权的模型。
+// 这样「管理员在账号上勾了什么」对用户自助生成的 Key 立刻生效，
+// 不需要用户删了 Key 重建，也不需要管理员逐个 Key 去改。
 export function modelAllowed(auth, modelId) {
   if (!auth || auth.unrestricted !== false) return { allowed: true }
   const id = String(modelId || '').trim()
@@ -98,11 +102,22 @@ export function modelAllowed(auth, modelId) {
     if (ruleMatches(rule, id)) return { allowed: false, code: 'model_denied', rule }
   }
   const allowed = auth.allowed_models || []
-  if (allowed.length === 0) return { allowed: true }
-  for (const rule of allowed) {
-    if (ruleMatches(rule, id)) return { allowed: true }
+  if (allowed.length > 0) {
+    for (const rule of allowed) {
+      if (ruleMatches(rule, id)) return { allowed: true }
+    }
+    return { allowed: false, code: 'model_forbidden' }
   }
-  return { allowed: false, code: 'model_forbidden' }
+
+  // Key 层不限制时，再看账号层。空数组同样表示不限制。
+  const acct = auth.account_allowed_models || []
+  if (acct.length > 0) {
+    for (const rule of acct) {
+      if (ruleMatches(rule, id)) return { allowed: true }
+    }
+    return { allowed: false, code: 'model_forbidden_account' }
+  }
+  return { allowed: true }
 }
 
 // 按 Key 的模型权限裁剪模型列表（/v1/models 用）。
@@ -245,11 +260,24 @@ function authOfKey(k) {
     unrestricted: false,
     allowed_models: k.allowed_models || [],
     denied_models: k.denied_models || [],
+    // 账号级模型授权：管理员在「账号管理」里给这个用户勾选的可用模型。
+    // 每次请求现查而不是写进 Key，这样管理员改完立刻生效，
+    // 不用等用户重建 Key。查不到账号就返回空数组（= 不额外限制）。
+    account_allowed_models: accountModelScopeOf(k.owner_account_id),
     // 必须是 state.api_keys 里的原对象引用：recordUsage 直接改它的 usage/last_used_at，
     // 换成副本用量统计就落不了盘。owner_account_id 由 buildKey/ensureApiKeys 保证存在，
     // 老配置没有时读到 undefined，billing 侧按「未绑定」处理。
     _key: k
   }
+}
+
+// 账号被授权的模型清单。空数组 = 不限制（与 Key 层语义保持一致）。
+// 无主 Key（主密钥、老 Key）与账号不存在都返回空数组，行为与改动前一致。
+function accountModelScopeOf(accountId) {
+  if (!accountId) return []
+  const account = (state.accounts || []).find((a) => a.id === accountId)
+  const list = account?.allowed_models
+  return Array.isArray(list) ? list : []
 }
 
 // 解析请求携带的令牌。返回 { ok, auth } 或 { ok:false, status, message }，

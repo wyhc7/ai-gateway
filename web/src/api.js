@@ -81,6 +81,8 @@ export const api = {
 
   // 账号管理（仅管理员）
   getAccounts: () => request('/api/accounts'),
+  // 可分配模型全集：账号编辑框的「可用模型」候选就来自这里
+  getModelCatalog: () => request('/api/accounts/model-catalog'),
   createAccount: (data) => request('/api/accounts', { method: 'POST', body: JSON.stringify(data) }),
   updateAccount: (id, data) => request(`/api/accounts/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteAccount: (id) => request(`/api/accounts/${id}`, { method: 'DELETE' }),

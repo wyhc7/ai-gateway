@@ -1939,23 +1939,30 @@ function modelEntryScore(m, label) {
 // 必须按调用方的 Key 权限裁剪：这份列表是客户端挑选模型的唯一依据，
 // 若把没授权的模型也列出来，用户只会得到一串必然 403 的名字，
 // 而且从调用方视角根本看不出是权限问题还是平台问题。
+//
+// 两种口径：
+//   · 管理员/主密钥（unrestricted）—— id 带倍率后缀（`GLM-5.3 · x0.79`），
+//     因为管理端要一眼看出各家报价，且同名不同倍率的两个来源要能分别点名。
+//   · 普通用户（绑定了账号的 Key）—— id 就是干净的模型 id（`GLM-5.3`）。
+//     用户不该看到平台内部的倍率账；同一个 id 在多个来源出现时合并成一条，
+//     由路由层按可用性自动挑，用户点名 `model: "GLM-5.3"` 即可。
 export function handleModels(req, res) {
-  // 按**输出 label**（`GLM-5.3 · x0.79`）去重，不按真实 id：国内外平台
-  // 常有同名 id 不同倍率的模型（国际版 deepseek-v4.1-flash 是 x0.00，
-  // 国内版同名是 x0.11），按真实 id 去重会把其中一条整条吞掉，
-  // 用户直接拉不到。倍率不同就是两个可选项，都该出现在列表里。
+  const restricted = Boolean(req?.apiAuth && req.apiAuth.unrestricted === false)
+  // 受限视角按真实 id 去重；管理视角按 label 去重。
+  // 理由：管理端要能区分「国际版 x0.00」与「国内版 x0.11」两个来源，
+  // 而用户手里只有一个名字，露出两条一模一样的 id 只会让选择变乱。
   const best = new Map()
   for (const p of state.providers) {
     if (!p.enabled) continue
     for (const m of p.models) {
       if (!modelAllowed(req?.apiAuth, m.id).allowed) continue
-      // id 直接带倍率（`GLM-5.3 · x0.79`）：客户端拉清单一律拿 id 当
-      // 显示名，倍率写在 name 里它们根本不看。调用时 resolveTarget 会
-      // 把后缀剥掉、按显示名找回真实 id，路由不受影响。
       const label = publicModelName(m)
-      const entry = { id: label, object: 'model', owned_by: m.owned_by || p.name, provider: p.id, provider_name: p.name, name: label }
-      const prev = best.get(label)
-      if (!prev || modelEntryScore(m, label) > prev.score) best.set(label, { ...entry, score: modelEntryScore(m, label) })
+      const key = restricted ? m.id : label
+      const entry = restricted
+        ? { id: m.id, object: 'model', owned_by: m.owned_by || p.name, provider: p.id, provider_name: p.name, name: m.id }
+        : { id: label, object: 'model', owned_by: m.owned_by || p.name, provider: p.id, provider_name: p.name, name: label }
+      const prev = best.get(key)
+      if (!prev || modelEntryScore(m, label) > prev.score) best.set(key, { ...entry, score: modelEntryScore(m, label) })
     }
   }
   const list = [...best.values()].map(({ score, ...e }) => e)

@@ -532,14 +532,40 @@ app.post('/api/accounts', accountRoute((req, res) => {
     username: req.body?.username,
     password: req.body?.password,
     role: req.body?.role || 'user',
-    note: req.body?.note || ''
+    note: req.body?.note || '',
+    allowed_models: req.body?.allowed_models
   })
   addLog({ type: 'auth', method: 'POST', path: '/api/accounts', status: 200, detail: `创建账号 ${account.username}（${account.role}）` })
   res.json({ account })
 }))
 
+// 管理员能分配的模型全集：账号编辑框的勾选列表就来自这里。
+// 不复用 /v1/models——那个要按调用方权限裁剪，管理员要的是「所有可能在售的」。
+app.get('/api/accounts/model-catalog', accountRoute((req, res) => {
+  const seen = new Set()
+  const data = []
+  for (const p of state.providers || []) {
+    if (!p.enabled) continue
+    for (const m of p.models || []) {
+      const id = String(m?.id || '').trim()
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      data.push({ id, name: String(m?.name || id), provider: p.name })
+    }
+  }
+  data.sort((a, b) => a.id.localeCompare(b.id))
+  res.json({ models: data, total: data.length })
+}))
+
 app.put('/api/accounts/:id', accountRoute((req, res) => {
   const account = updateAccount(req.params.id, req.body || {}, req.auth.account?.id)
+  // 模型授权有变动就单独记一条，方便事后查「谁把谁的模型关了」
+  if (req.body?.allowed_models !== undefined) {
+    const scope = account.allowed_models.length === 0
+      ? '不限模型'
+      : `限 ${account.allowed_models.length} 个模型`
+    addLog({ type: 'auth', method: 'PUT', path: '/api/accounts/:id', status: 200, detail: `更新账号 ${account.username} 的模型授权：${scope}` })
+  }
   addLog({ type: 'auth', method: 'PUT', path: '/api/accounts/:id', status: 200, detail: `更新账号 ${account.username}：${account.role} / ${account.enabled ? '启用' : '停用'}` })
   res.json({ account })
 }))

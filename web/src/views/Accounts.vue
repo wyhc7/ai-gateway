@@ -59,6 +59,7 @@
               <th style="width: 118px">角色</th>
               <th style="width: 110px">状态</th>
               <th style="width: 130px" class="right">剩余余额</th>
+              <th style="width: 120px">模型授权</th>
               <th style="width: 132px">创建时间</th>
               <th style="width: 132px">最近登录</th>
               <th>备注</th>
@@ -81,6 +82,14 @@
               </td>
               <td class="right">
                 <span class="balance-cell mono" :class="{ alarm: (a.balance_micro || 0) <= 0 }">{{ formatBalance(a.balance_micro) }}</span>
+              </td>
+              <td>
+                <span
+                  :class="['badge', (a.allowed_models || []).length === 0 ? 'badge-gray' : 'badge-amber']"
+                  :title="(a.allowed_models || []).length === 0 ? '平台全部模型都可调用' : (a.allowed_models || []).join('\n')"
+                >
+                  {{ (a.allowed_models || []).length === 0 ? '不限' : `限 ${a.allowed_models.length} 个` }}
+                </span>
               </td>
               <td class="acc-note">{{ formatTime(a.created_at) }}</td>
               <td class="acc-note">{{ a.last_login_at ? formatTime(a.last_login_at) : '从未登录' }}</td>
@@ -131,6 +140,50 @@
 
         <el-form-item label="状态">
           <el-switch v-model="form.enabled" active-text="启用" inactive-text="停用" :disabled="editing?.id === currentAccountId" />
+        </el-form-item>
+
+        <!-- 模型授权：空 = 不限。用户可以调用的一切模型都受这里约束，
+             包括他自己在「我的仪表盘」里生成的 Key。 -->
+        <el-form-item label="可用模型">
+          <div class="model-scope">
+            <el-radio-group v-model="form.modelScope" size="small">
+              <el-radio-button value="all">不限模型</el-radio-button>
+              <el-radio-button value="restricted">只允许指定模型</el-radio-button>
+            </el-radio-group>
+            <div class="field-note">
+              「不限」= 平台当前在售的全部模型都能调；改成「只允许指定」后，
+              该账号名下的调用密钥只能使用下面勾选的模型，其余一律 403。
+            </div>
+            <div v-if="form.modelScope === 'restricted'" class="model-picker">
+              <el-select
+                v-model="form.allowed_models"
+                multiple
+                filterable
+                allow-create
+                default-first-option
+                collapse-tags
+                collapse-tags-tooltip
+                :max-collapse-tags="4"
+                placeholder="搜索或输入模型 id，可手填通配规则（如 gpt-*）"
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="m in modelCatalog"
+                  :key="m.id"
+                  :label="m.id"
+                  :value="m.id"
+                >
+                  <span class="model-opt-id">{{ m.id }}</span>
+                  <span class="model-opt-provider">{{ m.provider }}</span>
+                </el-option>
+              </el-select>
+              <div class="field-note">
+                已勾 <strong>{{ form.allowed_models.length }}</strong> 个。
+                支持手填通配：<code class="mono">*</code> 全放行、<code class="mono">gpt-*</code> 前缀、
+                <code class="mono">*-free</code> 后缀。
+              </div>
+            </div>
+          </div>
         </el-form-item>
 
         <el-form-item label="备注">
@@ -213,6 +266,9 @@ const microsPerUnit = ref(1_000_000)
 // 避免出现「开关显示开着但服务端其实关着」的错位。
 const registrationEnabled = ref(false)
 const regBusy = ref(false)
+// 账号编辑框里的「可用模型」候选清单。管理员视角要的是全集，
+// 所以走 /api/accounts/model-catalog，不用按 Key 权限裁剪的 /v1/models。
+const modelCatalog = ref([])
 
 const dialogVisible = ref(false)
 const dialogError = ref('')
@@ -266,6 +322,12 @@ async function load() {
     unit.value = list.pricing?.unit || '元'
     microsPerUnit.value = Number(list.pricing?.micros_per_unit) || 1_000_000
     registrationEnabled.value = Boolean(reg?.enabled)
+    // 模型候选：失败就留空，选择器仍支持手填 id / 通配规则
+    try {
+      modelCatalog.value = (await api.getModelCatalog())?.models || []
+    } catch {
+      modelCatalog.value = []
+    }
   } catch (e) {
     notifyError(e, '加载账号列表失败')
   } finally {
@@ -292,7 +354,10 @@ async function toggleRegistration(next) {
 }
 
 function clearForm() {
-  form.value = { username: '', password: '', confirm: '', role: 'user', enabled: true, note: '' }
+  form.value = {
+    username: '', password: '', confirm: '', role: 'user', enabled: true, note: '',
+    modelScope: 'all', allowed_models: []
+  }
   dialogError.value = ''
 }
 
@@ -310,7 +375,10 @@ function openEdit(a) {
     confirm: '',
     role: a.role,
     enabled: a.enabled,
-    note: a.note || ''
+    note: a.note || '',
+    // 空数组 = 不限模型；有内容就进「只允许指定」模式并回填勾选
+    modelScope: (a.allowed_models || []).length === 0 ? 'all' : 'restricted',
+    allowed_models: [...(a.allowed_models || [])]
   }
   dialogError.value = ''
   dialogVisible.value = true
@@ -326,11 +394,19 @@ async function submit() {
   }
   saving.value = true
   try {
+    // 「不限模型」= 空数组；「只允许指定」= 勾选/手填的那一份
+    const allowedModels = f.modelScope === 'restricted' ? f.allowed_models : []
     if (editing.value) {
-      await api.updateAccount(editing.value.id, { role: f.role, enabled: f.enabled, note: f.note.trim() })
+      await api.updateAccount(editing.value.id, {
+        role: f.role, enabled: f.enabled, note: f.note.trim(),
+        allowed_models: allowedModels
+      })
       ElMessage.success('账号已更新')
     } else {
-      await api.createAccount({ username: f.username.trim(), password: f.password, role: f.role, note: f.note.trim() })
+      await api.createAccount({
+        username: f.username.trim(), password: f.password, role: f.role, note: f.note.trim(),
+        allowed_models: allowedModels
+      })
       ElMessage.success('账号已创建')
     }
     dialogVisible.value = false
@@ -506,6 +582,21 @@ onMounted(load)
   line-height: 1.65;
 }
 .reg-note { margin-top: -4px; }
+
+/* 模型授权选择器：单选按钮 + 一个多选下拉，竖向排开 */
+.model-scope { width: 100%; }
+.model-scope .field-note { margin-top: 6px; }
+.model-picker { margin-top: 10px; }
+.model-opt-id {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12.5px;
+}
+.model-opt-provider {
+  float: right;
+  margin-left: 16px;
+  font-size: 11.5px;
+  color: var(--ink-3);
+}
 
 .acc-name { font-size: 13.5px; }
 .acc-note { font-size: 11.5px; color: var(--ink-3); margin-top: 2px; }

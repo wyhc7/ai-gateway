@@ -159,8 +159,35 @@ export function serializeAccount(a) {
     balance_micro: Math.trunc(Number(a.balance_micro) || 0),
     created_at: Number(a.created_at) || 0,
     last_login_at: Number(a.last_login_at) || 0,
-    password_version: Number(a.password_version) || 1
+    password_version: Number(a.password_version) || 1,
+    // 账号级模型授权：管理员给这个账号放行的模型清单。
+    // 空数组 = 不限制（沿用「空即全开」的既有语义，老账号升级后行为不变）。
+    allowed_models: normalizeModelRules(a.allowed_models),
+    // 给前端用的可读摘要：'全部模型' 或 '限 N 个'
+    model_scope: normalizeModelRules(a.allowed_models).length === 0 ? 'all' : 'restricted'
   }
+}
+
+// 账号级模型清单的清洗：去空白、去重（忽略大小写）、截断超长项。
+// 与 api-keys.js 的 normalizeRules 同一套规则，但这里不能 import 那个模块
+// （api-keys 已经 import accounts，反向再引会成环），所以就地实现一份最小版。
+const MAX_ACCOUNT_MODELS = 500
+const MAX_MODEL_RULE_LEN = 200
+
+export function normalizeModelRules(list) {
+  if (!Array.isArray(list)) return []
+  const seen = new Set()
+  const out = []
+  for (const raw of list) {
+    const rule = String(raw ?? '').trim().slice(0, MAX_MODEL_RULE_LEN)
+    if (!rule) continue
+    const k = rule.toLowerCase()
+    if (seen.has(k)) continue
+    seen.add(k)
+    out.push(rule)
+    if (out.length >= MAX_ACCOUNT_MODELS) break
+  }
+  return out
 }
 
 export function authStatus() {
@@ -287,7 +314,7 @@ export function listAccounts() {
   return accountsArray().map(serializeAccount)
 }
 
-export function createAccount({ username, password, role = 'user', note = '' }) {
+export function createAccount({ username, password, role = 'user', note = '', allowed_models }) {
   const name = validateUsername(username)
   const pw = validatePassword(password)
   if (!['admin', 'user'].includes(role)) throw fail(400, '角色只能是 admin 或 user')
@@ -305,6 +332,8 @@ export function createAccount({ username, password, role = 'user', note = '' }) 
     note: String(note || '').slice(0, 200),
     // 新账号初始余额为 0、初始无密钥：用户面板显示空态，充值并生成密钥后才能调用
     balance_micro: 0,
+    // 账号级模型授权，空数组 = 不限（管理员可后续在编辑框里收窄）
+    allowed_models: normalizeModelRules(allowed_models),
     created_at: Date.now(),
     last_login_at: 0
   }
@@ -414,6 +443,10 @@ export function updateAccount(id, patch, actorId) {
   account.role = nextRole
   account.enabled = nextEnabled
   if (patch.note !== undefined) account.note = String(patch.note || '').slice(0, 200)
+  // 模型授权：传了才动。空数组 = 恢复「不限模型」，这是显式操作，不能靠漏传实现
+  if (patch.allowed_models !== undefined) {
+    account.allowed_models = normalizeModelRules(patch.allowed_models)
+  }
   persistImmediate()
   return serializeAccount(account)
 }
