@@ -11,6 +11,7 @@
 // 注意各平台的 api_key 字段仍是明文存储的（那才是真正值钱的东西），别只盯着这里。
 import crypto from 'node:crypto'
 import { state, persist, persistImmediate, genId } from './store.js'
+import { consumeForUsage } from './billing.js'
 
 // 客户端 Key 前缀。带前缀是为了在日志/配置里一眼认出这是网关的 Key，
 // 而不是某个上游平台的 Key。
@@ -136,6 +137,8 @@ export function serializeApiKey(k) {
       : (k.allowed_models.length === 1 && k.allowed_models[0] === '*' ? 'all' : 'restricted'),
     expires_at: Number(k.expires_at) || 0,
     note: k.note || '',
+    // 归属账号：用户面板只显示自己的密钥，管理员面板也能一眼看出哪把是账号自助的
+    owner_account_id: typeof k.owner_account_id === 'string' ? k.owner_account_id : '',
     created_at: k.created_at || 0,
     last_used_at: k.last_used_at || 0,
     usage: {
@@ -158,6 +161,7 @@ function buildKey(input = {}) {
     denied_models: normalizeRules(input.denied_models),
     expires_at: Number(input.expires_at) || 0,
     note: String(input.note || '').slice(0, 500),
+    owner_account_id: typeof input.owner_account_id === 'string' ? input.owner_account_id : '',
     created_at: Date.now(),
     last_used_at: 0,
     usage: { requests: 0, failed: 0, tokens: 0 },
@@ -241,6 +245,9 @@ function authOfKey(k) {
     unrestricted: false,
     allowed_models: k.allowed_models || [],
     denied_models: k.denied_models || [],
+    // 必须是 state.api_keys 里的原对象引用：recordUsage 直接改它的 usage/last_used_at，
+    // 换成副本用量统计就落不了盘。owner_account_id 由 buildKey/ensureApiKeys 保证存在，
+    // 老配置没有时读到 undefined，billing 侧按「未绑定」处理。
     _key: k
   }
 }
@@ -274,7 +281,9 @@ export function resolveAuth(token) {
 }
 
 // 记录用量。批量经 store 的 scheduleFlush 落盘，不在请求路径上做同步写。
-export function recordUsage(auth, { tokens = 0, ok = true } = {}) {
+// 如果这把 Key 绑定了用户账号，同时按真实 token 用量结算余额（见 billing.js）；
+// 失败请求不扣费，主密钥与未绑定账号的老 Key 完全不受影响。
+export function recordUsage(auth, { tokens = 0, ok = true, model = '' } = {}) {
   if (!auth || auth.kind !== 'key' || !auth._key) return
   const key = auth._key
   key.usage = key.usage || { requests: 0, failed: 0, tokens: 0 }
@@ -284,6 +293,65 @@ export function recordUsage(auth, { tokens = 0, ok = true } = {}) {
   if (n > 0) key.usage.tokens += n
   key.last_used_at = Date.now()
   persist()
+  consumeForUsage(auth, { tokens: n, ok, model })
+}
+
+// ---------------------------------------------------------------------------
+// 用户自助密钥
+//
+// 每个 user 账号最多一把自助 Key：「最初无密钥」就是这里查不到记录。
+// 复用同一套 api_keys 存储与 resolveAuth 链路，只是额外带上 owner_account_id，
+// 于是计费、余额门禁、模型权限、停用/过期全都能复用，不另起一套鉴权。
+// 明文同样只在创建/轮换时返回一次，config.json 里只有 SHA-256 摘要。
+// ---------------------------------------------------------------------------
+
+export function serializeUserKey(k) {
+  const base = serializeApiKey(k)
+  return { ...base, owner_account_id: k.owner_account_id || '' }
+}
+
+export function userKeysOf(accountId) {
+  if (!accountId) return []
+  return (state.api_keys || [])
+    .filter((k) => k.owner_account_id === accountId)
+    .map(serializeUserKey)
+    .sort((a, b) => b.created_at - a.created_at)
+}
+
+export function userKeyOf(accountId, id) {
+  if (!accountId || !id) return null
+  const k = (state.api_keys || []).find((x) => x.id === id && x.owner_account_id === accountId)
+  return k ? serializeUserKey(k) : null
+}
+
+// 一个账号最多一把自助 Key：重复点「生成」不给第二把，避免余额归属混乱。
+export function createUserKey(accountId, { name = '', username = '' } = {}) {
+  if (!accountId) throw Object.assign(new Error('缺少账号信息'), { status: 400 })
+  const existing = (state.api_keys || []).find((k) => k.owner_account_id === accountId)
+  if (existing) throw Object.assign(new Error('该账号已有调用密钥，可直接轮换或删除后再生成'), { status: 409 })
+  const label = String(name || '').trim() || `${username || '用户'}的调用密钥`
+  const { key, token } = createApiKey({
+    name: label,
+    owner_account_id: accountId,
+    allowed_models: [],
+    denied_models: [],
+    enabled: true,
+    note: '用户面板自助生成，按余额计费'
+  })
+  return { key: serializeUserKey(getApiKey(key.id)), token }
+}
+
+export function rotateUserKey(accountId, id) {
+  const owned = (state.api_keys || []).find((k) => k.id === id && k.owner_account_id === accountId)
+  if (!owned) return null
+  const out = rotateApiKey(id)
+  return out ? { key: serializeUserKey(getApiKey(id)), token: out.token } : null
+}
+
+export function deleteUserKey(accountId, id) {
+  const owned = (state.api_keys || []).find((k) => k.id === id && k.owner_account_id === accountId)
+  if (!owned) return false
+  return deleteApiKey(id)
 }
 
 // 管理界面选模型用的候选池：所有启用平台的模型并集（带来源平台名，便于分组展示）

@@ -176,7 +176,7 @@ test('账号管理：创建 user、角色隔离 403、停用后令牌失效、�
   assert.equal(userLogin.status, 200)
   const userToken = userLogin.body.token
 
-  // 用户面板尚未开放：普通用户只能碰自助端点，其余管理接口 403
+  // 普通用户只能碰自助端点与 /api/user/*，其余管理接口 403
   assert.equal((await call('/api/auth/me', { token: userToken })).status, 200)
   assert.equal((await call('/api/providers', { token: userToken })).status, 403)
   assert.equal((await call('/api/accounts', { token: userToken })).status, 403)

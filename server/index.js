@@ -24,8 +24,23 @@ import {
   serializeApiKey,
   resolveAuth,
   modelPool,
-  filterModelsForAuth
+  filterModelsForAuth,
+  userKeysOf,
+  createUserKey,
+  rotateUserKey,
+  deleteUserKey
 } from './api-keys.js'
+import {
+  balanceGateError,
+  serializeBalance,
+  ledgerOf,
+  pricingInfo,
+  applyBalance,
+  parseAmountToMicro,
+  formatUnits,
+  billingConfig,
+  MICROS_PER_UNIT
+} from './billing.js'
 import { TEMPLATES } from './templates.js'
 import { SUBSCRIPTION_PLANS, findPlan } from './subscription-plans.js'
 import { filterModelsForProvider, isImageModel } from './providers-image-only.js'
@@ -291,6 +306,25 @@ app.use((req, res, next) => {
   next()
 })
 
+// 余额门禁：紧接网关鉴权之后，只拦「绑定用户账号且余额耗尽」的消耗型调用。
+// /models 是只读列表，永远放行 —— 否则余额为 0 的用户连可选模型都看不到，
+// 也没法知道该挑哪个。主密钥、升级前的老 Key 在 balanceGateError 里直接返回 null，
+// 老部署与 CI 脚本的行为一个字都不变。
+const CONSUMING_PATHS = new Set([
+  '/api/v1/chat/completions', '/v1/chat/completions',
+  '/api/v1/images/generations', '/v1/images/generations'
+])
+app.use((req, res, next) => {
+  if (!CONSUMING_PATHS.has(req.path)) return next()
+  const gate = balanceGateError(req.apiAuth)
+  if (!gate) return next()
+  const ownerId = req.apiAuth?._key?.owner_account_id
+  return res.status(gate.status).json({
+    error: { message: gate.message, type: gate.type },
+    balance: ownerId ? serializeBalance(ownerId) : null
+  })
+})
+
 // 管理端鉴权：除 /api/v1/*（网关调用，走网关 Key）与 /api/health（健康检查）外，
 // 所有管理接口都要过这道闸。三条通道，优先级从高到低：
 //   1) X-Admin-Key / Bearer <管理密钥> —— 保留通道：现有部署脚本、CI 测试、
@@ -303,7 +337,12 @@ const CHATGPT_OAUTH_CALLBACK_PATH = '/api/chatgpt-accounts/oauth/callback'
 const PUBLIC_AUTH_PATHS = new Set(['/api/auth/status', '/api/auth/setup', '/api/auth/login'])
 // 普通用户当前只能用这几个自助端点；用户面板还没做，控制台其余接口一律 403。
 // 角色数据先建好，等用户面板上线时把这道限制放开即可，不用再动账号表。
-const SELF_AUTH_PATHS = new Set(['/api/auth/me', '/api/auth/password', '/api/auth/logout'])
+const SELF_AUTH_PATHS = new Set([
+  '/api/auth/me', '/api/auth/password', '/api/auth/logout',
+  // 用户仪表盘：只读自己的余额/密钥/流水，以及自助密钥管理。
+  // 用前缀匹配而非枚举，见下方 USER_AUTH_PREFIXES。
+])
+const USER_AUTH_PREFIXES = ['/api/user/']
 
 function sessionTokenOf(req) {
   const header = req.headers['x-session-token']
@@ -335,8 +374,9 @@ app.use((req, res, next) => {
     const session = verifySession(token)
     if (session) {
       req.auth = { role: session.role, via: 'session', account: serializeAccount(session.account) }
-      if (session.role !== 'admin' && !SELF_AUTH_PATHS.has(req.path)) {
-        return res.status(403).json({ error: { message: '用户面板尚未开放，当前仅管理员可进入控制台' } })
+      const userAllowed = SELF_AUTH_PATHS.has(req.path) || USER_AUTH_PREFIXES.some((p) => req.path.startsWith(p))
+      if (session.role !== 'admin' && !userAllowed) {
+        return res.status(403).json({ error: { message: '仅管理员可进入管理控制台，普通用户请前往「我的仪表盘」' } })
       }
       return next()
     }
@@ -426,11 +466,12 @@ app.post('/api/auth/logout', accountRoute((req, res) => {
   res.json({ ok: true })
 }))
 
-// 账号管理：整组只给管理员，普通用户（角色数据已存在，面板待建）一律 403。
+// 账号管理：整组只给管理员，普通用户一律 403（他们的入口是 /api/user/*）。
 app.use('/api/accounts', requireAdmin)
 
 app.get('/api/accounts', accountRoute((req, res) => {
-  res.json({ accounts: listAccounts(), total: listAccounts().length, roles: authStatus().roles })
+  const list = listAccounts()
+  res.json({ accounts: list, total: list.length, roles: authStatus().roles, pricing: pricingInfo() })
 }))
 
 app.post('/api/accounts', accountRoute((req, res) => {
@@ -453,6 +494,9 @@ app.put('/api/accounts/:id', accountRoute((req, res) => {
 app.delete('/api/accounts/:id', accountRoute((req, res) => {
   const target = listAccounts().find((a) => a.id === req.params.id)
   const out = deleteAccount(req.params.id, req.auth.account?.id)
+  // 账号没了，它自助生成的调用密钥也要一起删：否则余额没人扣、门禁查不到账号，
+  // 会变成一把永远免费且无人认领的孤儿 Key。
+  for (const k of userKeysOf(req.params.id)) deleteUserKey(req.params.id, k.id)
   addLog({ type: 'auth', method: 'DELETE', path: '/api/accounts/:id', status: 200, detail: `删除账号 ${target?.username || req.params.id}` })
   res.json(out)
 }))
@@ -461,6 +505,111 @@ app.post('/api/accounts/:id/password', accountRoute((req, res) => {
   const account = resetAccountPassword(req.params.id, req.body?.new_password)
   addLog({ type: 'auth', method: 'POST', path: '/api/accounts/:id/password', status: 200, detail: `重置账号 ${account.username} 的密码（已签发的会话全部失效）` })
   res.json({ account })
+}))
+
+// 余额充值 / 扣减（管理员）。amount 用「点」为单位，也接受 amount_micro 直接传微点。
+// 传负数即为扣减；余额夹到 0，不会记成负数账。
+app.post('/api/accounts/:id/balance', accountRoute((req, res) => {
+  const id = req.params.id
+  const target = listAccounts().find((a) => a.id === id)
+  if (!target) throw Object.assign(new Error('账号不存在'), { status: 404 })
+  const amt = Number(req.body?.amount_micro)
+  const micro = req.body?.amount_micro !== undefined && Number.isFinite(amt)
+    ? Math.trunc(amt)
+    : parseAmountToMicro(req.body?.amount)
+  if (micro === null || micro === 0) throw Object.assign(new Error('请填写非零的充值/扣减金额'), { status: 400 })
+  const actor = req.auth.account?.username || 'admin-key'
+  const balance = applyBalance(id, {
+    amount_micro: micro,
+    type: micro > 0 ? 'topup' : 'adjust',
+    note: String(req.body?.note || (micro > 0 ? '管理员充值' : '管理员扣减')).slice(0, 200),
+    actor
+  })
+  addLog({
+    type: 'billing', method: 'POST', path: '/api/accounts/:id/balance', status: 200,
+    detail: `${actor} 为 ${target.username} ${micro > 0 ? '充值' : '扣减'} ${formatUnits(Math.abs(micro), billingConfig().micros_per_unit)} ${billingConfig().unit}`
+  })
+  res.json({ balance, account: listAccounts().find((a) => a.id === id), pricing: pricingInfo() })
+}))
+
+// ---------------------------------------------------------------------------
+// 用户仪表盘
+//
+// 只服务「当前登录账号自己」的数据：余额、调用密钥、对接必需信息、余额流水。
+// 普通用户经 USER_AUTH_PREFIXES 放行到这里，其余管理接口继续 403。
+// 主密钥通道（X-Admin-Key）没有账号身份，直接 400 —— 它本来就不是给用户用的。
+// key 为 null + key_state='empty' 就是「最初无密钥」的空态。
+// ---------------------------------------------------------------------------
+
+function currentUser(req, res) {
+  const account = req.auth?.account
+  if (!account?.id) {
+    res.status(400).json({ error: { message: '管理密钥通道没有账号身份，请用账号密码登录用户仪表盘' } })
+    return null
+  }
+  return account
+}
+
+function userDashboardPayload(req, account) {
+  const keys = userKeysOf(account.id)
+  const key = keys[0] || null
+  const models = modelPool().filter((m) => m.enabled).map((m) => m.id)
+  const host = `${req.protocol}://${req.get('host')}`
+  return {
+    account,
+    balance: serializeBalance(account.id),
+    key,
+    key_state: !key ? 'empty' : key.state,
+    usage: key ? key.usage : { requests: 0, failed: 0, tokens: 0 },
+    base_url: `${host}/v1`,
+    api_v1_url: `${host}/api/v1`,
+    protocol: 'OpenAI 兼容（chat/completions · images/generations · models）',
+    available_models: models,
+    total_models: models.length,
+    pricing: pricingInfo(),
+    ledger: ledgerOf(account.id, 30),
+    micros_per_unit: MICROS_PER_UNIT
+  }
+}
+
+app.get('/api/user/dashboard', accountRoute((req, res) => {
+  const account = currentUser(req, res)
+  if (!account) return
+  res.json(userDashboardPayload(req, account))
+}))
+
+app.get('/api/user/ledger', accountRoute((req, res) => {
+  const account = currentUser(req, res)
+  if (!account) return
+  res.json({ ledger: ledgerOf(account.id, 100), balance: serializeBalance(account.id), pricing: pricingInfo() })
+}))
+
+// 生成第一把调用密钥：明文只在响应里出现这一次，config.json 只存 SHA-256 摘要。
+app.post('/api/user/key', accountRoute((req, res) => {
+  const account = currentUser(req, res)
+  if (!account) return
+  const out = createUserKey(account.id, { name: req.body?.name, username: account.username })
+  addLog({ type: 'billing', method: 'POST', path: '/api/user/key', status: 201, detail: `${account.username} 生成了调用密钥「${out.key.name}」` })
+  res.status(201).json({ key: out.key, token: out.token, dashboard: userDashboardPayload(req, account) })
+}))
+
+app.post('/api/user/key/:id/rotate', accountRoute((req, res) => {
+  const account = currentUser(req, res)
+  if (!account) return
+  const out = rotateUserKey(account.id, req.params.id)
+  if (!out) throw Object.assign(new Error('调用密钥不存在或不属于当前账号'), { status: 404 })
+  addLog({ type: 'billing', method: 'POST', path: '/api/user/key/:id/rotate', status: 200, detail: `${account.username} 轮换了调用密钥「${out.key.name}」` })
+  res.json({ key: out.key, token: out.token, dashboard: userDashboardPayload(req, account) })
+}))
+
+app.delete('/api/user/key/:id', accountRoute((req, res) => {
+  const account = currentUser(req, res)
+  if (!account) return
+  if (!deleteUserKey(account.id, req.params.id)) {
+    throw Object.assign(new Error('调用密钥不存在或不属于当前账号'), { status: 404 })
+  }
+  addLog({ type: 'billing', method: 'DELETE', path: '/api/user/key/:id', status: 200, detail: `${account.username} 删除了调用密钥` })
+  res.json({ ok: true, dashboard: userDashboardPayload(req, account) })
 }))
 
 app.get('/api/gateway', (req, res) => {

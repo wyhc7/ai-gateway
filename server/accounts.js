@@ -155,6 +155,8 @@ export function serializeAccount(a) {
     role: a.role === 'admin' ? 'admin' : 'user',
     enabled: a.enabled !== false,
     note: String(a.note || ''),
+    // 余额微点：用户面板展示、管理员充值都用这一个整数口径，见 billing.js
+    balance_micro: Math.trunc(Number(a.balance_micro) || 0),
     created_at: Number(a.created_at) || 0,
     last_login_at: Number(a.last_login_at) || 0,
     password_version: Number(a.password_version) || 1
@@ -208,6 +210,7 @@ export function setupAdmin({ username, password, adminKey }) {
     role: 'admin',
     enabled: true,
     note: '初始化管理员',
+    balance_micro: 0,
     created_at: Date.now(),
     last_login_at: Date.now()
   }
@@ -300,6 +303,8 @@ export function createAccount({ username, password, role = 'user', note = '' }) 
     role,
     enabled: true,
     note: String(note || '').slice(0, 200),
+    // 新账号初始余额为 0、初始无密钥：用户面板显示空态，充值并生成密钥后才能调用
+    balance_micro: 0,
     created_at: Date.now(),
     last_login_at: 0
   }

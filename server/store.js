@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from '
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import crypto from 'node:crypto'
+import { normalizeBilling, normalizeAccountBalances, normalizeLedger } from './billing.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const DATA_DIR = process.env.DATA_DIR || join(__dirname, 'data')
@@ -47,6 +48,18 @@ const DEFAULT_STATE = () => ({
   // 会话令牌的 HMAC 密钥：随机一次并持久化，重启后已签发的令牌仍然有效。
   // 与 admin_api_key 分开，是为了将来轮换管理密钥时不必把所有人都踢下线。
   session_secret: crypto.randomBytes(32).toString('hex'),
+  // 用户余额计费：计价参数、余额流水。账号余额本身存 account.balance_micro，
+  // 见 billing.js。老配置没有这两个字段，load() 会补齐。
+  billing: {
+    unit: '点',
+    currency: 'POINT',
+    micros_per_unit: 1_000_000,
+    price_per_1k_tokens_micro: 1_000_000,
+    request_fee_micro: 0,
+    enabled: true,
+    ledger_limit: 500
+  },
+  billing_ledger: [],
   stats: defaultStats(),
   created_at: Date.now()
 })
@@ -109,6 +122,9 @@ function ensureApiKeys(keys) {
       denied_models: Array.isArray(k.denied_models) ? k.denied_models.filter((r) => typeof r === 'string' && r.trim()) : [],
       expires_at: Number(k.expires_at) || 0,
       note: String(k.note || ''),
+      // 用户自助密钥的归属账号：计费与余额门禁全靠它识别「这把 Key 归谁」。
+      // 老 Key / 管理员手工发的 Key 为空字符串，不计费也不拦，行为与升级前一致。
+      owner_account_id: typeof k.owner_account_id === 'string' ? k.owner_account_id : '',
       created_at: Number(k.created_at) || Date.now(),
       last_used_at: Number(k.last_used_at) || 0,
       usage: {
@@ -139,7 +155,27 @@ function ensureAccountFields(obj) {
   let changed = false
   if (!Array.isArray(obj.accounts)) { obj.accounts = []; changed = true }
   if (!obj.session_secret) { obj.session_secret = crypto.randomBytes(32).toString('hex'); changed = true }
+  // 计费字段：老配置既没有 billing 段，也没有 account.balance_micro 和流水数组。
+  // 三个归一化函数都是纯函数（不读 state），可在 load() 阶段安全调用。
+  if (!obj.billing || typeof obj.billing !== 'object') { obj.billing = DEFAULT_BILLING_FALLBACK(); changed = true }
+  else if (normalizeBilling(obj.billing)) changed = true
+  if (normalizeAccountBalances(obj)) changed = true
+  if (normalizeLedger(obj)) changed = true
   return changed
+}
+
+// 与 billing.DEFAULT_BILLING() 保持一致的字面量：这里不 import 是有意的，
+// store.js 在模块求值期就会调用它，避免再去触碰 billing 的惰性状态访问。
+function DEFAULT_BILLING_FALLBACK() {
+  return {
+    unit: '点',
+    currency: 'POINT',
+    micros_per_unit: 1_000_000,
+    price_per_1k_tokens_micro: 1_000_000,
+    request_fee_micro: 0,
+    enabled: true,
+    ledger_limit: 500
+  }
 }
 
 function load() {

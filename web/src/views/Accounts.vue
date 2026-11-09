@@ -22,11 +22,11 @@
         </div>
         <div class="role-item">
           <div class="role-name"><span class="badge badge-purple">user</span> 普通用户</div>
-          <div class="role-desc">账号与角色已建好，用户面板尚未开放。当前阶段普通用户登录后只能改自己的密码，进不了控制台。</div>
+          <div class="role-desc">登录后进入「我的仪表盘」：查看剩余余额、生成/轮换专属调用密钥、对接地址与余额流水。初始余额为 0、无密钥，充值后才能调用。</div>
         </div>
       </div>
       <div class="role-foot">
-        密码以 scrypt 加盐摘要存于 <code class="mono">config.json</code>，明文不落盘；会话令牌默认 {{ sessionTtlHours }} 小时有效，重置密码后该账号已签发的令牌立即全部失效。
+        密码以 scrypt 加盐摘要存于 <code class="mono">config.json</code>，明文不落盘；会话令牌默认 {{ sessionTtlHours }} 小时有效，重置密码后该账号已签发的令牌立即全部失效。余额以整数微点存储，充值/扣减与每次调用扣费都留流水。
       </div>
     </div>
 
@@ -48,10 +48,11 @@
               <th style="width: 170px">用户名</th>
               <th style="width: 118px">角色</th>
               <th style="width: 110px">状态</th>
+              <th style="width: 130px" class="right">剩余余额</th>
               <th style="width: 132px">创建时间</th>
               <th style="width: 132px">最近登录</th>
               <th>备注</th>
-              <th style="width: 288px">操作</th>
+              <th style="width: 350px">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -68,11 +69,15 @@
                   <span class="badge-dot" :class="a.enabled ? 'green' : 'gray'"></span>{{ a.enabled ? '启用中' : '已停用' }}
                 </span>
               </td>
+              <td class="right">
+                <span class="balance-cell mono" :class="{ alarm: (a.balance_micro || 0) <= 0 }">{{ formatBalance(a.balance_micro) }}</span>
+              </td>
               <td class="acc-note">{{ formatTime(a.created_at) }}</td>
               <td class="acc-note">{{ a.last_login_at ? formatTime(a.last_login_at) : '从未登录' }}</td>
               <td><span class="acc-note ellipsis" :title="a.note">{{ a.note || '—' }}</span></td>
               <td>
                 <div class="row-actions">
+                  <el-button size="small" plain type="primary" @click="openBalance(a)">充值</el-button>
                   <el-button size="small" plain @click="openEdit(a)">编辑</el-button>
                   <el-button size="small" plain @click="toggleEnabled(a)" :disabled="a.id === currentAccountId">{{ a.enabled ? '停用' : '启用' }}</el-button>
                   <el-button size="small" plain @click="openReset(a)">重置密码</el-button>
@@ -109,7 +114,7 @@
         <el-form-item label="角色">
           <el-select v-model="form.role" style="width: 100%" :disabled="editing?.id === currentAccountId">
             <el-option label="admin · 管理员（完整控制台）" value="admin" />
-            <el-option label="user · 普通用户（面板待开放）" value="user" />
+            <el-option label="user · 普通用户（我的仪表盘）" value="user" />
           </el-select>
           <div v-if="editing?.id === currentAccountId" class="field-note">不能把自己的账号降级为普通用户。</div>
         </el-form-item>
@@ -128,6 +133,31 @@
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="submit">{{ editing ? '保存' : '创建' }}</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 余额充值 / 扣减 -->
+    <el-dialog v-model="balanceVisible" title="调整账号余额" width="460px" append-to-body>
+      <p class="gate-hint">
+        正在为 <strong>{{ balanceTarget?.username }}</strong> 调整余额。输入正数充值、负数扣减；余额夹到 0，不会记成负数账。每次调整与每次 API 调用扣费都会写进余额流水。
+      </p>
+      <el-form label-position="top" @submit.prevent>
+        <el-form-item label="金额（点）">
+          <el-input v-model="balanceForm.amount" placeholder="例如 10 或 -2.5" autocomplete="off" />
+        </el-form-item>
+        <el-form-item label="备注（选填）">
+          <el-input v-model="balanceForm.note" maxlength="200" placeholder="例如：10 月配额 / 补偿上次故障" />
+        </el-form-item>
+      </el-form>
+      <div class="balance-preview">
+        当前余额 <strong class="mono">{{ formatBalance(balanceTarget?.balance_micro) }}</strong>
+        <span class="balance-arrow">→</span>
+        调整后 <strong class="mono">{{ previewBalance }}</strong>
+      </div>
+      <p v-if="balanceError" class="form-error" role="alert">{{ balanceError }}</p>
+      <template #footer>
+        <el-button @click="balanceVisible = false">取消</el-button>
+        <el-button type="primary" :loading="balanceBusy" @click="submitBalance">保存余额</el-button>
       </template>
     </el-dialog>
 
@@ -154,17 +184,20 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api, { notifyError } from '../api.js'
 
 const loading = ref(false)
 const saving = ref(false)
 const resetting = ref(false)
+const balanceBusy = ref(false)
 const accounts = ref([])
 const currentAccountId = ref('')
 const passwordMin = ref(8)
 const sessionTtlHours = ref(168)
+const unit = ref('点')
+const microsPerUnit = ref(1_000_000)
 
 const dialogVisible = ref(false)
 const dialogError = ref('')
@@ -175,6 +208,24 @@ const resetVisible = ref(false)
 const resetError = ref('')
 const resetTarget = ref(null)
 const resetForm = ref({ password: '', confirm: '' })
+
+const balanceVisible = ref(false)
+const balanceError = ref('')
+const balanceTarget = ref(null)
+const balanceForm = ref({ amount: '', note: '' })
+
+function formatBalance(micro) {
+  const v = (Number(micro) || 0) / microsPerUnit.value
+  return `${Number(v.toFixed(6))} ${unit.value}`
+}
+
+const previewBalance = computed(() => {
+  const cur = Number(balanceTarget.value?.balance_micro) || 0
+  const delta = Number(balanceForm.value.amount)
+  if (!Number.isFinite(delta) || String(balanceForm.value.amount).trim() === '') return formatBalance(cur)
+  const next = Math.max(0, (cur + Math.round(delta * microsPerUnit.value)) / microsPerUnit.value)
+  return formatBalance(next * microsPerUnit.value)
+})
 
 function formatTime(ts) {
   if (!ts) return '—'
@@ -195,6 +246,8 @@ async function load() {
     currentAccountId.value = me?.account?.id || ''
     passwordMin.value = Number(status?.password_min_length) || 8
     sessionTtlHours.value = Number(status?.session_ttl_hours) || 168
+    unit.value = list.pricing?.unit || '点'
+    microsPerUnit.value = Number(list.pricing?.micros_per_unit) || 1_000_000
   } catch (e) {
     notifyError(e, '加载账号列表失败')
   } finally {
@@ -262,6 +315,41 @@ async function toggleEnabled(a) {
   }
 }
 
+function openBalance(a) {
+  balanceTarget.value = a
+  balanceForm.value = { amount: '', note: '' }
+  balanceError.value = ''
+  balanceVisible.value = true
+}
+
+async function submitBalance() {
+  balanceError.value = ''
+  const raw = String(balanceForm.value.amount).trim()
+  const amount = Number(raw)
+  if (!raw || !Number.isFinite(amount) || amount === 0) {
+    balanceError.value = '请填写非零金额，例如 10 或 -2.5'
+    return
+  }
+  if (Math.abs(amount) > 1_000_000) {
+    balanceError.value = '单次调整金额过大，请拆分操作'
+    return
+  }
+  balanceBusy.value = true
+  try {
+    await api.adjustAccountBalance(balanceTarget.value.id, {
+      amount,
+      note: balanceForm.value.note.trim()
+    })
+    balanceVisible.value = false
+    ElMessage.success(`${balanceTarget.value.username} 的余额已更新`)
+    await load()
+  } catch (e) {
+    balanceError.value = e?.message || '调整余额失败'
+  } finally {
+    balanceBusy.value = false
+  }
+}
+
 function openReset(a) {
   resetTarget.value = a
   resetForm.value = { password: '', confirm: '' }
@@ -310,7 +398,7 @@ onMounted(load)
 </script>
 
 <style scoped>
-.data-table { min-width: 980px; }
+.data-table { min-width: 1120px; }
 
 .tool-row {
   display: flex;
@@ -362,6 +450,19 @@ onMounted(load)
 
 .acc-name { font-size: 13.5px; }
 .acc-note { font-size: 11.5px; color: var(--ink-3); margin-top: 2px; }
+.balance-cell { font-size: 12.5px; color: var(--ink); font-weight: 600; }
+.balance-preview {
+  margin-top: 4px;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-sm);
+  font-size: 12.5px;
+  color: var(--ink-3);
+  line-height: 1.8;
+}
+.balance-preview strong { color: var(--ink); font-weight: 600; }
+.balance-arrow { margin: 0 8px; color: var(--ink-4); }
 .ellipsis {
   display: inline-block;
   max-width: 220px;

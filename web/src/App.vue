@@ -27,6 +27,7 @@
         </div>
 
         <nav class="nav">
+          <template v-if="isAdmin">
           <div class="nav-label">控制台</div>
           <RouterLink to="/dashboard" @click="onNav" title="仪表盘">
             <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -80,6 +81,17 @@
             <span class="nav-text">系统更新</span>
             <span v-if="updateAvailable" class="nav-dot" aria-hidden="true"></span>
           </RouterLink>
+          </template>
+
+          <template v-else>
+            <div class="nav-label">我的账户</div>
+            <RouterLink to="/user" @click="onNav" title="我的仪表盘">
+              <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="9" /><path d="M12 7v10M9.5 9.5h4a1.8 1.8 0 0 1 0 3.6h-3a1.8 1.8 0 0 0 0 3.6h4" />
+              </svg>
+              <span class="nav-text">我的仪表盘</span>
+            </RouterLink>
+          </template>
         </nav>
 
         <div class="sidebar-footer">
@@ -218,7 +230,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useViewport } from './composables/useViewport.js'
@@ -226,10 +238,12 @@ import api, {
   getAdminKey, setAdminKey, clearAdminKey,
   getSessionToken, setSessionToken, clearSessionToken
 } from './api.js'
+import { isAdmin as sharedIsAdmin, setAuth, clearAuth } from './auth-state.js'
 import ThemeToggle from './components/ThemeToggle.vue'
 
 const { isMobile } = useViewport()
 const route = useRoute()
+const router = useRouter()
 
 const collapsed = ref(localStorage.getItem('sidebar-collapsed') === '1')
 const drawerOpen = ref(false)
@@ -253,14 +267,14 @@ const passwordBusy = ref(false)
 const passwordError = ref('')
 const passwordForm = ref({ oldPassword: '', newPassword: '', confirm: '' })
 
-const isAdmin = computed(() => currentVia.value === 'admin-key' || currentAccount.value?.role === 'admin')
+const isAdmin = sharedIsAdmin
 const accountLabel = computed(() => currentAccount.value?.username || '管理密钥通道')
 const avatarText = computed(() => (currentAccount.value?.username || 'K').slice(0, 1).toUpperCase())
 
-const gateTitle = computed(() => gateMode.value === 'setup' ? '初始化管理员账号' : '登录管理控制台')
+const gateTitle = computed(() => gateMode.value === 'setup' ? '初始化管理员账号' : '登录 AI 中转站')
 const gateHint = computed(() => gateMode.value === 'setup'
   ? '这台网关还没有账号。先创建第一个管理员，之后可用用户名与密码登录。'
-  : '输入账号密码进入管理控制台。管理密钥仍可作为应急通道使用。')
+  : '输入账号密码登录。管理员进入完整控制台，普通用户进入「我的仪表盘」；管理密钥仍可作为应急通道使用。')
 const gateValid = computed(() => {
   const f = gateForm.value
   if (!f.username.trim() || f.password.length < passwordMin.value) return false
@@ -287,11 +301,16 @@ async function checkForUpdate() {
 function enterConsole(account, via) {
   currentAccount.value = account || null
   currentVia.value = via
+  setAuth(account, via)
   gateMode.value = 'open'
   gateVisible.value = false
   gateError.value = ''
   gateForm.value = { username: '', password: '', confirm: '', adminKey: '' }
-  checkForUpdate()
+  // 普通用户落地自己的仪表盘；管理员保持当前地址（书签深链不被强行改写）。
+  const adminUser = via === 'admin-key' || account?.role === 'admin'
+  if (!adminUser && route.path !== '/user') router.replace('/user')
+  if (adminUser && route.meta?.userOnly) router.replace('/dashboard')
+  if (adminUser) checkForUpdate()
 }
 
 // 页面加载：先问服务端「有没有账号」，再决定弹哪个门。
@@ -341,6 +360,7 @@ function onUnauthorized() {
   // 否则第一个管理员永远建不出来。管理视图此时也未挂载，401 只可能来自探测。
   if (gateMode.value === 'setup' || (gateMode.value !== 'open' && needsSetup.value)) return
   clearSessionToken()
+  clearAuth()
   currentAccount.value = null
   currentVia.value = ''
   gateMode.value = 'login'
@@ -429,6 +449,7 @@ async function logout() {
   try { await api.authLogout() } catch { /* 审计失败不拦登出 */ }
   clearSessionToken()
   clearAdminKey()
+  clearAuth()
   currentAccount.value = null
   currentVia.value = ''
   gateMode.value = 'login'
@@ -444,6 +465,7 @@ async function onAccountCommand(command) {
     try { await api.authLogout() } catch { /* ignore */ }
     clearSessionToken()
     clearAdminKey()
+    clearAuth()
     currentAccount.value = null
     currentVia.value = ''
     gateMode.value = 'login'

@@ -1698,7 +1698,7 @@ export async function handleChat(req, res) {
     return respondJson(res, 400, { error: { message: '平台缺少 Base URL', type: 'bad_config' } })
   }
   const result = await forwardWithFailover(provider, 'chat', body, res)
-  recordUsage(req.apiAuth, { tokens: result.tokens, ok: result.ok })
+  recordUsage(req.apiAuth, { tokens: result.tokens, ok: result.ok, model })
   addLog({
     ...baseLog,
     status: res.statusCode || (result.ok ? 200 : 502),
@@ -1761,7 +1761,7 @@ export async function handleImages(req, res) {
     return respondJson(res, 400, { error: { message: '平台缺少 Base URL', type: 'bad_config' } })
   }
   const result = await forwardWithFailover(provider, 'images', body, res)
-  recordUsage(req.apiAuth, { tokens: result.tokens, ok: result.ok })
+  recordUsage(req.apiAuth, { tokens: result.tokens, ok: result.ok, model })
   addLog({
     ...baseLog,
     status: res.statusCode || (result.ok ? 200 : 502),

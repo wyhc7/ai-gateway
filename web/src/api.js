@@ -81,6 +81,16 @@ export const api = {
   deleteAccount: (id) => request(`/api/accounts/${id}`, { method: 'DELETE' }),
   resetAccountPassword: (id, password) =>
     request(`/api/accounts/${id}/password`, { method: 'POST', body: JSON.stringify({ new_password: password }) }),
+  // 余额充值 / 扣减（管理员），amount 用「点」为单位
+  adjustAccountBalance: (id, data) =>
+    request(`/api/accounts/${id}/balance`, { method: 'POST', body: JSON.stringify(data) }),
+
+  // 用户仪表盘：只读自己的余额/密钥/流水 + 自助密钥管理
+  getUserDashboard: () => request('/api/user/dashboard'),
+  getUserLedger: () => request('/api/user/ledger'),
+  createUserKey: (data) => request('/api/user/key', { method: 'POST', body: JSON.stringify(data || {}) }),
+  rotateUserKey: (id) => request(`/api/user/key/${id}/rotate`, { method: 'POST' }),
+  deleteUserKey: (id) => request(`/api/user/key/${id}`, { method: 'DELETE' }),
 
   getStatus: () => request('/api/status'),
   getGateway: () => request('/api/gateway'),
