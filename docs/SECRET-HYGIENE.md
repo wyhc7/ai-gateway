@@ -102,7 +102,10 @@ git config core.hooksPath .githooks
 | 规则 | 抓什么 | 为什么危险 |
 |---|---|---|
 | `gateway-key` | `gk-xxxxxxxx-....` | 等同管理员，能用任意模型、烧光额度 |
-| `admin-key` | `ak-` + 32 位十六进制 | 能改配置、删平台、删账号 |
+| `admin-key` | `ak-` + 32 位十六进制 | 能改配置、删平台、删账号；也是首次认领管理员与应急恢复的凭证 |
+| `session-secret` | 64 位十六进制 | `config.json` 里的会话签名密钥，拿到即可伪造任意管理员的登录令牌 |
+| `password-hash` | `config.json` 的 `accounts[].password_hash` | scrypt 摘要，配合 salt 可离线爆破弱密码；备份文件一律按凭据对待 |
+| `gateway-session` | 浏览器 localStorage | 登录令牌，等同该账号的完整权限 |
 | `chatgpt2api-key` | 48 位十六进制 | 能直接操作账号池 |
 | `openai-oauth-code` | `oaistb_...` | 授权码，一次性但能直接换 token |
 | `openai-token` | `eyJhbGciOiJSUzI1NiIs...` | JWT，约 10 天有效 |

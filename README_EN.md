@@ -39,6 +39,7 @@ The usual consequence is **account termination with no refund of subscription fe
 - **Automatic model discovery** — fetch a platform's available model list with one click after entering an API key
 - **ChatGPT account pool management** — add accounts straight from the dashboard and see each account's remaining image quota, reset time and renewal status; OAuth is preferred so you get a `refresh_token` and automatic renewal, and multiple accounts share the load round-robin (see [ChatGPT web](#chatgpt-web-image-generation-only))
 - **Access keys with per-key model scoping** — issue a separate key to each caller and restrict which models it may use (`gpt-*` wildcards supported), with enable/disable, expiry, rotation, and per-key usage counters (see [Access keys](#4-access-keys-per-caller-permissions))
+- **Accounts & admin dashboard** — username/password login, `admin` and `user` roles, account CRUD, password reset, login rate limiting. The first admin is claimed with the existing admin key so existing deployments upgrade seamlessly; passwords are stored as salted `scrypt` digests and sessions are signed, expiring tokens — changing a password or disabling an account invalidates every issued token immediately (see [Accounts](#accounts))
 - **One-click update and upgrade** — the dashboard compares your deployment's git HEAD against the upstream branch, lists the incoming commits and their blast radius, then pulls, merges, installs, builds and restarts on one click; file ownership is repaired first so leftovers from a past root build no longer cause `EACCES` (see [System update](#system-update-one-click-upgrade))
 - **Token accounting** — prefers the upstream `usage` field; falls back to estimating from output length (reasoning included) when upstream omits it, so counts are never silently missed
 - **Dashboard statistics** — request volume, success rate, token usage (daily/total), key health status, auto-refresh every 10 seconds
@@ -64,7 +65,7 @@ cd server && node index.js
 
 Open `http://localhost:3001` to access the admin dashboard.
 
-On first launch you will be asked for the **admin key** (see the "Admin Key" section below).
+On first launch the dashboard asks you to **create the first admin account**: pick a username and password, then paste the **admin key** printed in the server startup log to claim it. From then on, log in with the account (see [Accounts](#accounts) below).
 
 > You can start the backend without building the frontend: every `/api/*` route works, only opening the site in a browser returns 404. API-only deployments can skip the `web` build.
 
@@ -73,14 +74,31 @@ On first launch you will be asked for the **admin key** (see the "Admin Key" sec
 | Variable | Default | Description |
 | ---- | ------ | ----------- |
 | `PORT` | `3001` | Listening port |
-| `DATA_DIR` | `server/data` | Data directory (contains platform keys — back it up!) |
+| `DATA_DIR` | `server/data` | Data directory (contains platform keys and account digests — back it up!) |
 | `WEB_DIST` | `web/dist` | Frontend build output directory |
-| `ADMIN_KEY` | auto-generated | Admin dashboard login key, see below |
+| `ADMIN_KEY` | auto-generated | Admin key for the first-admin claim and automation scripts, see below |
+| `SESSION_TTL_HOURS` | `168` | Login session lifetime in hours (default: 7 days) |
 | `HTTPS_PROXY` / `HTTP_PROXY` | unset | Route Node's global fetch through a proxy (required for upstream access on restricted networks) |
+
+### Accounts
+
+The dashboard now uses account-based sessions. The original admin key remains as an **automation and recovery channel**.
+
+| Item | Notes |
+| ---- | ----- |
+| First deploy | The dashboard opens an "Initialize admin account" dialog: username (2–32 chars), password (8+ chars), plus the admin key from the startup log as the claim credential. A public instance therefore cannot be claimed by the first port scanner. |
+| Login | Username + password. Passwords are salted with Node's built-in `scrypt`; only the digest is stored. Five consecutive failures lock that IP+username pair for 60 seconds. |
+| Sessions | Self-contained HMAC-SHA256 signed tokens, valid for 7 days by default and surviving restarts. Every request re-checks account state and the password version: **disabling, changing a password, resetting a password, or deleting an account invalidates all issued tokens immediately**. |
+| Roles | `admin` (full console + account management), `user` (role data exists; **the user panel is not built yet** — such accounts can only change their own password and cannot enter the console). |
+| Admin panel | Sidebar "Accounts": create accounts, change role/status/note, reset passwords, delete. Guardrails: you cannot delete or demote yourself, and at least one enabled admin always remains. |
+| Recovery | Enter with the admin key ("Forgot password? Use the admin key" on the login dialog), then reset the account's password from the Accounts page. |
+| Compatibility | Every existing `X-Admin-Key: <admin key>` call in deploy scripts, CI tests and docs keeps working as an admin-equivalent channel — no changes required. |
+
+The session token lives in `localStorage` as `gateway-session`; the top-right account menu offers password change, account switch and logout (the frontend drops the token). Accounts live in the `accounts` field of the same `server/data/config.json` — still zero external services.
 
 ### Admin Key
 
-All admin endpoints (platform/key CRUD, logs, config export, etc.) require the admin key. A login dialog appears the first time you open the web dashboard. Ways to obtain it:
+All admin endpoints (platform/key CRUD, logs, config export, etc.) accept either the admin key or a login session. Ways to obtain the admin key:
 
 - **Server startup log**: the console prints `管理密钥（登录管理界面用）: ak-xxxx` on startup
 - **Config file**: the `admin_api_key` field in `server/data/config.json`

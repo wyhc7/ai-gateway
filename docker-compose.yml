@@ -9,8 +9,10 @@ services:
     environment:
       - PORT=3001
       - DATA_DIR=/data
-      # 管理界面登录密钥（不设置则自动生成，见容器日志或 /data/config.json）
+      # 管理密钥：首次认领管理员、自动化脚本与应急恢复用（不设置则自动生成，见容器日志或 /data/config.json）
+      # 日常登录走界面里的账号密码；SESSION_TTL_HOURS 可调会话有效期（默认 168 小时）
       # - ADMIN_KEY=change-me
+      # - SESSION_TTL_HOURS=168
     volumes:
       # 容器以非 root（node 用户 uid 1000）运行，宿主机目录需对其可写，如：chown -R 1000:1000 data
       - ./data:/data

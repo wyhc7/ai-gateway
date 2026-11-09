@@ -35,6 +35,11 @@ import { fetchWorkbuddyCheckinStatus, performWorkbuddyCheckin, beijingDayKey, fe
 import { addLog, getLogs, initLogger } from './logger.js'
 import { checkUpdate, applyUpdate, normalizeForceMode, FORCE_MODES } from './update.js'
 import {
+  authStatus, setupAdmin, login as accountLogin, verifySession,
+  serializeAccount, changeOwnPassword, listAccounts, createAccount,
+  updateAccount, deleteAccount, resetAccountPassword
+} from './accounts.js'
+import {
   startDeviceFlow,
   pollDeviceFlow,
   cancelDeviceFlow,
@@ -287,10 +292,27 @@ app.use((req, res, next) => {
 })
 
 // 管理端鉴权：除 /api/v1/*（网关调用，走网关 Key）与 /api/health（健康检查）外，
-// 所有管理接口都必须携带管理密钥（X-Admin-Key 头或 Authorization: Bearer）
+// 所有管理接口都要过这道闸。三条通道，优先级从高到低：
+//   1) X-Admin-Key / Bearer <管理密钥> —— 保留通道：现有部署脚本、CI 测试、
+//      文档里的 curl 全用它，升级后一个都不用改，天然等同管理员。
+//   2) Bearer <会话令牌> 或 X-Session-Token —— 管理面板登录后由 /api/auth/login 签发。
+//   3) 匿名 —— 仅放行 /api/auth/status|setup|login 三个引导/登录端点。
 //
 // 常量放在这里是因为鉴权中间件在路由注册之前就执行，需要提前引用。
 const CHATGPT_OAUTH_CALLBACK_PATH = '/api/chatgpt-accounts/oauth/callback'
+const PUBLIC_AUTH_PATHS = new Set(['/api/auth/status', '/api/auth/setup', '/api/auth/login'])
+// 普通用户当前只能用这几个自助端点；用户面板还没做，控制台其余接口一律 403。
+// 角色数据先建好，等用户面板上线时把这道限制放开即可，不用再动账号表。
+const SELF_AUTH_PATHS = new Set(['/api/auth/me', '/api/auth/password', '/api/auth/logout'])
+
+function sessionTokenOf(req) {
+  const header = req.headers['x-session-token']
+  if (header) return String(header).trim()
+  const auth = String(req.headers.authorization || '')
+  if (/^Bearer\s+/i.test(auth)) return auth.replace(/^Bearer\s+/i, '').trim()
+  return ''
+}
+
 app.use((req, res, next) => {
   if (!req.path.startsWith('/api/')) return next()
   if (req.path.startsWith('/api/v1/') || req.path === '/api/health') return next()
@@ -299,11 +321,147 @@ app.use((req, res, next) => {
   // 它的鉴权换成 provider_id + session_id：session 是 32 位随机串、
   // 10 分钟过期、成功即销毁，泄漏也只能用一次，且拿到它做不了别的事。
   if (req.path === CHATGPT_OAUTH_CALLBACK_PATH) return next()
+  if (PUBLIC_AUTH_PATHS.has(req.path)) return next()
+
   const adminKey = getAdminKey()
   const provided = req.headers['x-admin-key'] || (req.headers.authorization || '').replace(/^Bearer\s+/i, '')
-  if (adminKey && provided && safeEqual(provided, adminKey)) return next()
-  return res.status(401).json({ error: { message: '管理密钥无效或缺失，请在登录框输入管理密钥（见服务端启动日志或 config.json 的 admin_api_key 字段）' } })
+  if (adminKey && provided && safeEqual(provided, adminKey)) {
+    req.auth = { role: 'admin', via: 'admin-key', account: null }
+    return next()
+  }
+
+  const token = sessionTokenOf(req)
+  if (token) {
+    const session = verifySession(token)
+    if (session) {
+      req.auth = { role: session.role, via: 'session', account: serializeAccount(session.account) }
+      if (session.role !== 'admin' && !SELF_AUTH_PATHS.has(req.path)) {
+        return res.status(403).json({ error: { message: '用户面板尚未开放，当前仅管理员可进入控制台' } })
+      }
+      return next()
+    }
+  }
+
+  return res.status(401).json({ error: { message: '登录状态无效或已过期，请重新登录（自动化脚本仍可用 X-Admin-Key 头）' } })
 })
+
+// accounts.js 抛出的 err.status 必须原样透传（400 参数错 / 401 密码错 / 409 重名…）；
+// 统一走 api() 会把它们全压成 500，前端就只能显示一句「服务器内部错误」。
+function accountRoute(fn) {
+  return async (req, res) => {
+    try {
+      await fn(req, res)
+    } catch (err) {
+      res.status(Number(err?.status) || 500).json({ error: { message: err?.message || '服务器内部错误' } })
+    }
+  }
+}
+
+function requireAdmin(req, res, next) {
+  if (req.auth?.role !== 'admin') {
+    return res.status(403).json({ error: { message: '仅管理员可管理账号' } })
+  }
+  next()
+}
+
+// ---------------------------------------------------------------------------
+// 账号与会话
+//
+// 首次部署没有账号：/api/auth/status 回 initialized=false，前端弹「初始化管理员」，
+// 用现有 admin_api_key 作认领凭证。这样公网暴露的实例不会被第一个扫到端口的
+// 人注册成管理员，老部署也不用新增任何环境变量。
+// ---------------------------------------------------------------------------
+
+app.get('/api/auth/status', accountRoute((req, res) => {
+  const status = authStatus()
+  const session = verifySession(sessionTokenOf(req))
+  res.json({
+    ...status,
+    account: session ? serializeAccount(session.account) : null,
+    via: session ? 'session' : (getAdminKey() && req.headers['x-admin-key'] ? 'admin-key' : null)
+  })
+}))
+
+app.post('/api/auth/setup', accountRoute((req, res) => {
+  const out = setupAdmin({
+    username: req.body?.username,
+    password: req.body?.password,
+    adminKey: req.body?.admin_key || req.headers['x-admin-key']
+  })
+  addLog({ type: 'auth', method: 'POST', path: '/api/auth/setup', status: 200, detail: `初始化管理员 ${out.account.username}` })
+  res.json({ ...out, session_ttl_hours: authStatus().session_ttl_hours })
+}))
+
+app.post('/api/auth/login', accountRoute((req, res) => {
+  const out = accountLogin(
+    { username: req.body?.username, password: req.body?.password },
+    req.ip || req.socket?.remoteAddress
+  )
+  addLog({ type: 'auth', method: 'POST', path: '/api/auth/login', status: 200, detail: `${out.account.username} 登录成功` })
+  res.json(out)
+}))
+
+app.get('/api/auth/me', accountRoute((req, res) => {
+  res.json({
+    role: req.auth.role,
+    via: req.auth.via,
+    account: req.auth.account,
+    session_ttl_hours: authStatus().session_ttl_hours
+  })
+}))
+
+app.post('/api/auth/password', accountRoute((req, res) => {
+  if (!req.auth.account) throw Object.assign(new Error('管理密钥通道没有账号密码，请改用账号登录'), { status: 400 })
+  const out = changeOwnPassword(req.auth.account.id, {
+    oldPassword: req.body?.old_password,
+    newPassword: req.body?.new_password
+  })
+  addLog({ type: 'auth', method: 'POST', path: '/api/auth/password', status: 200, detail: `${req.auth.account.username} 修改了密码` })
+  res.json(out)
+}))
+
+// 无状态令牌服务端没有会话表可删：前端丢掉令牌即完成登出，这里只记一条审计。
+app.post('/api/auth/logout', accountRoute((req, res) => {
+  addLog({ type: 'auth', method: 'POST', path: '/api/auth/logout', status: 200, detail: `${req.auth.account?.username || '管理密钥通道'} 登出` })
+  res.json({ ok: true })
+}))
+
+// 账号管理：整组只给管理员，普通用户（角色数据已存在，面板待建）一律 403。
+app.use('/api/accounts', requireAdmin)
+
+app.get('/api/accounts', accountRoute((req, res) => {
+  res.json({ accounts: listAccounts(), total: listAccounts().length, roles: authStatus().roles })
+}))
+
+app.post('/api/accounts', accountRoute((req, res) => {
+  const account = createAccount({
+    username: req.body?.username,
+    password: req.body?.password,
+    role: req.body?.role || 'user',
+    note: req.body?.note || ''
+  })
+  addLog({ type: 'auth', method: 'POST', path: '/api/accounts', status: 200, detail: `创建账号 ${account.username}（${account.role}）` })
+  res.json({ account })
+}))
+
+app.put('/api/accounts/:id', accountRoute((req, res) => {
+  const account = updateAccount(req.params.id, req.body || {}, req.auth.account?.id)
+  addLog({ type: 'auth', method: 'PUT', path: '/api/accounts/:id', status: 200, detail: `更新账号 ${account.username}：${account.role} / ${account.enabled ? '启用' : '停用'}` })
+  res.json({ account })
+}))
+
+app.delete('/api/accounts/:id', accountRoute((req, res) => {
+  const target = listAccounts().find((a) => a.id === req.params.id)
+  const out = deleteAccount(req.params.id, req.auth.account?.id)
+  addLog({ type: 'auth', method: 'DELETE', path: '/api/accounts/:id', status: 200, detail: `删除账号 ${target?.username || req.params.id}` })
+  res.json(out)
+}))
+
+app.post('/api/accounts/:id/password', accountRoute((req, res) => {
+  const account = resetAccountPassword(req.params.id, req.body?.new_password)
+  addLog({ type: 'auth', method: 'POST', path: '/api/accounts/:id/password', status: 200, detail: `重置账号 ${account.username} 的密码（已签发的会话全部失效）` })
+  res.json({ account })
+}))
 
 app.get('/api/gateway', (req, res) => {
   const base = `${req.protocol}://${req.get('host')}`
@@ -1809,6 +1967,7 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`[gateway] AI 中转站后端已启动: http://0.0.0.0:${PORT}`)
   console.log(`[gateway] 管理密钥（登录管理界面用）: ${getAdminKey()}`)
   console.log('[gateway] 如需更换，可设置环境变量 ADMIN_KEY 或修改 config.json 的 admin_api_key 字段')
+  console.log(`[gateway] 账号系统：${authStatus().initialized ? `已初始化 ${listAccounts().length} 个账号` : '尚未初始化，首次打开管理界面请用上面的管理密钥认领管理员'}`)
   addLog({ type: 'system', method: '-', path: '-', status: 0, detail: `AI 中转站后端启动（端口 ${PORT}，${state.providers.length} 个平台）` })
 })
 

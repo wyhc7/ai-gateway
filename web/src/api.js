@@ -1,6 +1,7 @@
 import { ElMessage } from 'element-plus'
 
 const ADMIN_KEY_STORAGE = 'admin-key'
+const SESSION_STORAGE = 'gateway-session'
 
 export function getAdminKey() {
   return localStorage.getItem(ADMIN_KEY_STORAGE) || ''
@@ -14,7 +15,24 @@ export function clearAdminKey() {
   localStorage.removeItem(ADMIN_KEY_STORAGE)
 }
 
-function adminHeaders() {
+export function getSessionToken() {
+  return localStorage.getItem(SESSION_STORAGE) || ''
+}
+
+export function setSessionToken(token) {
+  localStorage.setItem(SESSION_STORAGE, token)
+}
+
+export function clearSessionToken() {
+  localStorage.removeItem(SESSION_STORAGE)
+}
+
+// 会话令牌优先；没有令牌时回落到老的管理密钥通道。
+// 后者必须留着：部署脚本、CI 冒烟测试、文档里的 curl 全是 X-Admin-Key，
+// 而且它也是「忘了账号密码」时唯一的恢复入口。
+function authHeaders() {
+  const token = getSessionToken()
+  if (token) return { 'X-Session-Token': token }
   const key = getAdminKey()
   return key ? { 'X-Admin-Key': key } : {}
 }
@@ -23,10 +41,13 @@ function notifyUnauthorized() {
   window.dispatchEvent(new CustomEvent('gateway-unauthorized'))
 }
 
+// skipAuth：登录/初始化这类端点本身就会返回 401（密码错、管理密钥错），
+// 那是表单要显示的错误，不该触发「会话过期请重新登录」的全局弹窗。
 async function request(url, options = {}) {
+  const { skipAuth = false, ...fetchOptions } = options
   const resp = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...adminHeaders(), ...(options.headers || {}) }
+    ...fetchOptions,
+    headers: { 'Content-Type': 'application/json', ...authHeaders(), ...(fetchOptions.headers || {}) }
   })
   if (!resp.ok) {
     let detail = `HTTP ${resp.status}`
@@ -36,7 +57,7 @@ async function request(url, options = {}) {
     } catch {
       /* ignore */
     }
-    if (resp.status === 401) notifyUnauthorized()
+    if (resp.status === 401 && !skipAuth) notifyUnauthorized()
     const err = new Error(detail)
     err.status = resp.status
     throw err
@@ -45,6 +66,22 @@ async function request(url, options = {}) {
 }
 
 export const api = {
+  // 账号与会话
+  authStatus: () => request('/api/auth/status', { skipAuth: true }),
+  authSetup: (data) => request('/api/auth/setup', { method: 'POST', body: JSON.stringify(data), skipAuth: true }),
+  authLogin: (data) => request('/api/auth/login', { method: 'POST', body: JSON.stringify(data), skipAuth: true }),
+  authMe: () => request('/api/auth/me', { skipAuth: true }),
+  authChangePassword: (data) => request('/api/auth/password', { method: 'POST', body: JSON.stringify(data), skipAuth: true }),
+  authLogout: () => request('/api/auth/logout', { method: 'POST', skipAuth: true }),
+
+  // 账号管理（仅管理员）
+  getAccounts: () => request('/api/accounts'),
+  createAccount: (data) => request('/api/accounts', { method: 'POST', body: JSON.stringify(data) }),
+  updateAccount: (id, data) => request(`/api/accounts/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteAccount: (id) => request(`/api/accounts/${id}`, { method: 'DELETE' }),
+  resetAccountPassword: (id, password) =>
+    request(`/api/accounts/${id}/password`, { method: 'POST', body: JSON.stringify({ new_password: password }) }),
+
   getStatus: () => request('/api/status'),
   getGateway: () => request('/api/gateway'),
   getTemplates: () => request('/api/templates'),
@@ -62,7 +99,7 @@ export const api = {
   deleteKey: (id, keyId) => request(`/api/providers/${id}/keys/${keyId}`, { method: 'DELETE' }),
   resetKey: (id, keyId) => request(`/api/providers/${id}/keys/${keyId}/reset`, { method: 'POST' }),
   exportProviders: async () => {
-    const resp = await fetch('/api/providers/export', { headers: adminHeaders() })
+    const resp = await fetch('/api/providers/export', { headers: authHeaders() })
     if (!resp.ok) {
       let msg = `HTTP ${resp.status}`
       try {

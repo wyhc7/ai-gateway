@@ -6,6 +6,7 @@ import TestChat from './views/TestChat.vue'
 import ImageGen from './views/ImageGen.vue'
 import Logs from './views/Logs.vue'
 import SystemUpdate from './views/SystemUpdate.vue'
+import Accounts from './views/Accounts.vue'
 
 const router = createRouter({
   history: createWebHashHistory(),
@@ -17,6 +18,7 @@ const router = createRouter({
     { path: '/test', component: TestChat, meta: { title: '对话测试', desc: '选择平台与模型，实时验证转发与故障切换' } },
     { path: '/image', component: ImageGen, meta: { title: '生图', desc: '提示词直接出图，历史存本机' } },
     { path: '/logs', component: Logs, meta: { title: '运行日志', desc: '最近请求日志，快速定位故障' } },
+    { path: '/accounts', component: Accounts, meta: { title: '账号管理', desc: '管理控制台账号、角色与密码重置', requiresAdmin: true } },
     { path: '/update', component: SystemUpdate, meta: { title: '系统更新', desc: '比对上游仓库，查看更新内容并一键升级' } }
   ]
 })

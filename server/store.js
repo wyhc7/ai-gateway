@@ -41,6 +41,12 @@ const DEFAULT_STATE = () => ({
   api_keys: [],
   // 管理端密钥：保护 /api/* 管理接口（可用环境变量 ADMIN_KEY 覆盖）
   admin_api_key: process.env.ADMIN_KEY || `ak-${crypto.randomUUID()}`,
+  // 管理面板账号（用户名 + scrypt 密码摘要）。老配置没有此字段，load() 会补空数组，
+  // 由「首次引导」用 admin_api_key 认领出第一个管理员。
+  accounts: [],
+  // 会话令牌的 HMAC 密钥：随机一次并持久化，重启后已签发的令牌仍然有效。
+  // 与 admin_api_key 分开，是为了将来轮换管理密钥时不必把所有人都踢下线。
+  session_secret: crypto.randomBytes(32).toString('hex'),
   stats: defaultStats(),
   created_at: Date.now()
 })
@@ -125,6 +131,17 @@ function tryParseJSON(text, path) {
   }
 }
 
+// 账号系统字段迁移：老配置（本项目升级前生成的 config.json）没有这两个字段。
+// 缺了 accounts 会导致 authStatus() 认为「未初始化」、每次刷新都弹初始化框；
+// 缺了 session_secret 会让每次启动重新签名密钥、已登录的人全被踢下线。
+// 补齐后交给调用方 scheduleFlush() 落盘，重启不会再补第二遍。
+function ensureAccountFields(obj) {
+  let changed = false
+  if (!Array.isArray(obj.accounts)) { obj.accounts = []; changed = true }
+  if (!obj.session_secret) { obj.session_secret = crypto.randomBytes(32).toString('hex'); changed = true }
+  return changed
+}
+
 function load() {
   mkdirSync(DATA_DIR, { recursive: true })
 
@@ -156,6 +173,7 @@ function load() {
     const [apiKeys, keysChanged] = ensureApiKeys(primary.api_keys)
     primary.api_keys = apiKeys
     if (keysChanged) changed = true
+    if (ensureAccountFields(primary)) changed = true
     if (changed) scheduleFlush()
     return primary
   }
@@ -184,6 +202,7 @@ function load() {
       const [apiKeys, keysChanged] = ensureApiKeys(backup.api_keys)
       backup.api_keys = apiKeys
       if (keysChanged) changed = true
+      if (ensureAccountFields(backup)) changed = true
       console.error(`[store] 已从备份恢复 ${backup.providers.length} 个平台`)
       atomicWrite(CONFIG_PATH, JSON.stringify(backup, null, 2))
       return backup
