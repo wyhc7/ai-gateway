@@ -96,6 +96,43 @@ describe('配置与字段归一化', () => {
     assert.equal(billing.formatUnits(2_500_000, 1_000_000), '2.5')
     assert.equal(billing.formatUnits(1, 1_000_000), '0.000001')
   })
+
+  test('formatUnits 可指定精度：金额 2 位、扣费 6 位', () => {
+    // 4.639944 元
+    const micro = 4_639_944
+    assert.equal(billing.formatUnits(micro, 1_000_000), '4.639944', '默认 6 位')
+    assert.equal(billing.formatUnits(micro, 1_000_000, 2), '4.64', '金额口径 2 位')
+    assert.equal(billing.formatUnits(4_634_000, 1_000_000, 2), '4.63', '四舍五入')
+    assert.equal(billing.formatUnits(4_635_000, 1_000_000, 2), '4.64', '五入进位')
+    // 一分钱的扣费不能显示成 0
+    assert.equal(billing.formatUnits(253, 1_000_000, 6), '0.000253')
+    assert.equal(billing.formatUnits(253, 1_000_000, 2), '0', '2 位下就是 0 —— 所以扣费不能用 2 位')
+  })
+
+  test('formatMoney 固定两位小数', () => {
+    assert.equal(billing.formatMoney(4_639_944, 1_000_000), '4.64')
+    assert.equal(billing.formatMoney(1_000_000, 1_000_000), '1')
+    assert.equal(billing.formatMoney(1_500_000, 1_000_000), '1.5')
+    assert.equal(billing.formatMoney(0, 1_000_000), '0')
+  })
+
+  test('serializeBalance 的 value 与 display 都是两位小数', () => {
+    state.accounts.push(makeUser('u1', 4_639_944))
+    const b = billing.serializeBalance('u1')
+    assert.equal(b.micro, 4_639_944, 'micro 保留原值，前端要精确计算时用它')
+    assert.equal(b.value, 4.64, 'value 给前端渲染，两位小数')
+    assert.equal(b.display, '4.64 元')
+    assert.equal(b.unit, '元')
+  })
+
+  test('流水：变动额保留 6 位，余额两位', () => {
+    state.accounts.push(makeUser('u1', 4_639_944))
+    // 模拟一次极小扣费
+    billing.applyBalance('u1', { amount_micro: -253, type: 'consume', note: '测试扣费' })
+    const row = billing.ledgerOf('u1')[0]
+    assert.equal(row.delta_display, '-0.000253 元', '扣费不能四舍五入成 0')
+    assert.equal(row.balance_display, '4.64 元', '余额是账户口径，两位')
+  })
 })
 
 describe('余额变动与流水', () => {

@@ -285,9 +285,11 @@ const balanceError = ref('')
 const balanceTarget = ref(null)
 const balanceForm = ref({ amount: '', note: '' })
 
+// 余额一律两位小数（元 → 分）。后端 serializeBalance 也是这个口径，
+// 两处必须一致，否则「列表里 4.64、详情里 4.639944」会让人以为算错了。
 function formatBalance(micro) {
   const v = (Number(micro) || 0) / microsPerUnit.value
-  return `${Number(v.toFixed(6))} ${unit.value}`
+  return `${Number(v.toFixed(2))} ${unit.value}`
 }
 
 const previewBalance = computed(() => {

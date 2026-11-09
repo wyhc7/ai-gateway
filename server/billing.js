@@ -151,10 +151,34 @@ function accountById(id) {
 }
 
 // 微元 → 可读字符串，最多 6 位小数、去掉尾随零。
-export function formatUnits(micro, microsPerUnit) {
+// digits 控制精度上限：金额/余额用 2（人看钱只看分），单笔扣费留 6
+// （一次便宜调用可能只有 0.000253 元，砍到 2 位就成 0 了，流水等于白记）。
+//
+// 不能直接 toFixed：二进制浮点存不下 4.635 这种十进制值，
+// 实际是 4.63499999...，toFixed(2) 给出 4.63 而人手算得 4.64。
+// 先把值按目标精度放大再四舍五入回整数，中途加一个极小的 epsilon 抵掉
+// 浮点误差，最后拼字符串——这样「正好卡在半分」的情况按人的直觉走。
+export function formatUnits(micro, microsPerUnit, digits = 6) {
   const per = Number(microsPerUnit) > 0 ? Number(microsPerUnit) : MICROS_PER_UNIT
   const v = (Number(micro) || 0) / per
-  return Number(v.toFixed(6)).toString()
+  const d = Number.isInteger(digits) && digits >= 0 && digits <= 8 ? digits : 6
+  const neg = v < 0
+  const abs = Math.abs(v)
+  const scale = 10 ** d
+  // +1e-9 是给浮点误差留的余量：4.6349999999 应该进到 4.635
+  const scaled = Math.round(abs * scale + 1e-9)
+  // 用整数运算拼小数部分，避免 toString 又把尾巴带回来
+  const intPart = Math.floor(scaled / scale)
+  let frac = String(scaled % scale).padStart(d, '0').replace(/0+$/, '')
+  const sign = neg && scaled !== 0 ? '-' : ''
+  return frac ? `${sign}${intPart}.${frac}` : `${sign}${intPart}`
+}
+
+// 余额/充值这类「账户里有多少钱」的口径，固定两位小数（元 → 分）。
+// 与 formatUnits(..., 6) 的区别只在这一处：4.639944 微元价值显示成 4.64，
+// 而不是把每一微元的零头都摊在用户脸上。
+export function formatMoney(micro, microsPerUnit) {
+  return formatUnits(micro, microsPerUnit, 2)
 }
 
 export function balanceMicroOf(accountId) {
@@ -167,8 +191,10 @@ export function serializeBalance(accountId) {
   const micro = balanceMicroOf(accountId)
   return {
     micro,
-    value: Number((micro / b.micros_per_unit).toFixed(6)),
-    display: `${formatUnits(micro, b.micros_per_unit)} ${b.unit}`,
+    // value 给前端直接渲染用：两位小数（分），4.639944 → 4.64。
+    // micro 保留原始整数，前端要精确计算时用它，不要用 value。
+    value: Number((micro / b.micros_per_unit).toFixed(2)),
+    display: `${formatMoney(micro, b.micros_per_unit)} ${b.unit}`,
     unit: b.unit,
     currency: b.currency,
     micros_per_unit: b.micros_per_unit
@@ -211,8 +237,11 @@ function serializeLedgerEntry(e) {
   const b = billingConfig()
   return {
     ...e,
+    // 变动额保留 6 位：单次调用可能只花 0.000253 元，砍到 2 位就成了 0，
+    // 用户会觉得「这条流水是假的」。
     delta_display: `${e.delta_micro > 0 ? '+' : ''}${formatUnits(e.delta_micro, b.micros_per_unit)} ${b.unit}`,
-    balance_display: `${formatUnits(e.balance_after_micro, b.micros_per_unit)} ${b.unit}`
+    // 变动后余额是账户口径，两位小数
+    balance_display: `${formatMoney(e.balance_after_micro, b.micros_per_unit)} ${b.unit}`
   }
 }
 
