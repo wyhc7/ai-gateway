@@ -55,12 +55,27 @@ export function normalizeBilling(obj) {
   const before = JSON.stringify(obj)
 
   // 老配置（v0.7 之前）只有一个 price_per_1k_tokens_micro，单位是「每 1000 tokens」。
-  // 迁移时把它折算成新口径的「未命中输入价」——每 1000 tokens 的价 × 1000
-  // 就是每百万 tokens 的价。这样老部署升级后账单量级不会突变，
-  // 只是从此会区分输入/输出/缓存命中。
-  if (obj.price_input_uncached_micro_per_mtok == null && obj.price_per_1k_tokens_micro != null) {
+  //
+  // 迁移策略：只有当三个新字段全部不存在时才折算，且折算结果要「有上限」——
+  // 老默认值 1_000_000 微点/千 token 折成百万口径是 1e9 微元 = 1000 元/百万，
+  // 显然不是用户想要的价。因此凡是折算结果超过 DEFAULT 的 100 倍，
+  // 就判定为「老默认值」直接采用新默认价，而不是照单全收。
+  // 真正的自定义低价（比如 50 微元/千 token）会得到 50_000 微元/百万，低于阈值，照常保留。
+  const hasAnyNew =
+    obj.price_input_cached_micro_per_mtok != null ||
+    obj.price_input_uncached_micro_per_mtok != null ||
+    obj.price_output_micro_per_mtok != null ||
+    obj.price_per_image_micro != null
+  if (!hasAnyNew && obj.price_per_1k_tokens_micro != null) {
     const old = Math.max(0, Number(obj.price_per_1k_tokens_micro) || 0)
-    obj.price_input_uncached_micro_per_mtok = Math.trunc(old * 1000)
+    const folded = Math.trunc(old * 1000) // 每千 → 每百万
+    const cap = d.price_input_uncached_micro_per_mtok * 100
+    if (folded > 0 && folded <= cap) {
+      obj.price_input_uncached_micro_per_mtok = folded
+    } else if (folded > cap) {
+      // 老默认值或异常高值：落到新默认价，别把账单放大到荒谬的量级
+      obj.price_input_uncached_micro_per_mtok = d.price_input_uncached_micro_per_mtok
+    }
   }
   delete obj.price_per_1k_tokens_micro
 

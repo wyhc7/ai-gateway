@@ -110,18 +110,31 @@ test('负数与非法值被当成 0，不会反过来给用户加钱', () => {
   })
 })
 
-test('老配置迁移：price_per_1k_tokens_micro 折算成每百万，且字段被清掉', () => {
+test('老默认值迁移不会被放大：1 点/千 token 落到新默认价而不是 1000 元', () => {
   const old = {
     unit: '点',
     currency: 'POINT',
     micros_per_unit: 1_000_000,
-    price_per_1k_tokens_micro: 1_000_000, // 老口径：每 1000 tokens 1 点
+    price_per_1k_tokens_micro: 1_000_000, // 老默认：每 1000 tokens 1 点
     enabled: true
   }
   normalizeBilling(old)
-  // 1e6 微元/千 token × 1000 = 1e9 微元/百万 token
-  assert.equal(old.price_input_uncached_micro_per_mtok, 1_000_000_000)
+  // 折算成 1e9 微元/百万 = 1000 元/百万，远超上限，必须回落到 0.1 元
+  assert.equal(old.price_input_uncached_micro_per_mtok, 100_000)
   assert.equal(old.price_per_1k_tokens_micro, undefined, '老字段必须被删除，避免两套口径并存')
+})
+
+test('老配置里的自定义低价仍然照实迁移', () => {
+  const old = { micros_per_unit: 1_000_000, price_per_1k_tokens_micro: 50, enabled: true }
+  normalizeBilling(old)
+  // 50 微元/千 = 50,000 微元/百万，低于上限，照实保留
+  assert.equal(old.price_input_uncached_micro_per_mtok, 50_000)
+})
+
+test('已有新字段时不再用老字段覆盖', () => {
+  const cfg = { price_input_uncached_micro_per_mtok: 100_000, price_per_1k_tokens_micro: 999, enabled: true }
+  normalizeBilling(cfg)
+  assert.equal(cfg.price_input_uncached_micro_per_mtok, 100_000, '新字段优先')
 })
 
 test('normalizeBilling 会补上新字段并把单位改成元', () => {
