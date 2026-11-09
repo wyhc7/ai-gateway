@@ -6,16 +6,18 @@
 //   输出             0.5 元 / 百万 tokens =    500,000 微元
 //   生图             0.06 元 / 张        =     60,000 微元
 //
-// 只测纯函数 computeUsageCostMicro 与 normalizeBilling 的迁移，
-// 不碰 store.state，因此不需要起服务。
+// 只测纯函数 computeUsageCostMicro 与 normalizeBilling 的迁移。
+//
+// 加载顺序有讲究：store.js 与 billing.js 互相依赖（store 的默认值来自 billing，
+// billing 的 MICROS_PER_UNIT 来自 store）。谁先被求值都可能踩到
+// 「Cannot access 'MICROS_PER_UNIT' before initialization」。
+// 先 import billing，等它的模块体跑完再取 store，顺序就稳了。
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-const { DEFAULT_BILLING, normalizeBilling } = await import('../billing.js')
-
-// computeUsageCostMicro 读的是 store.state.billing，测试里直接替换成默认配置后调用。
-// 用动态 import 拿到 store 的引用做注入，避免为了跑测试去动真实配置文件。
+const billing = await import('../billing.js')
 const store = await import('../store.js')
+const { DEFAULT_BILLING, normalizeBilling, computeUsageCostMicro } = billing
 function withPricing(fn) {
   const prev = store.state.billing
   store.state.billing = DEFAULT_BILLING()
@@ -25,7 +27,6 @@ function withPricing(fn) {
     store.state.billing = prev
   }
 }
-const { computeUsageCostMicro } = await import('../billing.js')
 
 test('默认定价就是约定的四档人民币单价', () => {
   const b = DEFAULT_BILLING()

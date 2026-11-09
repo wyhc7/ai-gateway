@@ -166,15 +166,18 @@
           @keyup.enter="submitGate"
         />
       </el-form-item>
-      <el-form-item :label="gateMode === 'setup' ? '设置密码' : '密码'">
+      <el-form-item :label="gateMode === 'login' ? '密码' : '设置密码'">
         <el-input
           v-model="gateForm.password"
           type="password"
-          :autocomplete="gateMode === 'setup' ? 'new-password' : 'current-password'"
+          :autocomplete="gateMode === 'login' ? 'current-password' : 'new-password'"
           :placeholder="`至少 ${passwordMin} 位`"
           show-password
           @keyup.enter="submitGate"
         />
+      </el-form-item>
+      <el-form-item v-if="gateMode === 'register'" label="确认密码">
+        <el-input v-model="gateForm.confirm" type="password" autocomplete="new-password" placeholder="再输一次" show-password @keyup.enter="submitGate" />
       </el-form-item>
       <el-form-item v-if="gateMode === 'setup'" label="确认密码">
         <el-input v-model="gateForm.confirm" type="password" autocomplete="new-password" placeholder="再输一次" show-password @keyup.enter="submitGate" />
@@ -184,6 +187,21 @@
         <div class="field-note">首次创建必须用现有管理密钥认领，避免暴露在公网的实例被陌生人占为管理员。</div>
       </el-form-item>
     </el-form>
+
+    <!-- 注册入口：只有服务端开了 registration.enabled 才出现 -->
+    <p v-if="gateMode === 'login' && registrationOpen" class="fallback-line">
+      <button type="button" class="link-btn" @click="switchToRegister">
+        还没有账号？自助注册
+      </button>
+    </p>
+    <p v-if="gateMode === 'register'" class="fallback-line">
+      <button type="button" class="link-btn" @click="switchToLogin">
+        已有账号？返回登录
+      </button>
+    </p>
+    <div v-if="gateMode === 'register'" class="field-note reg-note">
+      注册后余额为 0，需要管理员充值后才能调用接口；专属调用密钥在「我的仪表盘」里自助生成。
+    </div>
 
     <p v-if="gateMode === 'login'" class="fallback-line">
       <button type="button" class="link-btn" @click="showFallback = !showFallback">
@@ -201,7 +219,7 @@
     <template #footer>
       <el-button v-if="gateDismissible" @click="gateVisible = false">稍后再说</el-button>
       <el-button type="primary" :loading="gateBusy" :disabled="!gateValid" @click="submitGate">
-        {{ gateMode === 'setup' ? '创建管理员并登录' : '登录' }}
+        {{ gateMode === 'setup' ? '创建管理员并登录' : (gateMode === 'register' ? '注册并登录' : '登录') }}
       </el-button>
     </template>
   </el-dialog>
@@ -257,6 +275,9 @@ const gateError = ref('')
 const gateDismissible = ref(false)
 const showFallback = ref(false)
 const needsSetup = ref(false)
+// 服务端是否开放自助注册。默认 false——登录页在拿到 /api/auth/registration 之前
+// 不显示注册入口，避免点进去才发现 403。
+const registrationOpen = ref(false)
 const passwordMin = ref(8)
 const currentAccount = ref(null)
 const currentVia = ref('')
@@ -271,16 +292,35 @@ const isAdmin = sharedIsAdmin
 const accountLabel = computed(() => currentAccount.value?.username || '管理密钥通道')
 const avatarText = computed(() => (currentAccount.value?.username || 'K').slice(0, 1).toUpperCase())
 
-const gateTitle = computed(() => gateMode.value === 'setup' ? '初始化管理员账号' : '登录 AI 中转站')
-const gateHint = computed(() => gateMode.value === 'setup'
-  ? '这台网关还没有账号。先创建第一个管理员，之后可用用户名与密码登录。'
-  : '输入账号密码登录。管理员进入完整控制台，普通用户进入「我的仪表盘」；管理密钥仍可作为应急通道使用。')
+const gateTitle = computed(() => {
+  if (gateMode.value === 'setup') return '初始化管理员账号'
+  if (gateMode.value === 'register') return '注册账号'
+  return '登录 AI 中转站'
+})
+const gateHint = computed(() => {
+  if (gateMode.value === 'setup') return '这台网关还没有账号。先创建第一个管理员，之后可用用户名与密码登录。'
+  if (gateMode.value === 'register') return '填一个用户名和密码即可开通。注册后进入「我的仪表盘」，等管理员充值后就能调用接口。'
+  return '输入账号密码登录。管理员进入完整控制台，普通用户进入「我的仪表盘」；管理密钥仍可作为应急通道使用。'
+})
 const gateValid = computed(() => {
   const f = gateForm.value
   if (!f.username.trim() || f.password.length < passwordMin.value) return false
   if (gateMode.value === 'setup') return f.confirm === f.password && Boolean(f.adminKey.trim())
+  if (gateMode.value === 'register') return f.confirm === f.password
   return true
 })
+
+function switchToRegister() {
+  gateMode.value = 'register'
+  gateError.value = ''
+  gateForm.value = { username: '', password: '', confirm: '', adminKey: '' }
+}
+
+function switchToLogin() {
+  gateMode.value = 'login'
+  gateError.value = ''
+  gateForm.value = { username: '', password: '', confirm: '', adminKey: '' }
+}
 
 // 侧边栏上的「有新版本」小红点。检查失败（离线、非 git 部署）静默忽略——
 // 一个环境探测的结果不该打断控制台的正常使用。
@@ -326,6 +366,13 @@ async function bootstrap() {
   }
   needsSetup.value = !status.initialized
   passwordMin.value = Number(status.password_min_length) || 8
+
+  // 注册开关：失败就当关闭，绝不让登录页出现点了会 403 的入口
+  try {
+    registrationOpen.value = Boolean((await api.authRegistration())?.enabled)
+  } catch {
+    registrationOpen.value = false
+  }
 
   if (getSessionToken()) {
     try {
@@ -379,25 +426,34 @@ function enterWithAdminKey() {
 
 async function submitGate() {
   if (!gateValid.value || gateBusy.value) return
-  const wasSetup = gateMode.value === 'setup'
+  const mode = gateMode.value
   gateBusy.value = true
   gateError.value = ''
   try {
-    const out = wasSetup
+    const out = mode === 'setup'
       ? await api.authSetup({
           username: gateForm.value.username.trim(),
           password: gateForm.value.password,
           admin_key: gateForm.value.adminKey.trim()
         })
-      : await api.authLogin({
-          username: gateForm.value.username.trim(),
-          password: gateForm.value.password
-        })
+      : mode === 'register'
+        ? await api.authRegister({
+            username: gateForm.value.username.trim(),
+            password: gateForm.value.password
+          })
+        : await api.authLogin({
+            username: gateForm.value.username.trim(),
+            password: gateForm.value.password
+          })
     setSessionToken(out.token)
     clearAdminKey()
     needsSetup.value = false
     enterConsole(out.account, 'session')
-    ElMessage.success(wasSetup ? '管理员已创建' : `欢迎回来，${out.account.username}`)
+    ElMessage.success(
+      mode === 'setup' ? '管理员已创建'
+        : mode === 'register' ? `注册成功，欢迎 ${out.account.username}`
+          : `欢迎回来，${out.account.username}`
+    )
   } catch (e) {
     gateError.value = e?.message || '操作失败，请重试'
   } finally {

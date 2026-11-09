@@ -28,6 +28,16 @@
       <div class="role-foot">
         密码以 scrypt 加盐摘要存于 <code class="mono">config.json</code>，明文不落盘；会话令牌默认 {{ sessionTtlHours }} 小时有效，重置密码后该账号已签发的令牌立即全部失效。余额以整数微元（元）存储，充值/扣减与每次调用扣费都留流水。
       </div>
+      <div class="reg-switch">
+        <div class="reg-switch-text">
+          <div class="reg-switch-title">自助注册</div>
+          <div class="reg-switch-desc">
+            开启后，登录页会出现「自助注册」入口，任何人可自行开通普通用户账号（角色固定 user、初始余额 0）。
+            同一 IP 每小时最多 5 个。关闭时只有管理员能在本页建号。
+          </div>
+        </div>
+        <el-switch v-model="registrationEnabled" :loading="regBusy" @change="toggleRegistration" />
+      </div>
     </div>
 
     <div v-loading="loading">
@@ -199,6 +209,11 @@ const sessionTtlHours = ref(168)
 const unit = ref('元')
 const microsPerUnit = ref(1_000_000)
 
+// 自助注册开关：进页面时读一次真实状态，切换时乐观更新、失败回滚，
+// 避免出现「开关显示开着但服务端其实关着」的错位。
+const registrationEnabled = ref(false)
+const regBusy = ref(false)
+
 const dialogVisible = ref(false)
 const dialogError = ref('')
 const editing = ref(null)
@@ -237,10 +252,12 @@ function formatTime(ts) {
 async function load() {
   loading.value = true
   try {
-    const [list, me, status] = await Promise.all([
+    const [list, me, status, reg] = await Promise.all([
       api.getAccounts(),
       api.authMe(),
-      api.authStatus()
+      api.authStatus(),
+      // 注册开关读失败不该让整页报错：退化成「关闭」，管理员手动拨一下即可
+      api.authRegistration().catch(() => ({ enabled: false }))
     ])
     accounts.value = list.accounts || []
     currentAccountId.value = me?.account?.id || ''
@@ -248,10 +265,29 @@ async function load() {
     sessionTtlHours.value = Number(status?.session_ttl_hours) || 168
     unit.value = list.pricing?.unit || '元'
     microsPerUnit.value = Number(list.pricing?.micros_per_unit) || 1_000_000
+    registrationEnabled.value = Boolean(reg?.enabled)
   } catch (e) {
     notifyError(e, '加载账号列表失败')
   } finally {
     loading.value = false
+  }
+}
+
+// 拨开关：先按用户意图更新，请求失败再拨回去。
+// 不做「等响应再动」是因为 el-switch 已经在 UI 上翻了，静默回滚比滞后更难受。
+async function toggleRegistration(next) {
+  const target = Boolean(next)
+  regBusy.value = true
+  const prev = !target
+  try {
+    const out = await api.setRegistration(target)
+    registrationEnabled.value = Boolean(out?.enabled)
+    ElMessage.success(out?.enabled ? '已开放自助注册' : '已关闭自助注册')
+  } catch (e) {
+    registrationEnabled.value = prev
+    notifyError(e, '切换注册开关失败')
+  } finally {
+    regBusy.value = false
   }
 }
 
@@ -447,6 +483,29 @@ onMounted(load)
   color: var(--ink-3);
   line-height: 1.7;
 }
+
+/* 自助注册开关：与上面的角色说明同一条卡片，用一条分隔线接住 */
+.reg-switch {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--rule-soft);
+}
+.reg-switch-text { flex: 1; min-width: 0; }
+.reg-switch-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 3px;
+}
+.reg-switch-desc {
+  font-size: 12px;
+  color: var(--ink-3);
+  line-height: 1.65;
+}
+.reg-note { margin-top: -4px; }
 
 .acc-name { font-size: 13.5px; }
 .acc-note { font-size: 11.5px; color: var(--ink-3); margin-top: 2px; }

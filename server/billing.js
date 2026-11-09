@@ -36,7 +36,10 @@ export function DEFAULT_BILLING() {
   return {
     unit: '元',
     currency: 'CNY',
-    micros_per_unit: MICROS_PER_UNIT,
+    // 这里写字面量而不是 MICROS_PER_UNIT：store.js 在模块求值期就会调用
+    // normalizeBilling → DEFAULT_BILLING，此时本文件的 const 还在 TDZ 里，
+    // 引用它会让整个进程起不来（Cannot access 'MICROS_PER_UNIT' before initialization）。
+    micros_per_unit: 1_000_000,
     price_input_cached_micro_per_mtok: 10_000,
     price_input_uncached_micro_per_mtok: 100_000,
     price_output_micro_per_mtok: 500_000,

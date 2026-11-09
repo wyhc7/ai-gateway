@@ -73,6 +73,11 @@ export const api = {
   authMe: () => request('/api/auth/me', { skipAuth: true }),
   authChangePassword: (data) => request('/api/auth/password', { method: 'POST', body: JSON.stringify(data), skipAuth: true }),
   authLogout: () => request('/api/auth/logout', { method: 'POST', skipAuth: true }),
+  // 自助注册：服务端还有两道闸（config.registration.enabled + 每 IP 每小时 5 个）
+  authRegister: (data) => request('/api/auth/register', { method: 'POST', body: JSON.stringify(data), skipAuth: true }),
+  // 登录页据此决定要不要显示「注册」入口，所以必须匿名可读
+  authRegistration: () => request('/api/auth/registration', { skipAuth: true }),
+  setRegistration: (enabled) => request('/api/auth/registration', { method: 'POST', body: JSON.stringify({ enabled }) }),
 
   // 账号管理（仅管理员）
   getAccounts: () => request('/api/accounts'),

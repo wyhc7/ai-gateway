@@ -63,6 +63,11 @@ const DEFAULT_STATE = () => ({
     ledger_limit: 500
   },
   billing_ledger: [],
+  // 自助注册开关。默认关闭：升级到这一版的现有部署不该突然对外开放注册口，
+  // 要开由管理员在「账号管理」里显式点开。
+  registration: {
+    enabled: false
+  },
   stats: defaultStats(),
   created_at: Date.now()
 })
@@ -164,6 +169,14 @@ function ensureAccountFields(obj) {
   else if (normalizeBilling(obj.billing)) changed = true
   if (normalizeAccountBalances(obj)) changed = true
   if (normalizeLedger(obj)) changed = true
+  // 注册开关：老配置没有这一段，补一个默认关闭的，别让升级顺带开了注册口
+  if (!obj.registration || typeof obj.registration !== 'object' || Array.isArray(obj.registration)) {
+    obj.registration = { enabled: false }
+    changed = true
+  } else if (typeof obj.registration.enabled !== 'boolean') {
+    obj.registration.enabled = false
+    changed = true
+  }
   return changed
 }
 

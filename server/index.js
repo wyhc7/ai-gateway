@@ -52,7 +52,8 @@ import { checkUpdate, applyUpdate, normalizeForceMode, FORCE_MODES } from './upd
 import {
   authStatus, setupAdmin, login as accountLogin, verifySession,
   serializeAccount, changeOwnPassword, listAccounts, createAccount,
-  updateAccount, deleteAccount, resetAccountPassword
+  updateAccount, deleteAccount, resetAccountPassword,
+  registerAccount, registrationEnabled
 } from './accounts.js'
 import {
   startDeviceFlow,
@@ -334,7 +335,12 @@ app.use((req, res, next) => {
 //
 // 常量放在这里是因为鉴权中间件在路由注册之前就执行，需要提前引用。
 const CHATGPT_OAUTH_CALLBACK_PATH = '/api/chatgpt-accounts/oauth/callback'
-const PUBLIC_AUTH_PATHS = new Set(['/api/auth/status', '/api/auth/setup', '/api/auth/login'])
+const PUBLIC_AUTH_PATHS = new Set([
+  '/api/auth/status', '/api/auth/setup', '/api/auth/login',
+  // 自助注册与开关查询必须匿名可访问：还没账号的人根本拿不到会话令牌。
+  // 真正的闸在路由内部（registration.enabled + 每 IP 限流），不在这一层。
+  '/api/auth/register', '/api/auth/registration'
+])
 // 普通用户当前只能用这几个自助端点；用户面板还没做，控制台其余接口一律 403。
 // 角色数据先建好，等用户面板上线时把这道限制放开即可，不用再动账号表。
 const SELF_AUTH_PATHS = new Set([
@@ -441,6 +447,29 @@ app.post('/api/auth/login', accountRoute((req, res) => {
   res.json(out)
 }))
 
+// 自助注册。公开端点（在 PUBLIC_AUTH_PATHS 里放行），所以有两道闸：
+//   1. config.registration.enabled 必须为 true —— 默认关闭，管理员显式开；
+//   2. 同 IP 每小时最多 5 个账号 —— 放开注册也不至于被人刷出几百个号。
+// 角色写死 user，参数里根本没有 role 这个口子。
+app.post('/api/auth/register', accountRoute((req, res) => {
+  if (!registrationEnabled()) {
+    return res.status(403).json({
+      error: { message: '本站未开放自助注册，请联系管理员开通账号', type: 'registration_disabled' }
+    })
+  }
+  const out = registerAccount(
+    { username: req.body?.username, password: req.body?.password, note: req.body?.note },
+    req.ip || req.socket?.remoteAddress
+  )
+  addLog({ type: 'auth', method: 'POST', path: '/api/auth/register', status: 201, detail: `新用户注册：${out.account.username}` })
+  res.status(201).json(out)
+}))
+
+// 注册开关的读/写：读公开（登录页要据此决定显不显示「注册」），写仅管理员。
+app.get('/api/auth/registration', accountRoute((req, res) => {
+  res.json({ enabled: registrationEnabled() })
+}))
+
 app.get('/api/auth/me', accountRoute((req, res) => {
   res.json({
     role: req.auth.role,
@@ -459,6 +488,23 @@ app.post('/api/auth/password', accountRoute((req, res) => {
   addLog({ type: 'auth', method: 'POST', path: '/api/auth/password', status: 200, detail: `${req.auth.account.username} 修改了密码` })
   res.json(out)
 }))
+
+// 管理员开关自助注册。写进 config.registration.enabled，随 config.json 落盘。
+// 要求 manage 权限（accountRoute 默认就是），普通用户碰不到。
+app.post('/api/auth/registration', accountRoute((req, res) => {
+  if (req.auth.role !== 'admin') {
+    return res.status(403).json({ error: { message: '只有管理员能修改注册开关', type: 'forbidden' } })
+  }
+  const enabled = Boolean(req.body?.enabled)
+  state.registration = { ...(state.registration || {}), enabled }
+  persistImmediate()
+  addLog({
+    type: 'auth', method: 'POST', path: '/api/auth/registration', status: 200,
+    detail: `自助注册已${enabled ? '开启' : '关闭'}`
+  })
+  res.json({ enabled })
+}))
+
 
 // 无状态令牌服务端没有会话表可删：前端丢掉令牌即完成登出，这里只记一条审计。
 app.post('/api/auth/logout', accountRoute((req, res) => {

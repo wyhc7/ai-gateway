@@ -313,6 +313,90 @@ export function createAccount({ username, password, role = 'user', note = '' }) 
   return serializeAccount(account)
 }
 
+// ---------------------------------------------------------------------------
+// 自助注册
+// ---------------------------------------------------------------------------
+//
+// 与 createAccount 的区别：
+//   1. 角色永远是 user —— 参数里根本没有 role，杜绝注册成管理员；
+//   2. 不看 manage 权限，所以必须自带限流，否则就是一个开放的建号机；
+//   3. 注册成功直接签发会话，省掉「注册完再登一次」这一步。
+//
+// 限流用独立的一张表（registerHits），不复用登录失败的 failures：
+// 两者的窗口语义不同（注册是「每小时最多 N 个」，登录是「错 5 次锁 60 秒」），
+// 混在一起会出现「注册成功也被算进登录失败次数」的怪事。
+const REGISTER_MAX_PER_IP = 5
+const REGISTER_WINDOW_MS = 60 * 60 * 1000
+const registerHits = new Map()
+
+function registerRateKey(ip) {
+  return `reg|${String(ip || '?')}`
+}
+
+function checkRegisterRate(ip) {
+  const key = registerRateKey(ip)
+  const now = Date.now()
+  let rec = registerHits.get(key)
+  if (!rec || now >= rec.resetAt) {
+    rec = { count: 0, resetAt: now + REGISTER_WINDOW_MS }
+    registerHits.set(key, rec)
+  }
+  if (rec.count >= REGISTER_MAX_PER_IP) {
+    const mins = Math.ceil((rec.resetAt - now) / 60000)
+    throw fail(429, `注册过于频繁，请 ${mins} 分钟后再试`)
+  }
+  rec.count += 1
+  return key
+}
+
+// 注册失败（用户名重复/密码太弱）不该占满配额，否则打错两次就被锁一小时
+function refundRegisterRate(key) {
+  const rec = registerHits.get(key)
+  if (rec && rec.count > 0) rec.count -= 1
+}
+
+export function registerAccount({ username, password, note = '' }, clientIp) {
+  const name = validateUsername(username)
+  const pw = validatePassword(password)
+
+  const rateKeyName = checkRegisterRate(clientIp)
+  try {
+    if (accountsArray().some((a) => a.username === name)) {
+      throw fail(409, `用户名「${name}」已被占用`)
+    }
+    const { salt, hash } = hashPassword(pw)
+    const account = {
+      id: genId(),
+      username: name,
+      password_salt: salt,
+      password_hash: hash,
+      password_version: 1,
+      role: 'user',           // 硬编码，不接受外部传入
+      enabled: true,
+      note: String(note || '').slice(0, 200),
+      balance_micro: 0,       // 初始 0 元，充值后才能调用
+      created_at: Date.now(),
+      last_login_at: Date.now()
+    }
+    accountsArray().push(account)
+    persistImmediate()
+    return {
+      token: createSession(account),
+      account: serializeAccount(account),
+      session_ttl_hours: SESSION_TTL_HOURS
+    }
+  } catch (err) {
+    refundRegisterRate(rateKeyName)
+    throw err
+  }
+}
+
+// 注册开关。默认关闭——升级到这一版的现有部署不该突然对外开放注册。
+// 管理员在「账号管理」里开关，写进 config.registration.enabled。
+export function registrationEnabled() {
+  return state.registration?.enabled === true
+}
+
 export function updateAccount(id, patch, actorId) {
   const account = findAccount(id)
   const wasActiveAdmin = account.role === 'admin' && account.enabled !== false
