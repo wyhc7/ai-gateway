@@ -281,19 +281,26 @@ export function resolveAuth(token) {
 }
 
 // 记录用量。批量经 store 的 scheduleFlush 落盘，不在请求路径上做同步写。
-// 如果这把 Key 绑定了用户账号，同时按真实 token 用量结算余额（见 billing.js）；
+// 如果这把 Key 绑定了用户账号，同时按真实用量结算余额（见 billing.js）；
 // 失败请求不扣费，主密钥与未绑定账号的老 Key 完全不受影响。
-export function recordUsage(auth, { tokens = 0, ok = true, model = '' } = {}) {
+//
+// usage 是已归类的用量：{ input_cached, input_uncached, output, images }。
+// 这里只做两件事——累加仪表盘的 token 统计、把 usage 原样交给计费层。
+export function recordUsage(auth, { usage = null, ok = true, model = '' } = {}) {
   if (!auth || auth.kind !== 'key' || !auth._key) return
   const key = auth._key
   key.usage = key.usage || { requests: 0, failed: 0, tokens: 0 }
   key.usage.requests += 1
   if (!ok) key.usage.failed += 1
-  const n = Number(tokens) || 0
+  // 仪表盘的 tokens 是「token 总数」口径，不含生图张数（那张数不是 token）
+  const n = usage
+    ? (Number(usage.input_cached) || 0) + (Number(usage.input_uncached) || 0) +
+      (Number(usage.output) || 0) + (Number(usage.total) || 0)
+    : 0
   if (n > 0) key.usage.tokens += n
   key.last_used_at = Date.now()
   persist()
-  consumeForUsage(auth, { tokens: n, ok, model })
+  consumeForUsage(auth, { usage, ok, model })
 }
 
 // ---------------------------------------------------------------------------

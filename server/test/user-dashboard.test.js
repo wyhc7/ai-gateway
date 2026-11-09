@@ -94,7 +94,7 @@ test('初始化管理员 + 建两个 user；老配置字段迁移后余额/计�
 
   const cfg = JSON.parse(readFileSync(join(dataDir, 'config.json'), 'utf-8'))
   assert.equal(cfg.billing.micros_per_unit, 1_000_000)
-  assert.equal(cfg.billing.price_per_1k_tokens_micro, 1_000_000)
+  assert.equal(cfg.billing.price_input_uncached_micro_per_mtok, 100_000)
   assert.ok(Array.isArray(cfg.billing_ledger))
   for (const a of cfg.accounts) {
     assert.equal(a.balance_micro, 0)
@@ -111,7 +111,7 @@ test('用户仪表盘：最初无密钥、0 余额、空流水、对接信息齐
   assert.equal(d.account.role, 'user')
   assert.equal(d.balance.micro, 0)
   assert.equal(d.balance.value, 0)
-  assert.equal(d.balance.unit, '点')
+  assert.equal(d.balance.unit, '元')
   assert.equal(d.key, null)
   assert.equal(d.key_state, 'empty', '「最初无密钥」必须是明确的空态')
   assert.deepEqual(d.usage, { requests: 0, failed: 0, tokens: 0 })
@@ -119,7 +119,9 @@ test('用户仪表盘：最初无密钥、0 余额、空流水、对接信息齐
   assert.ok(d.base_url.endsWith('/v1'))
   assert.ok(d.api_v1_url.endsWith('/api/v1'))
   assert.match(d.protocol, /OpenAI/)
-  assert.equal(d.pricing.price_per_1k_tokens_display, '1 点 / 1K tokens')
+  assert.equal(d.pricing.price_input_uncached_display, '0.1 元 / 百万 tokens')
+    assert.equal(d.pricing.price_output_display, '0.5 元 / 百万 tokens')
+    assert.equal(d.pricing.price_per_image_display, '0.06 元 / 张')
   assert.equal(JSON.stringify(d).includes('sk-'), false, '空态不该泄露任何密钥')
   assert.equal(JSON.stringify(d).includes('password_hash'), false)
 
@@ -146,7 +148,7 @@ test('管理员充值 → 余额与流水正确；非法金额 400；扣减夹�
   const adminToken = await login('root', 'password123')
   const list = await json(await call('/api/accounts', { token: adminToken }))
   const alice = list.body.accounts.find((a) => a.username === 'alice')
-  assert.equal(list.body.pricing.unit, '点')
+  assert.equal(list.body.pricing.unit, '元')
 
   const bad = await json(await call(`/api/accounts/${alice.id}/balance`, {
     method: 'POST', token: adminToken, body: { amount: 0 }
@@ -158,7 +160,7 @@ test('管理员充值 → 余额与流水正确；非法金额 400；扣减夹�
   }))
   assert.equal(topup.status, 200)
   assert.equal(topup.body.balance.micro, 10_000_000)
-  assert.equal(topup.body.balance.display, '10 点')
+  assert.equal(topup.body.balance.display, '10 元')
   assert.equal(topup.body.account.balance_micro, 10_000_000)
 
   const userToken = await login('alice', 'alice-password')

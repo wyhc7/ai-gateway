@@ -36,23 +36,31 @@ beforeEach(() => {
 })
 
 describe('配置与字段归一化', () => {
-  test('DEFAULT_BILLING 的默认计价：1 点 / 1K tokens，无请求基础费', () => {
+  test('DEFAULT_BILLING：人民币四档定价，无请求基础费', () => {
     const b = billing.DEFAULT_BILLING()
+    assert.equal(b.unit, '元')
+    assert.equal(b.currency, 'CNY')
     assert.equal(b.micros_per_unit, 1_000_000)
-    assert.equal(b.price_per_1k_tokens_micro, 1_000_000)
+    assert.equal(b.price_input_cached_micro_per_mtok, 10_000, '0.01 元 / 百万')
+    assert.equal(b.price_input_uncached_micro_per_mtok, 100_000, '0.1 元 / 百万')
+    assert.equal(b.price_output_micro_per_mtok, 500_000, '0.5 元 / 百万')
+    assert.equal(b.price_per_image_micro, 60_000, '0.06 元 / 张')
     assert.equal(b.request_fee_micro, 0)
     assert.equal(b.enabled, true)
   })
 
   test('normalizeBilling 夹住非法值、补齐缺失字段', () => {
-    const raw = { micros_per_unit: -5, price_per_1k_tokens_micro: 'oops', request_fee_micro: 7, ledger_limit: 999999, enabled: 'no' }
+    const raw = { micros_per_unit: -5, price_input_cached_micro_per_mtok: 'oops', request_fee_micro: 7, ledger_limit: 999999, enabled: 'no' }
     assert.equal(billing.normalizeBilling(raw), true)
     assert.equal(raw.micros_per_unit, 1, '下限夹到 1')
-    assert.equal(raw.price_per_1k_tokens_micro, 1_000_000, '非法值回落默认')
+    assert.equal(raw.price_input_cached_micro_per_mtok, 10_000, '非法值回落默认')
+    assert.equal(raw.price_input_uncached_micro_per_mtok, 100_000, '缺失补默认')
+    assert.equal(raw.price_output_micro_per_mtok, 500_000, '缺失补默认')
+    assert.equal(raw.price_per_image_micro, 60_000, '缺失补默认')
     assert.equal(raw.request_fee_micro, 7)
     assert.equal(raw.ledger_limit, 5000, '上限夹到 5000')
-    assert.equal(raw.unit, '点')
-    assert.equal(raw.currency, 'POINT')
+    assert.equal(raw.unit, '元')
+    assert.equal(raw.currency, 'CNY')
     assert.equal(raw.enabled, true, '字符串 no 不是布尔 false，按启用处理')
     assert.equal(billing.normalizeBilling(raw), false, '二次归一化不应再改动')
   })
@@ -96,7 +104,7 @@ describe('余额变动与流水', () => {
     const out = billing.applyBalance('u1', { amount_micro: 10_000_000, type: 'topup', actor: 'root', note: '10 月配额' })
     assert.equal(out.micro, 10_000_000)
     assert.equal(out.value, 10)
-    assert.equal(out.display, '10 点')
+    assert.equal(out.display, '10 元')
 
     const ledger = billing.ledgerOf('u1')
     assert.equal(ledger.length, 1)
@@ -104,7 +112,7 @@ describe('余额变动与流水', () => {
     assert.equal(ledger[0].delta_micro, 10_000_000)
     assert.equal(ledger[0].balance_after_micro, 10_000_000)
     assert.equal(ledger[0].actor, 'root')
-    assert.equal(ledger[0].delta_display, '+10 点')
+    assert.equal(ledger[0].delta_display, '+10 元')
   })
 
   test('扣减夹到 0，流水 delta 是实际变动而非请求值', () => {
@@ -125,10 +133,10 @@ describe('余额变动与流水', () => {
     assert.equal(rows[0].type, 'consume')
     assert.equal(rows[0].delta_micro, -1_000_000)
     assert.equal(rows[0].balance_after_micro, 4_000_000)
-    assert.equal(rows[0].balance_display, '4 点')
+    assert.equal(rows[0].balance_display, '4 元')
   })
 
-  test('parseAmountToMicro：点 → 微点，非法/溢出返回 null', () => {
+  test('parseAmountToMicro：元 → 微元，非法/溢出返回 null', () => {
     assert.equal(billing.parseAmountToMicro('10'), 10_000_000)
     assert.equal(billing.parseAmountToMicro('-2.5'), -2_500_000)
     assert.equal(billing.parseAmountToMicro(0), null)
@@ -139,12 +147,18 @@ describe('余额变动与流水', () => {
   test('pricingInfo 给出可读单价，serializeBalance 给零余额', () => {
     state.accounts.push(makeUser('u1'))
     const p = billing.pricingInfo()
-    assert.equal(p.price_per_1k_tokens_display, '1 点 / 1K tokens')
-    assert.equal(p.request_fee_display, '0 点 / 次')
+    assert.equal(p.price_input_uncached_display, '0.1 元 / 百万 tokens')
+    assert.equal(p.price_input_cached_display, '0.01 元 / 百万 tokens')
+    assert.equal(p.price_output_display, '0.5 元 / 百万 tokens')
+    assert.equal(p.price_per_image_display, '0.06 元 / 张')
+    assert.equal(p.request_fee_display, '0 元 / 次')
+    assert.equal(p.unit, '元')
+    assert.equal(p.currency, 'CNY')
+    assert.equal(p.table.length, 4, '价目表四档')
     const b = billing.serializeBalance('u1')
     assert.equal(b.micro, 0)
     assert.equal(b.value, 0)
-    assert.equal(b.display, '0 点')
+    assert.equal(b.display, '0 元')
     assert.equal(b.micros_per_unit, 1_000_000)
   })
 })
@@ -152,59 +166,105 @@ describe('余额变动与流水', () => {
 describe('真实用量扣费 consumeForUsage', () => {
   test('主密钥 / 未绑定账号的老 Key 完全不扣费', () => {
     state.accounts.push(makeUser('u1', 10_000_000))
-    billing.consumeForUsage({ kind: 'owner', unrestricted: true }, { tokens: 100000, ok: true, model: 'gpt-4o' })
-    billing.consumeForUsage({ kind: 'key', _key: { owner_account_id: '' } }, { tokens: 100000, ok: true })
-    billing.consumeForUsage({ kind: 'key', _key: {} }, { tokens: 100000, ok: true })
+    const u = { input_cached: 0, input_uncached: 100000, output: 0 }
+    billing.consumeForUsage({ kind: 'owner', unrestricted: true }, { usage: u, ok: true, model: 'gpt-4o' })
+    billing.consumeForUsage({ kind: 'key', _key: { owner_account_id: '' } }, { usage: u, ok: true })
+    billing.consumeForUsage({ kind: 'key', _key: {} }, { usage: u, ok: true })
     assert.equal(state.accounts[0].balance_micro, 10_000_000)
     assert.equal(state.billing_ledger.length, 0)
   })
 
-  test('绑定账号的 Key 按 token 结算：1000 tokens = 1 点', () => {
+  test('绑定账号的 Key 按四档结算：10 万未命中输入 = 0.01 元', () => {
     state.accounts.push(makeUser('u1', 10_000_000))
     billing.consumeForUsage(
       { kind: 'key', _key: { owner_account_id: 'u1' } },
-      { tokens: 2500, ok: true, model: 'gpt-4o-mini' }
+      { usage: { input_cached: 0, input_uncached: 100_000, output: 0 }, ok: true, model: 'gpt-4o-mini' }
     )
-    assert.equal(state.accounts[0].balance_micro, 7_500_000, '2500 tokens → 2.5 点')
+    // 100000 / 1e6 × 100000 微元 = 10,000 微元 = 0.01 元
+    assert.equal(state.accounts[0].balance_micro, 10_000_000 - 10_000)
     const row = billing.ledgerOf('u1')[0]
     assert.equal(row.type, 'consume')
     assert.equal(row.model, 'gpt-4o-mini')
-    assert.equal(row.note, 'API 调用扣费')
+    assert.equal(row.note, '输入 100000', '流水 note 写清用量构成')
+    assert.deepEqual(row.usage, { input_cached: 0, input_uncached: 100000, output: 0, images: 0 })
   })
 
-  test('失败请求不扣费；0 token 且有基础费时仍扣一次', () => {
+  test('缓存命中比未命中便宜十倍', () => {
     state.accounts.push(makeUser('u1', 10_000_000))
-    billing.consumeForUsage({ kind: 'key', _key: { owner_account_id: 'u1' } }, { tokens: 99999, ok: false })
+    // 100 万命中 = 10,000 微元
+    billing.consumeForUsage({ kind: 'key', _key: { owner_account_id: 'u1' } },
+      { usage: { input_cached: 1_000_000, input_uncached: 0, output: 0 }, ok: true })
+    assert.equal(state.accounts[0].balance_micro, 10_000_000 - 10_000, '命中 100 万 = 0.01 元')
+    // 100 万未命中 = 100,000 微元
+    billing.consumeForUsage({ kind: 'key', _key: { owner_account_id: 'u1' } },
+      { usage: { input_cached: 0, input_uncached: 1_000_000, output: 0 }, ok: true })
+    assert.equal(state.accounts[0].balance_micro, 10_000_000 - 10_000 - 100_000, '未命中 100 万 = 0.1 元')
+  })
+
+  test('生图按张扣：2 张 = 0.12 元', () => {
+    state.accounts.push(makeUser('u1', 10_000_000))
+    billing.consumeForUsage({ kind: 'key', _key: { owner_account_id: 'u1' } },
+      { usage: { input_cached: 0, input_uncached: 0, output: 0, images: 2 }, ok: true, model: 'gpt-image-2' })
+    assert.equal(state.accounts[0].balance_micro, 10_000_000 - 120_000)
+    assert.equal(billing.ledgerOf('u1')[0].note, '2 张')
+  })
+
+  test('失败请求不扣费；基础费开启时 0 用量仍扣一次', () => {
+    state.accounts.push(makeUser('u1', 10_000_000))
+    billing.consumeForUsage({ kind: 'key', _key: { owner_account_id: 'u1' } },
+      { usage: { input_cached: 0, input_uncached: 99999, output: 0 }, ok: false })
     assert.equal(state.accounts[0].balance_micro, 10_000_000)
 
     state.billing.request_fee_micro = 500_000
-    billing.consumeForUsage({ kind: 'key', _key: { owner_account_id: 'u1' } }, { tokens: 0, ok: true })
+    billing.consumeForUsage({ kind: 'key', _key: { owner_account_id: 'u1' } },
+      { usage: { input_cached: 0, input_uncached: 0, output: 0 }, ok: true })
     assert.equal(state.accounts[0].balance_micro, 9_500_000)
   })
 
-  test('计费关闭时一律不扣；单价为 0 不产生流水', () => {
+  test('计费关闭时一律不扣；全部单价为 0 不产生流水', () => {
     state.accounts.push(makeUser('u1', 10_000_000))
     state.billing.enabled = false
-    billing.consumeForUsage({ kind: 'key', _key: { owner_account_id: 'u1' } }, { tokens: 5000, ok: true })
+    billing.consumeForUsage({ kind: 'key', _key: { owner_account_id: 'u1' } },
+      { usage: { input_cached: 0, input_uncached: 5000, output: 100 }, ok: true })
     assert.equal(state.accounts[0].balance_micro, 10_000_000)
 
     state.billing.enabled = true
-    state.billing.price_per_1k_tokens_micro = 0
-    billing.consumeForUsage({ kind: 'key', _key: { owner_account_id: 'u1' } }, { tokens: 5000, ok: true })
+    state.billing.price_input_cached_micro_per_mtok = 0
+    state.billing.price_input_uncached_micro_per_mtok = 0
+    state.billing.price_output_micro_per_mtok = 0
+    state.billing.price_per_image_micro = 0
+    billing.consumeForUsage({ kind: 'key', _key: { owner_account_id: 'u1' } },
+      { usage: { input_cached: 0, input_uncached: 5000, output: 100 }, ok: true })
     assert.equal(state.accounts[0].balance_micro, 10_000_000)
     assert.equal(state.billing_ledger.length, 0, '免费模式不该刷流水')
   })
 
-  test('recordUsage 接通扣费：成功调用按 token 扣，失败调用不扣', () => {
+  test('recordUsage 接通扣费：成功调用按用量扣，失败调用不扣', () => {
     state.accounts.push(makeUser('u1', 10_000_000))
     const { token } = ak.createUserKey('u1', { username: 'alice' })
     const auth = ak.resolveAuth(token).auth
-    ak.recordUsage(auth, { tokens: 1000, ok: true, model: 'gpt-4o' })
-    assert.equal(state.accounts[0].balance_micro, 9_000_000)
+    // 输出 1000 tokens = 1000/1e6 × 500,000 微元 = 500 微元 = 0.0005 元。
+    // 前一个用例把四档单价都改成 0 了，这里必须显式恢复默认定价，
+    // 否则记录到的余额差只剩基础费（用例间共享 store.state，不能默认干净）。
+    Object.assign(state.billing, {
+      unit: '元', currency: 'CNY',
+      price_input_cached_micro_per_mtok: 10_000,
+      price_input_uncached_micro_per_mtok: 100_000,
+      price_output_micro_per_mtok: 500_000,
+      price_per_image_micro: 60_000,
+      request_fee_micro: 0
+    })
+    // 以「本用例开始时」的余额为基准算差值，不假设 accounts[0] 就是 u1
+    // （前面的 describe 会往 state.accounts 里塞别的账号）。
+    // createUserKey 不会再动余额；先断言起点，失败时能立刻看出是被谁改的
+    const before = billing.balanceMicroOf('u1')
+    assert.equal(before, 10_000_000, '起点余额应为 10 元')
+    ak.recordUsage(auth, { usage: { input_cached: 0, input_uncached: 0, output: 1000 }, ok: true, model: 'gpt-4o' })
+    assert.equal(billing.balanceMicroOf('u1'), before - 500, '输出 1000 tokens 扣 500 微元')
     assert.equal(ak.getApiKey(auth.id).usage.tokens, 1000, '原有用量统计照常落盘')
 
-    ak.recordUsage(auth, { tokens: 9999, ok: false, model: 'gpt-4o' })
-    assert.equal(state.accounts[0].balance_micro, 9_000_000, '失败不扣')
+    ak.recordUsage(auth, { usage: { input_cached: 0, input_uncached: 0, output: 9999 }, ok: false, model: 'gpt-4o' })
+    assert.equal(billing.balanceMicroOf('u1'), before - 500, '失败不扣')
     assert.equal(ak.getApiKey(auth.id).usage.failed, 1)
   })
 })

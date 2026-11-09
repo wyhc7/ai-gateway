@@ -57,24 +57,118 @@ export function defaultModelsFor(protocol) {
   return null
 }
 
-function extractTokenCount(usage) {
-  if (!usage) return null
-  // 优先取 total；但 total 为 0（或缺失）时不能直接返回 0——
-  // 0 会被当作「已返回 usage」，既不会走估算兜底，也不会真正累加，等于漏计
-  const total = Number(usage.total_tokens ?? usage.totalTokens ?? usage.total)
-  if (Number.isFinite(total) && total > 0) return total
-  const pairs = [
-    [usage.input_tokens, usage.output_tokens],
-    [usage.inputTokens, usage.outputTokens],
-    [usage.prompt_tokens, usage.completion_tokens]
+// 用量拆解：把上游五花八门的 usage 归一成 { input_cached, input_uncached, output, total }。
+//
+// 为什么要拆而不是只取 total：计费现在是分档的（缓存命中 / 未命中 / 输出三档，
+// 输出单价是未命中输入的 5 倍）。只拿总数会让缓存命中部分被按未命中价收，
+// 客户多付；反过来若一律按命中价又会让输出部分少收。必须拆开。
+//
+// 缓存命中字段各家叫法不同，全部兼容：
+//   OpenAI / 腾讯 / 多数兼容层: prompt_tokens_details.cached_tokens
+//   DeepSeek:                   prompt_cache_hit_tokens  (另有 prompt_cache_miss_tokens)
+//   Anthropic:                  cache_read_input_tokens  (输入总数另含 cache_creation_input_tokens)
+//   Responses 协议:              input_tokens_details.cached_tokens
+//
+// 拿不到命中字段时 input_cached = 0，也就是全部按未命中价算——宁可不少收，
+// 也不凭猜测给折扣。这正是「按命中计价，无字段则退化为未命中」的意思。
+function toNonNeg(v) {
+  const n = Number(v)
+  return Number.isFinite(n) && n > 0 ? n : 0
+}
+
+// 从各种嵌套位置找「命中缓存的输入 token 数」
+function pickCachedTokens(usage) {
+  const candidates = [
+    usage.prompt_tokens_details?.cached_tokens,
+    usage.input_tokens_details?.cached_tokens,
+    usage.input_tokens_details?.cache_read,
+    usage.prompt_cache_hit_tokens,
+    usage.cache_read_input_tokens,
+    usage.cached_tokens,
+    usage.cache_hit_tokens
   ]
-  for (const [a, b] of pairs) {
-    if (a != null && b != null) {
-      const sum = Number(a) + Number(b)
-      if (Number.isFinite(sum) && sum > 0) return sum
+  for (const c of candidates) {
+    const n = toNonNeg(c)
+    if (n > 0) return n
+  }
+  return 0
+}
+
+// 从各种位置找「输入 token 总数」（含命中和未命中）
+function pickInputTokens(usage) {
+  const candidates = [
+    usage.prompt_tokens,
+    usage.input_tokens,
+    usage.inputTokens,
+    usage.promptTokens
+  ]
+  for (const c of candidates) {
+    if (c != null) {
+      const n = toNonNeg(c)
+      if (n > 0) return n
     }
   }
-  return null
+  // Anthropic 把新建缓存也算进输入总量之外，需要自己加回来
+  const created = toNonNeg(usage.cache_creation_input_tokens)
+  const read = toNonNeg(usage.cache_read_input_tokens)
+  if (created > 0 || read > 0) return created + read
+  // DeepSeek 风格：命中 + 未命中
+  const hit = toNonNeg(usage.prompt_cache_hit_tokens)
+  const miss = toNonNeg(usage.prompt_cache_miss_tokens)
+  if (hit > 0 || miss > 0) return hit + miss
+  return 0
+}
+
+// 从各种位置找「输出 token 数」
+function pickOutputTokens(usage) {
+  const candidates = [
+    usage.completion_tokens,
+    usage.output_tokens,
+    usage.outputTokens,
+    usage.completionTokens
+  ]
+  for (const c of candidates) {
+    if (c != null) {
+      const n = toNonNeg(c)
+      if (n > 0) return n
+    }
+  }
+  return 0
+}
+
+/**
+ * 把上游 usage 归一成计费可用的结构；完全拿不到信息时返回 null。
+ *
+ * 返回 { input_cached, input_uncached, output, total }：
+ *  - input_uncached = 输入总数 − 命中数（负数夹到 0，防上游字段自相矛盾）
+ *  - total 只作兜底：当 input 与 output 都拆不出来时，用 overall 总数顶上
+ */
+function extractUsage(usage) {
+  if (!usage || typeof usage !== 'object') return null
+  const cached = pickCachedTokens(usage)
+  const inputTotal = pickInputTokens(usage)
+  const output = pickOutputTokens(usage)
+
+  if (inputTotal === 0 && output === 0 && cached === 0) {
+    // 拆不出来就退回整体总数，交给计费层按未命中输入价兜底
+    const overall = toNonNeg(usage.total_tokens ?? usage.totalTokens ?? usage.total)
+    if (overall > 0) return { input_cached: 0, input_uncached: 0, output: 0, total: overall }
+    return null
+  }
+
+  const safeCached = Math.min(cached, inputTotal)
+  return {
+    input_cached: safeCached,
+    input_uncached: Math.max(0, inputTotal - safeCached),
+    output,
+    total: 0
+  }
+}
+
+// 用量里所有 token 的总和（只用于仪表盘的 token 计数，与计费无关）
+function usageTokenSum(u) {
+  if (!u) return 0
+  return toNonNeg(u.input_cached) + toNonNeg(u.input_uncached) + toNonNeg(u.output) + toNonNeg(u.total)
 }
 
 // 多数上游的流式响应默认不带 usage，只有显式声明 include_usage 才会在末尾补发。
@@ -1511,17 +1605,27 @@ async function forwardWithFailover(provider, kind, body, res) {
         if (!res.writableEnded) res.end()
         // 流式数据完整读完即视为成功（部分上游不发送 [DONE]/message_stop 终止符）
         markResult(provider.id, true)
-        const reported = lastUsageData ? extractTokenCount(lastUsageData) : null
-        if (reported != null && reported > 0) {
-          bumpTokens(provider.id, reported)
-          return { ok: true, keyName: usedKeyName, tokens: reported, tokensEstimated: false }
+        const reportedUsage = lastUsageData ? extractUsage(lastUsageData) : null
+        if (reportedUsage) {
+          const sum = usageTokenSum(reportedUsage)
+          if (sum > 0) bumpTokens(provider.id, sum)
+          return { ok: true, keyName: usedKeyName, usage: reportedUsage, tokensEstimated: false }
         }
-        // 上游不返回 usage 时按输出长度估算，避免仪表盘 Token 统计系统性偏低
+        // 上游不返回 usage 时按输出长度估算，避免仪表盘 Token 统计系统性偏低。
+        // 估算只能给出输出侧的量，没有输入信息，因此只填 output，
+        // 输入部分为 0——不凭猜测给输入计费。
         const estimated = estimateTokens(streamedText)
         if (estimated > 0) bumpTokens(provider.id, estimated)
-        return { ok: true, keyName: usedKeyName, tokens: estimated, tokensEstimated: estimated > 0 }
+        return {
+          ok: true,
+          keyName: usedKeyName,
+          usage: estimated > 0
+            ? { input_cached: 0, input_uncached: 0, output: estimated, total: 0 }
+            : null,
+          tokensEstimated: estimated > 0
+        }
       }
-      let tokens = 0
+      let usageOut = null
       let tokensEstimated = false
       if (resp.body) {
         let text
@@ -1548,17 +1652,21 @@ async function forwardWithFailover(provider, kind, body, res) {
         try {
           const data = JSON.parse(text)
           const usage = data.usage || (data.choices?.[0]?.usage)
-          const tokenCount = extractTokenCount(usage)
-          if (tokenCount != null && tokenCount > 0) {
-            tokens = tokenCount
-          } else {
+          const parsed = extractUsage(usage)
+          if (parsed) {
+            usageOut = parsed
+            const sum = usageTokenSum(parsed)
+            if (sum > 0) bumpTokens(provider.id, sum)
+          } else if (kind === 'chat') {
             // 上游不返回 usage 时，与流式路径一致按输出长度估算（含 reasoning），
-            // 否则非流式请求会被静默漏计
+            // 否则非流式请求会被静默漏计。同样只填 output，不猜输入。
             const est = estimateCompletionTokens(respondText)
-            tokens = est
-            tokensEstimated = est > 0
+            if (est > 0) {
+              usageOut = { input_cached: 0, input_uncached: 0, output: est, total: 0 }
+              tokensEstimated = true
+              bumpTokens(provider.id, est)
+            }
           }
-          if (tokens > 0) bumpTokens(provider.id, tokens)
         } catch {
           // 非 JSON body，忽略
         }
@@ -1566,7 +1674,7 @@ async function forwardWithFailover(provider, kind, body, res) {
         if (!res.writableEnded) res.end()
       }
       markResult(provider.id, true)
-      return { ok: true, keyName: usedKeyName, tokens, tokensEstimated }
+      return { ok: true, keyName: usedKeyName, usage: usageOut, tokensEstimated }
     } catch (err) {
       const msg = err.name === 'AbortError' ? '上游请求超时' : `网络错误: ${err.message}`
       if (started) {
@@ -1698,17 +1806,25 @@ export async function handleChat(req, res) {
     return respondJson(res, 400, { error: { message: '平台缺少 Base URL', type: 'bad_config' } })
   }
   const result = await forwardWithFailover(provider, 'chat', body, res)
-  recordUsage(req.apiAuth, { tokens: result.tokens, ok: result.ok, model })
+  recordUsage(req.apiAuth, { usage: result.usage, ok: result.ok, model })
   addLog({
     ...baseLog,
     status: res.statusCode || (result.ok ? 200 : 502),
     ok: result.ok,
     key: result.keyName || undefined,
     duration_ms: Date.now() - startTime,
-    tokens: result.tokens || undefined,
+    tokens: result.usage ? usageTokenSum(result.usage) || undefined : undefined,
     tokens_estimated: result.tokensEstimated ? true : undefined,
     error: result.ok ? undefined : (result.error || '')
   })
+}
+
+// 生图张数：OpenAI 协议用 n（默认 1）。夹到 1..100，
+// 防止有人贴 n: 1e9 让计费算出天文数字，也防止 n: 0 白嫖。
+function requestedImagesOf(body) {
+  const n = Math.trunc(Number(body?.n))
+  if (!Number.isFinite(n) || n < 1) return 1
+  return Math.min(100, n)
 }
 
 // 生图接口：与 handleChat 同构——按 model 找平台、挑 Key、透传 OpenAI 生图协议。
@@ -1719,6 +1835,8 @@ export async function handleImages(req, res) {
   const { model, providerIdHint, body } = resolveTarget(req.body)
   const startTime = Date.now()
   const clientKey = req.apiAuth?.name
+  // 计费要用的张数：在入口处解析一次，后续分支（4xx 提前返回）都拿它。
+  const imageCount = requestedImagesOf(body)
   const denial = modelAccessDenial(req.apiAuth, model)
   if (denial) {
     markResult(null, false)
@@ -1761,13 +1879,21 @@ export async function handleImages(req, res) {
     return respondJson(res, 400, { error: { message: '平台缺少 Base URL', type: 'bad_config' } })
   }
   const result = await forwardWithFailover(provider, 'images', body, res)
-  recordUsage(req.apiAuth, { tokens: result.tokens, ok: result.ok, model })
+  // 生图按张计费：requestedImagesOf 从请求体里读 n（默认 1），
+  // 只有请求成功才收——失败时 recordUsage 的 ok=false 会直接跳过扣费。
+  // 注意这里不依赖 result.usage：多数生图上游不返回 usage，靠张数就够了。
+  recordUsage(req.apiAuth, {
+    usage: result.ok ? { input_cached: 0, input_uncached: 0, output: 0, images: imageCount } : null,
+    ok: result.ok,
+    model
+  })
   addLog({
     ...baseLog,
     status: res.statusCode || (result.ok ? 200 : 502),
     ok: result.ok,
     key: result.keyName || undefined,
     duration_ms: Date.now() - startTime,
+    images: result.ok ? imageCount : undefined,
     error: result.ok ? undefined : (result.error || '')
   })
 }

@@ -51,10 +51,13 @@ const DEFAULT_STATE = () => ({
   // 用户余额计费：计价参数、余额流水。账号余额本身存 account.balance_micro，
   // 见 billing.js。老配置没有这两个字段，load() 会补齐。
   billing: {
-    unit: '点',
-    currency: 'POINT',
+    unit: '元',
+    currency: 'CNY',
     micros_per_unit: 1_000_000,
-    price_per_1k_tokens_micro: 1_000_000,
+    price_input_cached_micro_per_mtok: 10_000,
+    price_input_uncached_micro_per_mtok: 100_000,
+    price_output_micro_per_mtok: 500_000,
+    price_per_image_micro: 60_000,
     request_fee_micro: 0,
     enabled: true,
     ledger_limit: 500
@@ -168,10 +171,13 @@ function ensureAccountFields(obj) {
 // store.js 在模块求值期就会调用它，避免再去触碰 billing 的惰性状态访问。
 function DEFAULT_BILLING_FALLBACK() {
   return {
-    unit: '点',
-    currency: 'POINT',
+    unit: '元',
+    currency: 'CNY',
     micros_per_unit: 1_000_000,
-    price_per_1k_tokens_micro: 1_000_000,
+    price_input_cached_micro_per_mtok: 10_000,
+    price_input_uncached_micro_per_mtok: 100_000,
+    price_output_micro_per_mtok: 500_000,
+    price_per_image_micro: 60_000,
     request_fee_micro: 0,
     enabled: true,
     ledger_limit: 500

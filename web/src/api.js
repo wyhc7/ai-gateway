@@ -81,7 +81,7 @@ export const api = {
   deleteAccount: (id) => request(`/api/accounts/${id}`, { method: 'DELETE' }),
   resetAccountPassword: (id, password) =>
     request(`/api/accounts/${id}/password`, { method: 'POST', body: JSON.stringify({ new_password: password }) }),
-  // 余额充值 / 扣减（管理员），amount 用「点」为单位
+  // 余额充值 / 扣减（管理员），amount 用「元」为单位
   adjustAccountBalance: (id, data) =>
     request(`/api/accounts/${id}/balance`, { method: 'POST', body: JSON.stringify(data) }),
 

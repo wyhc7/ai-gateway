@@ -6,7 +6,7 @@
         <div class="balance-cell">
           <div class="label-micro">剩余余额 · Available balance</div>
           <div class="balance-num num" :class="{ alarm: data.balance && data.balance.micro <= 0 }">
-            {{ data.balance ? data.balance.value : '0' }}<span class="balance-unit">{{ data.balance?.unit || '点' }}</span>
+            {{ data.balance ? data.balance.value : '0' }}<span class="balance-unit">{{ data.balance?.unit || '元' }}</span>
           </div>
           <div class="balance-sub mono">
             账户 <b>{{ data.account?.username || '—' }}</b> · {{ data.balance?.currency || 'POINT' }}
@@ -14,7 +14,7 @@
         </div>
         <div class="balance-cell balance-cell-pricing">
           <div class="label-micro">当前计价 · Pricing</div>
-          <div class="pricing-line mono">{{ data.pricing?.price_per_1k_tokens_display || '— / 1K tokens' }}</div>
+          <div class="pricing-line mono">入(命中) {{ data.pricing?.price_input_cached_display || '—' }} · 入(未命中) {{ data.pricing?.price_input_uncached_display || '—' }} · 出 {{ data.pricing?.price_output_display || '—' }} · 图 {{ data.pricing?.price_per_image_display || '—' }}</div>
           <div class="pricing-line mono">{{ data.pricing?.request_fee_display || '— / 次' }}</div>
           <div class="pricing-foot">按实际 token 用量结算，失败请求不扣费；余额为 0 时调用会被拦下。</div>
         </div>

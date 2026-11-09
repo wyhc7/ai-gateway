@@ -208,7 +208,7 @@ describe('密钥生命周期与存储', () => {
 
   test('重置用量不动密钥本身', () => {
     const { key, token } = ak.createApiKey({ name: 'F' })
-    ak.recordUsage(ak.resolveAuth(token).auth, { tokens: 120 })
+    ak.recordUsage(ak.resolveAuth(token).auth, { usage: { input_cached: 0, input_uncached: 0, output: 120 } })
     assert.equal(ak.getApiKey(key.id).usage.tokens, 120)
     const out = ak.resetApiKeyUsage(key.id)
     assert.equal(out.usage.tokens, 0)

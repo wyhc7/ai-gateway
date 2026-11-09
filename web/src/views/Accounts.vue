@@ -26,7 +26,7 @@
         </div>
       </div>
       <div class="role-foot">
-        密码以 scrypt 加盐摘要存于 <code class="mono">config.json</code>，明文不落盘；会话令牌默认 {{ sessionTtlHours }} 小时有效，重置密码后该账号已签发的令牌立即全部失效。余额以整数微点存储，充值/扣减与每次调用扣费都留流水。
+        密码以 scrypt 加盐摘要存于 <code class="mono">config.json</code>，明文不落盘；会话令牌默认 {{ sessionTtlHours }} 小时有效，重置密码后该账号已签发的令牌立即全部失效。余额以整数微元（元）存储，充值/扣减与每次调用扣费都留流水。
       </div>
     </div>
 
@@ -142,7 +142,7 @@
         正在为 <strong>{{ balanceTarget?.username }}</strong> 调整余额。输入正数充值、负数扣减；余额夹到 0，不会记成负数账。每次调整与每次 API 调用扣费都会写进余额流水。
       </p>
       <el-form label-position="top" @submit.prevent>
-        <el-form-item label="金额（点）">
+        <el-form-item label="金额（元）">
           <el-input v-model="balanceForm.amount" placeholder="例如 10 或 -2.5" autocomplete="off" />
         </el-form-item>
         <el-form-item label="备注（选填）">
@@ -196,7 +196,7 @@ const accounts = ref([])
 const currentAccountId = ref('')
 const passwordMin = ref(8)
 const sessionTtlHours = ref(168)
-const unit = ref('点')
+const unit = ref('元')
 const microsPerUnit = ref(1_000_000)
 
 const dialogVisible = ref(false)
@@ -246,7 +246,7 @@ async function load() {
     currentAccountId.value = me?.account?.id || ''
     passwordMin.value = Number(status?.password_min_length) || 8
     sessionTtlHours.value = Number(status?.session_ttl_hours) || 168
-    unit.value = list.pricing?.unit || '点'
+    unit.value = list.pricing?.unit || '元'
     microsPerUnit.value = Number(list.pricing?.micros_per_unit) || 1_000_000
   } catch (e) {
     notifyError(e, '加载账号列表失败')
