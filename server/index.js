@@ -339,6 +339,11 @@ const PUBLIC_AUTH_PATHS = new Set([
   '/api/auth/status', '/api/auth/setup', '/api/auth/login',
   // 自助注册与开关查询必须匿名可访问：还没账号的人根本拿不到会话令牌。
   // 真正的闸在路由内部（registration.enabled + 每 IP 限流），不在这一层。
+  //
+  // 注意：这里只放 GET /api/auth/registration。写开关走
+  // POST /api/accounts/registration（在 /api/accounts 的 requireAdmin 后面），
+  // 因为放行判断是按 path 做的、不分方法——同一个路径挂公开白名单，
+  // POST 也会被一并跳过鉴权，req.auth 就是 undefined。
   '/api/auth/register', '/api/auth/registration'
 ])
 // 普通用户当前只能用这几个自助端点；用户面板还没做，控制台其余接口一律 403。
@@ -465,7 +470,8 @@ app.post('/api/auth/register', accountRoute((req, res) => {
   res.status(201).json(out)
 }))
 
-// 注册开关的读/写：读公开（登录页要据此决定显不显示「注册」），写仅管理员。
+// 注册开关的读：公开（登录页要据此决定显不显示「注册」）。
+// 写在哪？见下方 /api/accounts/registration —— 必须在 requireAdmin 后面。
 app.get('/api/auth/registration', accountRoute((req, res) => {
   res.json({ enabled: registrationEnabled() })
 }))
@@ -489,22 +495,9 @@ app.post('/api/auth/password', accountRoute((req, res) => {
   res.json(out)
 }))
 
-// 管理员开关自助注册。写进 config.registration.enabled，随 config.json 落盘。
-// 要求 manage 权限（accountRoute 默认就是），普通用户碰不到。
-app.post('/api/auth/registration', accountRoute((req, res) => {
-  if (req.auth.role !== 'admin') {
-    return res.status(403).json({ error: { message: '只有管理员能修改注册开关', type: 'forbidden' } })
-  }
-  const enabled = Boolean(req.body?.enabled)
-  state.registration = { ...(state.registration || {}), enabled }
-  persistImmediate()
-  addLog({
-    type: 'auth', method: 'POST', path: '/api/auth/registration', status: 200,
-    detail: `自助注册已${enabled ? '开启' : '关闭'}`
-  })
-  res.json({ enabled })
-}))
-
+// 管理员开关自助注册的写入口在 /api/accounts/registration（requireAdmin 之后），
+// 不在这里——/api/auth/registration 在公开白名单里，按路径放行不分方法，
+// POST 挂过去会拿不到 req.auth。
 
 // 无状态令牌服务端没有会话表可删：前端丢掉令牌即完成登出，这里只记一条审计。
 app.post('/api/auth/logout', accountRoute((req, res) => {
@@ -514,6 +507,20 @@ app.post('/api/auth/logout', accountRoute((req, res) => {
 
 // 账号管理：整组只给管理员，普通用户一律 403（他们的入口是 /api/user/*）。
 app.use('/api/accounts', requireAdmin)
+
+// 自助注册开关的写入口。放在 requireAdmin 后面而不是 /api/auth/*，
+// 因为后者里有几个公开路径是按「路径」放行的、不看方法，
+// POST 挂过去中间件直接跳过了鉴权，req.auth 是 undefined。
+app.post('/api/accounts/registration', accountRoute((req, res) => {
+  const enabled = Boolean(req.body?.enabled)
+  state.registration = { ...(state.registration || {}), enabled }
+  persistImmediate()
+  addLog({
+    type: 'auth', method: 'POST', path: '/api/accounts/registration', status: 200,
+    detail: `自助注册已${enabled ? '开启' : '关闭'}`
+  })
+  res.json({ enabled })
+}))
 
 app.get('/api/accounts', accountRoute((req, res) => {
   const list = listAccounts()

@@ -77,7 +77,7 @@ export const api = {
   authRegister: (data) => request('/api/auth/register', { method: 'POST', body: JSON.stringify(data), skipAuth: true }),
   // 登录页据此决定要不要显示「注册」入口，所以必须匿名可读
   authRegistration: () => request('/api/auth/registration', { skipAuth: true }),
-  setRegistration: (enabled) => request('/api/auth/registration', { method: 'POST', body: JSON.stringify({ enabled }) }),
+  setRegistration: (enabled) => request('/api/accounts/registration', { method: 'POST', body: JSON.stringify({ enabled }) }),
 
   // 账号管理（仅管理员）
   getAccounts: () => request('/api/accounts'),
