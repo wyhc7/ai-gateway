@@ -16,6 +16,32 @@ import {
   workbuddyRealmFor
 } from './workbuddy-core.js'
 import { rewriteWorkbuddySystemFingerprints } from './workbuddy-fingerprint.js'
+import {
+  DEFAULT_SYSTEM,
+  RELOCATE_MARKER,
+  relocateWorkbuddySystemPrompt
+} from './workbuddy-prompt-relocate.js'
+import { withPluginIdentity, applyWorkbuddyCompat } from './workbuddy-compat.js'
+
+// 搬家模块的入口在 lane 上再导出一次：调用方（proxy）只 import 这一个文件，
+// 不必关心内容级处理被拆成了几个模块。
+export {
+  relocateWorkbuddySystemPrompt,
+  rewriteWorkbuddyAssistantFingerprints,
+  applyWorkbuddy11128Fallback,
+  isRelocated,
+  ASSISTANT_FINGERPRINTS
+} from './workbuddy-prompt-relocate.js'
+
+// 兼容补丁的入口同样在这里转发：proxy 只认这一个文件。
+export {
+  withPluginIdentity,
+  applyWorkbuddyCompat,
+  rewritePromptWording,
+  isCompatEnabled,
+  PLUGIN_IDENTITY_HEADERS,
+  PROMPT_REWRITES
+} from './workbuddy-compat.js'
 
 // 常量与 realm 判定的唯一来源在 core，这里只做转发导出，
 // 免得调用方为了一个常量多 import 一个模块。
@@ -52,7 +78,10 @@ export function isWorkbuddyProtocol(protocol) {
 // Request-ID 与 Message-ID 同值，Conversation-ID 独立。
 export function workbuddyHeaders(key = {}) {
   const messageId = randomUUID()
-  return {
+  // 插件身份头必须在最后并进来：它们是「让请求贴近本机 CodeBuddy 插件」的
+  // 那组伪装，见 workbuddy-compat.js。放在这里而不是 proxy 里，是因为它们
+  // 与 UA / Referer 属于同一件事——客户端自称是谁。
+  return withPluginIdentity({
     'X-User-Id': String(key.uid || ''),
     'X-Domain': normalizeWorkbuddyDomain(key.domain),
     'User-Agent': WORKBUDDY_UA,
@@ -60,7 +89,7 @@ export function workbuddyHeaders(key = {}) {
     'X-Conversation-ID': randomUUID(),
     'X-Conversation-Request-ID': messageId,
     'X-Conversation-Message-ID': messageId
-  }
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -173,164 +202,28 @@ export function applyWorkbuddyMaxOutput(obj, modelMeta) {
 }
 
 // ---------------------------------------------------------------------------
-// 国内版「整段 prompt 匹配」闸门：零宽字符打散
+// 内容级闸门：交给 workbuddy-prompt-relocate.js 的「搬家」
 //
-// 2026-10-22/23 实测（直连 copilot.tencent.com，5 个账号轮换）：
-// 国际版网关的 11128 之外，国内版还多一道**内容级**闸门——把 system 原文
-// 原样发过去，稳定回 400 code 11128（同一内容走国际版全部 200）。
-//
-// 与 workbuddy-fingerprint.js 那种「逐字面量句子」完全不同，这次实测排除了
-// 句子级指纹，也排除了长度/体积/工具/多轮/稀释：
-//   - 17.8KB 的真实 system 原文           → 11128（稳定复现）
-//   - 改 1 个字符 / 头尾各补 1 空格        → 仍 11128（不是精确哈希）
-//   - 对半切、1/4、1/8、557 字符切片       → 全 200（没有任何子串能单独触发）
-//   - 4000 字符滑窗扫全文                 → 全 200
-//   - 头部截断 [0..16000]                 → 200；[2000..17819]（更短）→ 11128
-//   - 前置 1k/2k/4k 中性文本稀释           → 仍 11128（加内容无用）
-//   - 中段替换 2KB/4KB 填充               → 仍 11128
-//   - 每 14 字符替换 1 字符（7% 搅动）      → 200
-//   - system 只留前 6KB、其余挪进 user 消息 → 200
-// 结论：网关按 **n-gram 召回率** 把 system 与一个已知客户端 prompt 库做整段
-// 匹配（库里已收录本 harness 这类第三方客户端的 system），覆盖率过阈值即拒。
-// 所以「加东西」无效（召回不变），必须**破坏 n-gram 本身**。
-//
-// 打散手段选零宽空格（U+200B）：
-//   - 模型不可见、语义零损，不污染用户可见文本（比逐字符替换干净）；
-//   - 每 8 个码点插 1 个，足以打碎 8 字符以上的全部 n-gram（实测 3 与 8 均放行）；
-//   - 变换是内容的确定函数：同内容 → 同输出，不破坏腾讯按前缀的缓存。
-// 只对 CN realm 启用：国际版实测无此闸门，不值得白付 token 开销。
-// 若上游将来预处理零宽字符，退路是逐字符替换（churnEvery，实测同样放行）
-// 或把 system 后半段挪进带 [system-continuation] 标记的 user 消息（实测放行）。
-const SHINGLE_BREAK_CHAR = '\u200B'
-const SHINGLE_BREAK_SPACING = 8
-
-/** 每 spacing 个码点插一个零宽字符；按码点迭代，emoji/代理对安全。 */
-function insertShingleBreaks(text) {
-  const chars = [...text]
-  let out = ''
-  for (let i = 0; i < chars.length; i += 1) {
-    out += chars[i]
-    if ((i + 1) % SHINGLE_BREAK_SPACING === 0) out += SHINGLE_BREAK_CHAR
-  }
-  return out
-}
-
-/** 就地打散所有 system 消息的 n-gram（字符串与多段 text 形态都处理）。 */
-export function breakWorkbuddySystemShingles(obj) {
-  const msgs = Array.isArray(obj?.messages) ? obj.messages : []
-  let changed = false
-  for (const m of msgs) {
-    if (!m || typeof m !== 'object') continue
-    if (String(m.role || '').trim().toLowerCase() !== 'system') continue
-    if (typeof m.content === 'string' && m.content.length > 0) {
-      m.content = insertShingleBreaks(m.content)
-      changed = true
-      continue
-    }
-    if (Array.isArray(m.content)) {
-      for (const part of m.content) {
-        if (!part || typeof part !== 'object' || typeof part.text !== 'string' || part.text.length === 0) continue
-        part.text = insertShingleBreaks(part.text)
-        changed = true
-      }
-    }
-  }
-  return changed
-}
-
-// ---------------------------------------------------------------------------
-// 超长 system 的后半段挪进 user（CN realm 专属）
-//
-// 2026-10-29 用线上截获的真实请求体（DSH 发的那份，103 KB / 5 条消息 /
-// 77 个工具 / 27,580 字符 system）逐变量隔离，结论非常干净：
-//
-//   原样重放（4 个不同 Key）           → 400 / 11128
-//   去掉 max_completion_tokens        → 400
-//   去掉 stream_options / store       → 400
-//   max_tokens 降到 8192              → 400
-//   去掉全部 77 个工具                 → 400
-//   去掉 yaoji_* 三个工具              → 400
-//   ── system 换成中性文本            → 200 ★
-//   ── 原 system 内容整体挪到 user     → 200 ★
-//
-// 也就是说，拦的不是 tools、不是参数、不是 IP、不是频率，就是 system 里
-// 那段内容本身。继续二分 system：前 1/4、前 1/2、前 3/4 都放行，
-// 后 1/2 的后半段（Scoped Rules / Intent Mapping / No Midway Stop /
-// Retry / Style / Web search 那几块）单独拿出来必然 400。
-//
-// 而同样的内容放进 user 消息就放行 —— 上游只对 system 跑这套内容校验。
-// 所以处理方式是：前缀留在 system（保住权重最高的部分），后缀挪到第一条
-// user 消息前面。实测「前 3/4 留 system + 后 1/4 挪 user」放行。
-//
-// 为什么默认切 1/2 而不是 3/4：实测 1/2 与 3/4 都放行，取更保守的那个，
-// 给不同内容的分布留余量。可用 WORKBUDDY_SYSTEM_SPLIT_RATIO 调整，
-// 设 1 则完全关闭（回到「整段留在 system」的老行为）。
-const SYSTEM_SPLIT_RATIO = (() => {
-  const v = Number(process.env.WORKBUDDY_SYSTEM_SPLIT_RATIO)
-  return Number.isFinite(v) && v > 0 && v <= 1 ? v : 0.5
-})()
-// 短 system 不动：几千字的普通 system 从来没有触发过 11128，
-// 无差别切分只会平白改变模型看到的结构。
-const SYSTEM_SPLIT_MIN_CHARS = (() => {
-  const v = Number(process.env.WORKBUDDY_SYSTEM_SPLIT_MIN)
-  return Number.isFinite(v) && v > 0 ? v : 8000
-})()
-
-/**
- * 把超长 system 的后半段挪进第一条 user 消息，返回是否改动过。
- *
- * 只在 CN realm 下由 shapeWorkbuddyBody 调用。搬过去的那段加一行标记，
- * 让模型知道它仍是指令而不是用户提问——否则模型可能把它当成用户的话来回应。
- */
-export function splitLongWorkbuddySystem(obj, ratio = SYSTEM_SPLIT_RATIO, minChars = SYSTEM_SPLIT_MIN_CHARS) {
-  const msgs = Array.isArray(obj?.messages) ? obj.messages : []
-  if (!msgs.length) return false
-
-  const sysIdx = msgs.findIndex((m) => String(m?.role || '').trim().toLowerCase() === 'system')
-  if (sysIdx < 0) return false
-  const sys = msgs[sysIdx]
-  if (typeof sys.content !== 'string') return false
-  const text = sys.content
-  if ([...text].length < minChars) return false
-
-  const chars = [...text]
-  const cut = Math.floor(chars.length * ratio)
-  const head = chars.slice(0, cut).join('')
-  const tail = chars.slice(cut).join('')
-  if (!tail.trim()) return false
-
-  sys.content = head
-
-  const moved =
-    '[system-continuation] 以下是同一条系统指令的后半部分，继续按它执行，' +
-    '不要当作用户的提问回复：\n\n' +
-    tail
-
-  // 插在第一条 user 之前；没有 user 就补一条
-  const firstUser = msgs.findIndex((m) => String(m?.role || '').trim().toLowerCase() === 'user')
-  if (firstUser < 0) {
-    msgs.push({ role: 'user', content: moved })
-  } else {
-    const u = msgs[firstUser]
-    u.content =
-      typeof u.content === 'string'
-        ? moved + '\n\n' + u.content
-        : [{ type: 'text', text: moved }, ...(Array.isArray(u.content) ? u.content : [])]
-  }
-  return true
-}
+// 这里曾经有两版补丁，都被上游的归一化吃掉了：
+//   - 零宽空格打散（每 8 个码点插 U+200B）：网关先折叠空白、剥零宽再匹配，
+//     打码版与原文被判成同一份内容，回归 11128；
+//   - 超长 system 切一半挪进 user：剩下那一半 system 仍然命中。
+// 现在的解法一个字都不改，只把 system 的内容整段搬进 user 消息（闸门只校验
+// system / developer / assistant 三种角色）。实现与实测表见
+// workbuddy-prompt-relocate.js 的文件头。
 
 // 单次整形完成全部改动。上游拒绝非流式请求，所以 stream 一律强制打开。
 //
 // 顺序有讲究：
-//  1. 先做 role 整形，把 developer 变成 system —— 否则第 4 步的内容指纹
-//     改写会漏掉那些本该是 system 的消息；
+//  1. 先做 role 整形，把 developer 变成 system —— 否则第 3 步的内容指纹
+//     改写与第 5 步的搬家都会漏掉那些本该是 system 的消息；
 //  2. 再保证首条是 system（渠道校验硬条件，缺了或被占首位都 11128）；
 //  3. 然后才是内容指纹改写（只改 system，见 workbuddy-fingerprint.js）；
-//  4. 最后做零宽打散（CN realm 专属）——必须在指纹改写之后，否则被打散的
-//     文本会破坏指纹匹配（其实打散后指纹已不可能原样存在，顺序保证语义清晰）。
+//  4. 按模型上限下发 max_tokens；
+//  5. 最后做「搬家」（CN realm 专属）：把 system 内容整段挪进一条 user 消息，
+//     原位只留占位句。必须在指纹改写之后 —— 搬走的是已改写好的那份文本。
 // realm 由调用方按 provider.base_url 给出（workbuddyRealmFor）；不传视为
-// 国际版处理——不插零宽字符，历史行为完全不变。
+// 国际版处理——不搬家，历史行为完全不变。
 export function shapeWorkbuddyBody(body = {}, modelMeta = null, realm = null) {
   const obj = { ...body }
   obj.stream = true
@@ -340,20 +233,26 @@ export function shapeWorkbuddyBody(body = {}, modelMeta = null, realm = null) {
   forceWorkbuddyMaxThinking(obj)
   applyWorkbuddyMaxOutput(obj, modelMeta)
   // 腾讯的内容级风控：system 里的已知模板句会被 400/11128 拦下。
-  // 放在最后，改的是「已经确定是 system」的那些消息。
+  // 放在搬家之前，改的是「还是 system 身份」的那些消息。
   rewriteWorkbuddySystemFingerprints(obj)
   if (realm === 'cn') {
-    // 超长 system 的后半段挪进 user：这是 11128 唯一实测有效的结构性解法，
-    // 详见 splitLongWorkbuddySystem 的注释。必须放在零宽打散之前——
-    // 打散会改变码点位置，切分点会漂。
-    splitLongWorkbuddySystem(obj)
-    breakWorkbuddySystemShingles(obj)
+    // 11128 的内容级闸门只校验 system / developer / assistant 三种角色，
+    // 所以把 system 的正文整段搬进 user 就能放行，且一个字都不改。
+    // 详见 workbuddy-prompt-relocate.js 的实测表。
+    relocateWorkbuddySystemPrompt(obj)
+    // 搬完之后再改一次措辞：那份系统提示正文此刻躺在 user 消息里，
+    // system 只剩占位句。`Tokens prefixed with @` 这类固定文案本身也是指纹，
+    // 而 workbuddy-fingerprint.js 只扫 system、ASSISTANT_FINGERPRINTS 只扫
+    // assistant —— 两条路都碰不到搬过去的那份正文，就在这一步补上。
+    // 顺序不能提前：搬家前它还是 system，改写会与第 3 步重复且漏掉 user。
+    applyWorkbuddyCompat(obj, RELOCATE_MARKER)
   }
   return obj
 }
 
-// 兜底用的中性 system：实测稳定放行（见 test/workbuddy-fingerprint.test.js 的用例）。
-const NEUTRAL_SYSTEM = 'You are a helpful assistant.'
+// 兜底用的中性 system：与搬家留下的占位句同一句，实测稳定放行
+// （见 test/workbuddy-fingerprint.test.js 的用例）。
+const NEUTRAL_SYSTEM = DEFAULT_SYSTEM
 
 /**
  * 把全部 system 消息的内容换成中性文本，返回是否改动过。
@@ -380,12 +279,26 @@ export function neutralizeWorkbuddySystem(body = {}) {
   return changed
 }
 
-/** 抽出全部 system 正文拼成一行，供诊断日志用（截断由调用方做）。 */
+/**
+ * 抽出全部「系统提示词」正文拼成一行，供诊断日志用（截断由调用方做）。
+ *
+ * 也算上搬家后承载原文的那条 user 消息：CN realm 的整形会把 system 搬走，
+ * 只读 role==='system' 的话，11128 留证里就只剩一句占位句，新指纹永远抓不到。
+ */
 export function collectWorkbuddySystemText(body = {}) {
   const msgs = body?.messages
   if (!Array.isArray(msgs)) return ''
-  return msgs
-    .filter((m) => m && typeof m === 'object' && String(m.role || '').toLowerCase() === 'system')
-    .map((m) => (typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? '')))
-    .join(' ⏎ ')
+  const parts = []
+  for (const m of msgs) {
+    if (!m || typeof m !== 'object') continue
+    const role = String(m.role || '').toLowerCase()
+    const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? '')
+    if (role === 'system') {
+      parts.push(content)
+      continue
+    }
+    // 搬家后的系统提示词：以标记行开头的那条 user 消息
+    if (role === 'user' && content.includes(RELOCATE_MARKER)) parts.push(content)
+  }
+  return parts.join(' ⏎ ')
 }

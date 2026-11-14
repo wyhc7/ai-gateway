@@ -285,38 +285,52 @@ describe('内容指纹改写接入', () => {
   })
 })
 
-describe('CN 整段 prompt 匹配闸门：零宽打散', () => {
-  // 2026-10-22/23 实测（见 workbuddy-lane.js 的长注释）：国内版按 n-gram
-  // 召回率把 system 与已知客户端 prompt 库做整段匹配，覆盖率过阈值即 11128。
-  // 修法是 CN realm 下给所有 system 消息插零宽字符打碎 n-gram。
-  // 这组测试钉住三件事：CN 才打散、打散可逆（剥掉零宽=原文）、其他角色不动。
-  const ZWC = '\u200B'
-  const strip = (s) => s.split(ZWC).join('')
+describe('CN 内容级闸门：system 提示词搬家', () => {
+  // 2026-11-10 实测：同一份 7920 字提示词，只换它所在的角色 ——
+  // system / developer / assistant 都是 11128，user / tool 都是 200。
+  // 闸门只校验前三种角色，所以 CN realm 下的整形把 system 正文整段搬进
+  // 一条 user 消息，system 位置只留一句占位。内容一个字都不改。
+  //
+  // 被它取代的两版补丁（别再往回改）：
+  //   - 零宽打散：网关先归一化（折叠空白、剥零宽、忽略大小写）再匹配，打码
+  //     会被还原成原文，113 字触发片段照样 11128；
+  //   - 超长 system 切一半：剩下那一半仍在 system 里，照样命中。
+  const LONG = '你是代码助手，负责按用户要求改代码并保持风格一致。'.repeat(200)
 
-  test('realm=cn 时 system 被打散，剥掉零宽字符后等于原文', () => {
-    const sys = '你是客服助手，负责回答用户问题。'.repeat(5)
+  test('realm=cn 时 system 正文搬进 user，首条仍是 system', () => {
     const out = shapeWorkbuddyBody({
       model: 'glm-5.3',
-      messages: [{ role: 'system', content: sys }, { role: 'user', content: 'hi' }]
+      messages: [{ role: 'system', content: LONG }, { role: 'user', content: 'hi' }]
     }, null, 'cn')
+    // 渠道校验要求首条必须是 system（见 ensureWorkbuddySystemFirst）
     assert.equal(out.messages[0].role, 'system')
-    assert.equal(out.messages[0].content.includes(ZWC), true, 'CN system 必须插零宽字符')
-    assert.equal(strip(out.messages[0].content), sys, '剥掉零宽后必须等于原文（语义零损）')
-    assert.equal(out.messages[1].content, 'hi', 'user 消息不动')
+    assert.equal(out.messages[0].content, 'You are a helpful assistant.')
+    assert.equal(out.messages[1].role, 'user')
+    assert.ok(out.messages[1].content.endsWith(LONG), '原文逐字保留，只多一行说明')
+    assert.equal(out.messages[2].content, 'hi', '用户真实提问原样跟在后面')
   })
 
-  test('realm 非 cn（global/null）时完全不打散，历史行为不变', () => {
-    const sys = '你是客服助手。'.repeat(10)
+  test('搬完不再往任何消息里插零宽字符', () => {
+    const out = shapeWorkbuddyBody({
+      model: 'glm-5.3',
+      messages: [{ role: 'system', content: LONG }, { role: 'user', content: 'hi' }]
+    }, null, 'cn')
+    assert.equal(JSON.stringify(out.messages).includes('\u200B'), false)
+  })
+
+  test('realm 非 cn（global/null）时不动：历史行为不变', () => {
     for (const realm of [null, undefined, 'global', 'intl']) {
       const out = shapeWorkbuddyBody({
         model: 'glm-5.3',
-        messages: [{ role: 'system', content: sys }, { role: 'user', content: 'hi' }]
+        messages: [{ role: 'system', content: LONG }, { role: 'user', content: 'hi' }]
       }, null, realm)
-      assert.equal(out.messages[0].content.includes(ZWC), false, `realm=${realm} 不应插零宽字符`)
+      assert.equal(out.messages[0].role, 'system', `realm=${realm} 不该搬家`)
+      assert.equal(out.messages[0].content, LONG)
+      assert.equal(out.messages.length, 2)
     }
   })
 
-  test('打散落在指纹改写之后：输出的指纹是改写后的句子', () => {
+  test('搬家落在指纹改写之后：搬走的是已改写好的文本', () => {
     const out = shapeWorkbuddyBody({
       model: 'glm-5.3',
       messages: [
@@ -324,24 +338,38 @@ describe('CN 整段 prompt 匹配闸门：零宽打散', () => {
         { role: 'user', content: 'hi' }
       ]
     }, null, 'cn')
-    const stripped = strip(out.messages[0].content)
-    assert.match(stripped, /PRs usually go here/, '指纹先被改写，再被打散')
-    assert.equal(stripped.includes('usually use this'), false)
+    const moved = out.messages[1].content
+    assert.match(moved, /PRs usually go here/, '指纹先被改写，再被搬进 user')
+    assert.equal(moved.includes('usually use this'), false)
   })
 
-  test('多段形态：只打散 text 段，其他段原样保留', () => {
+  test('developer 也一起搬（上游把它当 system 校验）', () => {
+    const out = shapeWorkbuddyBody({
+      model: 'glm-5.3',
+      messages: [{ role: 'developer', content: LONG }, { role: 'user', content: 'hi' }]
+    }, null, 'cn')
+    assert.equal(out.messages.some((m) => m.role === 'developer'), false)
+    assert.ok(out.messages[1].content.endsWith(LONG))
+  })
+
+  test('带图片的 system 整条不搬：宁可保持原样也不能把图丢了', () => {
     const img = { type: 'image_url', image_url: { url: 'data:image/png;base64,AAA' } }
     const out = shapeWorkbuddyBody({
       model: 'glm-5.3',
-      messages: [
-        { role: 'system', content: [{ type: 'text', text: '第一段系统提示'.repeat(4) }, img] },
-        { role: 'user', content: 'hi' }
-      ]
+      messages: [{ role: 'system', content: [{ type: 'text', text: LONG }, img] }, { role: 'user', content: 'hi' }]
     }, null, 'cn')
-    const parts = out.messages[0].content
-    assert.equal(parts[0].text.includes(ZWC), true)
-    assert.equal(strip(parts[0].text), '第一段系统提示'.repeat(4))
-    assert.equal(parts[1], img, '非 text 段不碰')
+    assert.equal(out.messages[0].role, 'system')
+    assert.equal(out.messages[0].content[1], img, '图片段还在原位')
+  })
+
+  test('诊断日志能取到搬走的原文（否则留证只剩一句占位）', () => {
+    const body = {
+      model: 'glm-5.3',
+      messages: [{ role: 'system', content: LONG }, { role: 'user', content: 'hi' }]
+    }
+    shapeWorkbuddyBody(body, null, 'cn')
+    // shapeWorkbuddyBody 是浅拷贝：messages 数组就地改，body 看得到
+    assert.ok(collectWorkbuddySystemText(body).includes(LONG.slice(0, 40)))
   })
 })
 
@@ -436,59 +464,3 @@ describe('11128 诊断日志：system 原文收集', () => {
   })
 })
 
-// 2026-10-29：用线上截获的真实请求体逐变量隔离，确认 11128 的唯一触发源是
-// system 里的长内容（tools / max_tokens / stream_options / store 全排除）。
-// 同一段文本放进 user 就放行，所以把 system 后半段挪进第一条 user。
-test('超长 system 的后半段挪进 user，前段留在 system', async () => {
-  const { splitLongWorkbuddySystem } = await import('../workbuddy-lane.js')
-  const long = 'A'.repeat(6000) + 'B'.repeat(6000)
-  const obj = {
-    messages: [
-      { role: 'system', content: long },
-      { role: 'user', content: 'hi' }
-    ]
-  }
-  const changed = splitLongWorkbuddySystem(obj, 0.5, 1000)
-  assert.equal(changed, true, '超过阈值应切分')
-  const sys = obj.messages[0]
-  const usr = obj.messages[1]
-  assert.ok([...sys.content].length <= 6000 + 5, 'system 只保留前一半')
-  assert.ok(sys.content.startsWith('A'), 'system 留下的是前段')
-  assert.ok(usr.content.includes('[system-continuation]'), '搬过去的段落要有标记，免得模型当成用户提问')
-  assert.ok(usr.content.includes('B'), '后段内容确实进了 user')
-  assert.ok(usr.content.trim().endsWith('hi'), '原有 user 内容仍在末尾')
-})
-
-test('短 system 不动，不能无差别改写正常请求', async () => {
-  const { splitLongWorkbuddySystem } = await import('../workbuddy-lane.js')
-  const obj = { messages: [{ role: 'system', content: 'You are a helpful assistant.' }, { role: 'user', content: 'hi' }] }
-  assert.equal(splitLongWorkbuddySystem(obj, 0.5, 8000), false, '短 system 不该被切')
-  assert.equal(obj.messages[0].content, 'You are a helpful assistant.', '原样保留')
-})
-
-test('ratio 设 1 时关闭切分（保留回老行为的口子）', async () => {
-  const { splitLongWorkbuddySystem } = await import('../workbuddy-lane.js')
-  const obj = { messages: [{ role: 'system', content: 'X'.repeat(20000) }, { role: 'user', content: 'hi' }] }
-  // ratio=1 -> cut 在末尾 -> tail 为空 -> 不改动
-  assert.equal(splitLongWorkbuddySystem(obj, 1, 1000), false, '切分为空就不该动')
-  assert.equal(obj.messages[0].content.length, 20000)
-})
-
-test('没有 user 消息时，搬过去的内容自己补一条 user', async () => {
-  const { splitLongWorkbuddySystem } = await import('../workbuddy-lane.js')
-  const obj = { messages: [{ role: 'system', content: 'A'.repeat(5000) + 'B'.repeat(5000) }] }
-  assert.equal(splitLongWorkbuddySystem(obj, 0.5, 1000), true)
-  const added = obj.messages.find((m) => m.role === 'user')
-  assert.ok(added && added.content.includes('[system-continuation]'), '要补一条 user 承载后半段')
-})
-
-test('system 是数组形态（多段 text）时保持原样不切', async () => {
-  const { splitLongWorkbuddySystem } = await import('../workbuddy-lane.js')
-  const obj = {
-    messages: [
-      { role: 'system', content: [{ type: 'text', text: 'A'.repeat(20000) }] },
-      { role: 'user', content: 'hi' }
-    ]
-  }
-  assert.equal(splitLongWorkbuddySystem(obj, 0.5, 1000), false, '非字符串 content 不冒险切')
-})

@@ -6,7 +6,7 @@ import { ensureAccessToken as ensureCodexToken, refreshAccessToken as refreshCod
 import { ensureWorkbuddyToken, refreshWorkbuddyToken } from './workbuddy-oauth.js'
 import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexAccountHeader } from './codex-responses.js'
 import { TEMPLATES } from './templates.js'
-import { isWorkbuddyProtocol, workbuddyHeaders, workbuddyChatBaseFor, shapeWorkbuddyBody, workbuddyRealmFor, neutralizeWorkbuddySystem, collectWorkbuddySystemText } from './workbuddy-lane.js'
+import { isWorkbuddyProtocol, workbuddyHeaders, workbuddyChatBaseFor, shapeWorkbuddyBody, workbuddyRealmFor, neutralizeWorkbuddySystem, collectWorkbuddySystemText, applyWorkbuddy11128Fallback } from './workbuddy-lane.js'
 import { fetchWorkbuddyCatalog, mergeWorkbuddyCatalogs } from './workbuddy-catalog.js'
 import { writeFileSync } from 'node:fs'
 import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
@@ -1149,6 +1149,37 @@ async function forwardWithFailover(provider, kind, body, res) {
     upstreamBody = serializeUpstreamBody(provider, body)
     return true
   }
+
+  /**
+   * 11128 的内容级兜底（2026-11-10 版）：把 system / developer 的正文整段搬进
+   * 一条 user 消息，并把 assistant 里已知的指纹词组换成同义写法，然后原地重发
+   * 同一次请求。返回 true 表示请求体确实变了，调用方应 `i -= 1; continue`。
+   *
+   * 与 neutralizeForRetry 的分工：搬家**不丢内容**（一个字不改，只换角色），
+   * 所以它可以进常规重试；改写 assistant 指纹有损，但只发生在已经吃到 11128
+   * 之后。真正丢掉 system 的中性化仍然留在最后、且默认关闭。
+   *
+   * CN realm 的整形已经在 shapeWorkbuddyBody 里搬过家，这里再调是空操作
+   * （搬家有幂等标记）；它对非 CN realm、以及 realm 判断错的平台才有用，
+   * 所以不看 realm，只看协议。
+   *
+   * 请求体没变时不重发：字节一样，重发只会再吃一个 11128 并白烧一次预算。
+   */
+  let contentRelocated = false
+  function relocateForRetry() {
+    if (contentRelocated) return false
+    if (rejectCode !== 11128) return false
+    if (kind !== 'chat' || !isWorkbuddyProtocol(provider.protocol)) return false
+    if (!Array.isArray(body?.messages)) return false
+    if (!applyWorkbuddy11128Fallback(body)) return false
+    contentRelocated = true
+    upstreamBody = serializeUpstreamBody(provider, body)
+    console.warn(
+      '[11128 内容级] system 提示词已搬进 user 消息（assistant 指纹同步改写），原地重发一次。'
+    )
+    return true
+  }
+
   // 生图不走对话的时间预算：图片生成动辄几十秒甚至数分钟，
   // 用 token 数推算时长对它毫无意义，直接给独立的固定预算。
   const totalTimeoutMs = kind === 'images' ? IMAGES_TOTAL_TIMEOUT_MS : jsonTotalTimeout(body?.max_tokens, body?.stream)
@@ -1319,12 +1350,17 @@ async function forwardWithFailover(provider, kind, body, res) {
       // system，同样被 11128 拦下——这类内容与渠道校验无关，但只要出现在 system 里
       // 就会被判非法调用。所以不能只盯着「模板句」名单，必须留一条不改名单也能放行的路。
       //
-      // 换到第 2 个 Key 仍然 11128 时不再继续烧账号，改用中性 system 重试一次。
-      // 丢掉 system 是有损的，但比「客户端彻底失败」强，原文会打进日志。
-      if (resp.status === 400 && rejectTried >= 1 && neutralizeForRetry()) {
-        attempts.push(`${key.name || key.id.slice(0, 8)}: 11128 疑似内容级（system 中性化后重试）`)
-        i -= 1 // 重试同一个 Key：账号不该为一句 system 背锅
-        continue
+      // 换到第 2 个 Key 仍然 11128 时不再继续烧账号，先做无损的「搬家」，
+      // 仍不行才做有损的中性化（后者默认关闭）。原文都会打进日志。
+      if (resp.status === 400 && rejectTried >= 1) {
+        const moved = relocateForRetry()
+        if (moved || neutralizeForRetry()) {
+          attempts.push(
+            `${key.name || key.id.slice(0, 8)}: 11128 疑似内容级（${moved ? 'system 搬家' : 'system 中性化'}后重试）`
+          )
+          i -= 1 // 重试同一个 Key：账号不该为一段 system 背锅
+          continue
+        }
       }
 
       if (resp.status === 400 && (attempts.length < 1 || retrying11128 || (sawAccountReject && rejectBudgetLeft))) {
@@ -1437,9 +1473,10 @@ async function forwardWithFailover(provider, kind, body, res) {
       if (resp.status === 400 && sawAccountReject && rejectCode !== null) {
         // 最后一班车：只有 1 个 Key 可用、或前面已经用光换号预算时，上面那个
         // rejectTried >= 1 的分支根本没机会执行，内容级请求就会直接透传 400。
-        // 走到这里已经确定「换号救不了」，所以无条件试一次中性化。
-        if (neutralizeForRetry()) {
-          attempts.push(`${key.name || key.id.slice(0, 8)}: 11128 疑似内容级（中性化后末次重试）`)
+        // 走到这里已经确定「换号救不了」，所以再试一次搬家（非 CN realm 时
+        // 常规整形没搬过），最后才是对环境有损的中性化。
+        if (relocateForRetry() || neutralizeForRetry()) {
+          attempts.push(`${key.name || key.id.slice(0, 8)}: 11128 疑似内容级（搬家/中性化后末次重试）`)
           i -= 1
           continue
         }
