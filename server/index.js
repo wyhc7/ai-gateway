@@ -1070,6 +1070,11 @@ app.post('/api/providers/:id/keys/:keyId/reset', (req, res) => {
   key.cooldown_until = 0
   key.last_error = null
   key.last_error_at = null
+  // 风控标记一并清掉：这个按钮的自然语义是「这个号现在可以用了」。
+  // 标记只由上游响应产生，人若已经申诉成功或换过号，就该能手动解除。
+  // （正常情况下它会在这个号跑通一次请求后自动消失，见 proxy 的 clearRiskFlag。）
+  delete key.risk_flag
+  delete key.risk_flag_at
   persistImmediate()
   res.json(serializeProvider(p))
 })

@@ -186,6 +186,19 @@
                       </el-tooltip>
                       <el-button size="small" plain @click="resetKey(p, k)">立即恢复</el-button>
                     </template>
+                    <!-- 风控标记：与「冷却」分开显示。冷却会自己过期，风控不会 ——
+                         账号被上游限制之后等多久都还是限制状态，只能申诉或换号。
+                         标在网页上是为了让人一眼分清「号废了」和「网络抖了」，
+                         而不是对着一串 HTTP 403 反复续期凭据。 -->
+                    <el-tooltip v-if="k.risk_flag" placement="top">
+                      <template #content>
+                        <div class="risk-tip">{{ riskTip(k) }}</div>
+                      </template>
+                      <span class="badge badge-red key-risk">风控</span>
+                    </el-tooltip>
+                    <el-button v-if="k.risk_flag" size="small" text type="danger" @click="resetKey(p, k)">
+                      解除标记
+                    </el-button>
                     <SwitchRail v-model="k.enabled" small :label="`Key ${k.name}`" @change="toggleKey(p, k)" />
                     <el-button v-if="k.type !== 'oauth'" size="small" text @click="openEditKeyDialog(p, k)">编辑</el-button>
                     <el-button size="small" text type="danger" @click="removeKey(p, k)">删除</el-button>
@@ -876,6 +889,25 @@ function cooldownText(k) {
 
 function formatTime(ts) {
   return new Date(ts).toLocaleString('zh-CN')
+}
+
+// 风控标记的提示文案。
+//
+// 把「什么时候被限制」「上游原话」都摆出来：申诉时这两项都要填，
+// 而界面上只留一个「风控」两个字，等于逼人回去翻日志。
+// 标记由后端在识别到上游限制响应时写入（见 server/risk-control.js），
+// 这个号重新跑通一次请求后会自动消失。
+function riskTip(k) {
+  const f = k?.risk_flag
+  if (!f) return ''
+  const at = f.at ? formatTime(f.at) : ''
+  const code = f.code !== null && f.code !== undefined ? `（code ${f.code}）` : ''
+  return [
+    `账号被上游风控限制${code}`,
+    f.message ? `上游原话：${f.message}` : '',
+    at ? `标记时间：${at}` : '',
+    '这个号跑通一次请求后标记会自动解除，也可以点「解除标记」手动清掉。'
+  ].filter(Boolean).join('\n')
 }
 
 async function load() {
@@ -2200,6 +2232,20 @@ onBeforeUnmount(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   display: inline-block;
+}
+
+/* 风控标记本身要显眼（红），但不要把行撑开：它出现的行可能还挂着
+   冷却、额度、签到等好几个徽章。 */
+.key-risk {
+  cursor: help;
+}
+
+/* tooltip 里是多行诊断信息（时间 / 上游原话 / 怎么解除），
+   默认的白空格折叠会把它们挤成一段。 */
+.risk-tip {
+  white-space: pre-line;
+  line-height: 1.6;
+  max-width: 340px;
 }
 
 .preset-label {

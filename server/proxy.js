@@ -8,6 +8,7 @@ import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexA
 import { TEMPLATES } from './templates.js'
 import { isWorkbuddyProtocol, workbuddyHeaders, workbuddyChatBaseFor, shapeWorkbuddyBody, workbuddyRealmFor, neutralizeWorkbuddySystem, collectWorkbuddySystemText, applyWorkbuddy11128Fallback } from './workbuddy-lane.js'
 import { fetchWorkbuddyCatalog, mergeWorkbuddyCatalogs } from './workbuddy-catalog.js'
+import { detectRiskControl, riskFlagOf } from './risk-control.js'
 import { writeFileSync } from 'node:fs'
 import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
 import { filterModelsForProvider, IMAGE_ONLY_FALLBACK_MODELS } from './providers-image-only.js'
@@ -764,6 +765,65 @@ function usableKeys(provider) {
   return probing.slice(0, 1)
 }
 
+/**
+ * 读上游错误体，带超时。
+ *
+ * 错误体通常只有几百字节，但上游偶尔会把整页 HTML 甩过来；没有超时兜底时
+ * 一个慢响应会把整个故障转移循环挂住，而这时我们只是想看一眼里面写了什么。
+ */
+async function readErrorTextSafe(resp, timeoutMs = 5000) {
+  try {
+    let timer
+    return await Promise.race([
+      resp.text(),
+      new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('读取错误体超时')), timeoutMs) })
+    ]).finally(() => clearTimeout(timer))
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 给 Key 打上「被上游风控」标记。
+ *
+ * 与冷却的区别：冷却会随时间自动过期，风控不会 —— 账号被限制之后，等多久都
+ * 还是限制状态，只能去申诉或换号。所以它是一条**持久标记**，写进配置文件，
+ * 并且只在「这个号重新跑通一次请求」之后才自动解除（见 clearRiskFlag）。
+ *
+ * 为什么不顺手加大冷却：403 已经在 KEY_LEVEL_STATUS 里，走的是长冷却；
+ * 这里只负责让人在界面上看见「这个号是被风控了，不是网络问题」。
+ */
+function markRiskFlag(provider, key, risk) {
+  if (!key || key.type === 'anonymous') return
+  const flag = riskFlagOf(risk)
+  if (!flag) return
+  // 同一个号反复命中时不要每次刷新时间戳：第一次被限制的时间更有价值
+  // （申诉时上游会问「什么时候开始异常」）。
+  if (!key.risk_flag) key.risk_flag = flag
+  key.risk_flag_at = key.risk_flag.at
+  key.last_error = `风控：${flag.message}`.slice(0, 200)
+  key.last_error_at = Date.now()
+  persist()
+  addLog({
+    type: 'system', method: 'POST', path: '/upstream', status: 403,
+    detail: `账号被上游风控：${key.name || key.id.slice(0, 8)} —— ${flag.message}`
+  })
+}
+
+/**
+ * 这个号重新跑通一次请求 → 解除风控标记。
+ *
+ * 自动解除是刻意的：人申诉成功后不该还记得着去点一次「解除」；
+ * 而如果标记留着不走，久了就没人再信它，等于没有。
+ */
+function clearRiskFlag(key) {
+  if (!key || !key.risk_flag) return false
+  delete key.risk_flag
+  delete key.risk_flag_at
+  persist()
+  return true
+}
+
 function applyCooldown(provider, key, status) {
   // 免凭据通道只有一个共享的占位 Key，给它打冷却等于把整个平台冻住，
   // 而这类请求失败多是上游抖动、几秒后即恢复。健康度交给 markResult 记录。
@@ -781,7 +841,12 @@ function applyCooldown(provider, key, status) {
   key.cooldown_at = now
   key.cooldown_ms = ms
   key.cooldown_until = now + ms
-  key.last_error = status === 'network' ? '网络错误' : `HTTP ${status}`
+  // 已被判定为风控的号，last_error 统一说成风控。
+  // 否则后续更「普通」的失败路径（网络错误、HTTP 502）会把这条最有用的
+  // 信息盖掉，界面上又变回一句「网络错误」——人接着去查网络，方向全错。
+  key.last_error = key.risk_flag
+    ? `风控：${key.risk_flag.message}`.slice(0, 200)
+    : status === 'network' ? '网络错误' : `HTTP ${status}`
   key.last_error_at = now
   persist()
 }
@@ -1402,7 +1467,19 @@ async function forwardWithFailover(provider, kind, body, res) {
       // 已收到响应头，改为总时长超时，长推理模型的持续输出不受影响
       clearTimeout(timer)
       timer = setTimeout(() => controller.abort(), totalTimeoutMs)
+      // 这个号跑通了：如果之前被标过风控，说明限制已经解除，顺手摘掉标记。
+      // 只在 2xx 时做，且没有标记时不做任何事（不产生额外 persist）。
+      if (resp.status >= 200 && resp.status < 300) clearRiskFlag(key)
       if (RETRYABLE_STATUS.has(resp.status)) {
+        // —— 风控识别（403）——
+        // 账号被上游限制时回的就是 403，响应体里写着「账号存在异常行为，已被限制使用」。
+        // 不读这一段的话，界面上只会显示「HTTP 403」，和 token 失效长得一模一样，
+        // 于是人会去反复续期一个根本没问题的凭据。
+        // 必须赶在 cancel 之前读；只对 403 读，不给普通错误多付一次读 body 的代价。
+        if (resp.status === 403) {
+          const risk = detectRiskControl(await readErrorTextSafe(resp))
+          if (risk) markRiskFlag(provider, key, risk)
+        }
         // OAuth 的 401/403 大多是「access_token 过期但未触发临期阈值」的假性失效：
         // 先强制续期一次，让同一 Key 原地重试；仍失败才按 Key 失效冷却。
         // 没有这层补刷时，一次集体过期会把整池 Key 打进 10 分钟冷却，
@@ -1507,6 +1584,12 @@ async function forwardWithFailover(provider, kind, body, res) {
                 rejectMsg = String(ej?.msg || ej?.displayMsg?.zh || '')
               }
             } catch { /* 非 JSON 错误体，按普通 400 处理 */ }
+            // 风控识别：腾讯那套限制同时会以 400 出现（11140 + displayMsg 里写明
+            // 「账号存在异常行为」）。这里复用刚读到的 errText，不再多读一次。
+            // ⚠️ 11140 本身不等于风控 —— 参数非法也是 11140，所以判定交给
+            // detectRiskControl 看文案，不看 code。
+            const risk = detectRiskControl(errText)
+            if (risk) markRiskFlag(provider, key, risk)
           } catch { /* 读不到错误体则按普通瞬时 400 重试 */ }
         }
         const accountReject = firstRead
