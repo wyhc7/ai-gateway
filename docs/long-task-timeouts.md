@@ -1,12 +1,19 @@
 # 长任务的超时层次
 
-长任务跑到一半失败，报错可能来自**三个完全不同的地方**。搞错层次会一直在错的地方调参。
+长任务跑到一半失败，报错可能来自**四个完全不同的地方**。搞错层次会一直在错的地方调参。
 
 | 层 | 位置 | 默认值 | 报错长什么样 |
 |---|---|---|---|
 | ① 客户端流空闲 | DSH `llm-pi-ai` 的 `streamIdleTimeoutMs` | 300000（5 分钟） | `pi-ai stream idle timeout after 300000ms` |
-| ② 网关等响应头 | `CONNECT_TIMEOUT_MS` + 按输入 token 放大 | 80s 起，上限 10 分钟 | `等待响应头超过 N 秒（输入约 X tokens…）` |
-| ③ 网关流空闲 | `STREAM_IDLE_TIMEOUT_MS` | 600000（10 分钟） | `上游长时间无数据（空闲超时，已断开）` |
+| ② 网关等响应头 | `CONNECT_TIMEOUT_MS` + 按输入 token 放大 | 80s 起；30 万 token → 320s，96 万 → 848s；上限 20 分钟 | `上游请求超时：N 秒内没有开始响应（输入约 X tokens…）` |
+| ③ 网关流空闲 | `STREAM_IDLE_TIMEOUT_MS` | 900000（15 分钟） | `上游长时间无数据（空闲超时，已断开）` |
+| ④ 网关流总时长 | `jsonTotalTimeout(max_tokens, true)` | 30 分钟起，按输出上限放大，封顶 4 小时 | `上游请求超时（已收到响应头，转发中途中断，总预算 N 秒）` |
+
+②③④ 都是**网关自己**的消息，措辞不同、该调的参数也不同。看括号里的字样分辨：
+
+- 带「输入约 X tokens」→ ②，改 `PRE_HEADER_MS_PER_10K_TOKENS` / `CONNECT_TIMEOUT_MAX_MS`
+- 带「空闲超时」→ ③，改 `STREAM_IDLE_TIMEOUT_MS`
+- 带「转发中途中断，总预算」→ ④，改 `STREAM_TOTAL_TIMEOUT_MAX_MS`
 
 ## 关键事实：网关心跳救不了 pi-ai
 
@@ -45,23 +52,36 @@ const result = await watchdog.next(iterator)
   config:
     providers:
       a:
-        streamIdleTimeoutMs: 900000   # 15 分钟
+        streamIdleTimeoutMs: 300000   # 5 分钟（插件默认值）
 ```
 
 改完要**重启 dsh web** 才生效（profile 补丁层在启动时装载）。
 
-取值建议：比网关的 `STREAM_IDLE_TIMEOUT_MS` 大一档。这样上游真挂了的时候，
-是**网关**先报出可诊断的错误（带输入规模、带调参建议），而不是客户端先扔一句
-没有上下文的 `stream idle timeout`。
+**这里有个大小关系要自己定，两种都自洽，但不能混着来：**
+
+| 选择 | 客户端 | 网关 | 谁先报错 | 代价 |
+|---|---|---|---|---|
+| 快速失败 | 5 分钟 | 等头 ≤ 4 分钟 | **网关**（带输入规模，能调参） | 长 prefill 直接失败，但原因清楚 |
+| 容忍长任务 | 30 分钟 | 等头 ≤ 848s | 网关 | 真挂死时多等一会儿才报 |
+
+**当前配置属于「反着的」那一类**：客户端 5 分钟 < 网关等头 848s / 流空闲 15 分钟，
+所以上游静默超过 5 分钟时，**客户端先超时**，报的是那句没有上下文的
+`pi-ai stream idle timeout after 300000ms`。
+
+> ⚠️ 注意：客户端只统计「静默」时长，每来一个 chunk 就重置。
+> 所以长回答（一直在吐字）不会因为这条中断；会中断的是**静默超过 5 分钟**的情形，
+> 主要是大上下文的 prefill。想彻底避开，要么把客户端改大，要么用小一档的上下文
+> （见 docs/workbuddy-context.md 的档位选择）。
 
 ### 网关
 
 | 环境变量 | 默认 | 何时改 |
 |---|---|---|
 | `CONNECT_TIMEOUT_MS` | 80000 | 上游排队慢，但 prefill 不大 |
-| `PRE_HEADER_MS_PER_10K_TOKENS` | 3000 | 长上下文等头不够用（按每万 token 追加毫秒） |
-| `CONNECT_TIMEOUT_MAX_MS` | 600000 | 单次等头上限 |
-| `STREAM_IDLE_TIMEOUT_MS` | 600000 | 上游思考阶段极长且完全无输出 |
+| `PRE_HEADER_MS_PER_10K_TOKENS` | 8000 | 长上下文等头不够用（按每万 token 追加毫秒） |
+| `CONNECT_TIMEOUT_MAX_MS` | 1200000 | 单次等头上限（20 分钟） |
+| `STREAM_IDLE_TIMEOUT_MS` | 900000 | 上游思考阶段极长且完全无输出（15 分钟） |
+| `STREAM_TOTAL_TIMEOUT_MAX_MS` | 14400000 | 流式总时长上限（4 小时） |
 
 ## 排错顺序
 

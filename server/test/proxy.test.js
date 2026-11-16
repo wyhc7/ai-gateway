@@ -786,7 +786,18 @@ test('非流式长任务按 max_tokens 扩充时长预算，短请求仍受 2 �
   assert.equal(jsonTotalTimeout(2048, false), 120000, '短请求仍在 2 分钟护栏内')
   assert.equal(jsonTotalTimeout(16384, false), 655360, '16384 tokens 约给 10.9 分钟（40ms/token）')
   assert.equal(jsonTotalTimeout(1000000, false), 1800000, '极大值封顶到 30 分钟')
-  assert.equal(jsonTotalTimeout(999999, true), 1800000, '流式固定 30 分钟预算')
+})
+
+// 流式总预算也必须按输出上限放大：固定 30 分钟对长回答是硬伤 ——
+// 128K token 在 25 tok/s 下要 85 分钟，第 30 分钟被掐断，用户看到「跑到一半没了」。
+// 挂死由空闲超时兜底，所以总时长可以给到很宽的上限。
+test('流式长任务同样按 max_tokens 扩充，且有 4 小时硬上限', () => {
+  assert.equal(jsonTotalTimeout(undefined, true), 1800000, '未设 max_tokens 仍是 30 分钟基础值')
+  assert.equal(jsonTotalTimeout(0, true), 1800000, 'max_tokens 为 0 不扩充')
+  assert.equal(jsonTotalTimeout(2048, true), 1800000, '短回答不缩短基础预算')
+  assert.equal(jsonTotalTimeout(64000, true), 2560000, '6.4 万 token 约给 42.7 分钟')
+  assert.equal(jsonTotalTimeout(128000, true), 5120000, '12.8 万 token 约给 85 分钟')
+  assert.equal(jsonTotalTimeout(999999, true), 14400000, '极大值封顶到 4 小时')
 })
 
 test('等响应头预算容得下至少两次尝试，慢上游才轮得到第二个 Key', () => {

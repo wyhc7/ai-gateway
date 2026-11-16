@@ -274,7 +274,12 @@ function toMs(value, fallback) {
 // 非推理接口（/models 等）仍是几十毫秒，不受影响。
 // 导出便于测试锁住下面的约束
 export const CONNECT_TIMEOUT_MS = toMs(process.env.CONNECT_TIMEOUT_MS, 80000)
+// 流式**基础**总预算（长回答会按 max_tokens 往上放，见 jsonTotalTimeout）。
 const STREAM_TOTAL_TIMEOUT_MS = toMs(process.env.STREAM_TOTAL_TIMEOUT_MS, 1800000)
+// 流式总预算的硬上限。给到 4 小时是因为它真的可能用满：
+// 128K token 的回答在 25 tok/s 下要 85 分钟，固定 30 分钟会从中间掐断。
+// 真正的挂死由空闲超时（STREAM_IDLE_TIMEOUT_MS）兜底，不靠总时长。
+const STREAM_TOTAL_TIMEOUT_MAX_MS = toMs(process.env.STREAM_TOTAL_TIMEOUT_MAX_MS, 14400000)
 const JSON_TOTAL_TIMEOUT_MS = toMs(process.env.JSON_TOTAL_TIMEOUT_MS, 120000)
 // 等待响应头阶段的全程预算。单次尝试只受 CONNECT_TIMEOUT_MS 约束，Key 轮换会把
 // 这段时间逐个累加：几十个 Key 都拿不到响应头时，客户端要挂几十分钟才等来一个 502
@@ -295,10 +300,21 @@ const JSON_LONG_MS_PER_TOKEN = 40
 // 客户端只看到一次毫无信息的 502。单独给 5 分钟预算，并允许环境变量覆盖。
 const IMAGES_TOTAL_TIMEOUT_MS = toMs(process.env.IMAGES_TOTAL_TIMEOUT_MS, 300000)
 
-// 计算一次请求的总时长预算；导出便于测试
+// 计算一次请求的总时长预算；导出便于测试。
+//
+// 流式也必须按输出上限放大：固定 30 分钟对长回答是硬伤 —— 一个
+// max_tokens=128000 的请求在 25 tok/s 下要 85 分钟，第 30 分钟被掐断，
+// 用户看到的是「跑到一半没了」。非流式那条路早就是这么算的，流式一直漏着。
+//
+// 不担心「挂死」：流式有独立的空闲超时（STREAM_IDLE_TIMEOUT_MS，无数据即断开），
+// 总时长只负责兜住「一直在吐但极慢」这种情形，给它一个很宽的上限即可。
 export function jsonTotalTimeout(maxTokens, stream) {
-  if (stream) return STREAM_TOTAL_TIMEOUT_MS
   const byTokens = Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens * JSON_LONG_MS_PER_TOKEN : 0
+  if (stream) {
+    return Math.min(STREAM_TOTAL_TIMEOUT_MAX_MS, Math.max(STREAM_TOTAL_TIMEOUT_MS, byTokens))
+  }
+  // 非流式保持原语义（上限仍是 30 分钟）：客户端是同步等待的，
+  // 放开到小时级只会让一次坏请求占住连接更久。
   return Math.min(STREAM_TOTAL_TIMEOUT_MS, Math.max(JSON_TOTAL_TIMEOUT_MS, byTokens))
 }
 
@@ -321,8 +337,8 @@ export function jsonTotalTimeout(maxTokens, stream) {
 //
 // ⚠️ 只放大「等响应头」，不放宽空闲超时与总时长：等到了头之后，
 // 仍然由 STREAM_IDLE_TIMEOUT_MS 与 totalTimeout 管，避免把挂死的连接一起放宽。
-const PRE_HEADER_MS_PER_10K_TOKENS = Number(process.env.PRE_HEADER_MS_PER_10K_TOKENS || 3000)
-export const CONNECT_TIMEOUT_MAX_MS = toMs(process.env.CONNECT_TIMEOUT_MAX_MS, 600000)
+const PRE_HEADER_MS_PER_10K_TOKENS = Number(process.env.PRE_HEADER_MS_PER_10K_TOKENS || 8000)
+export const CONNECT_TIMEOUT_MAX_MS = toMs(process.env.CONNECT_TIMEOUT_MAX_MS, 1200000)
 
 /**
  * 估算一次请求的**输入** token 数（消息正文 + 工具 schema）。
@@ -372,7 +388,7 @@ export function connectTimeoutFor(inputTokens, totalBudgetMs) {
 const SSE_HEARTBEAT_INTERVAL_MS = toMs(process.env.SSE_HEARTBEAT_INTERVAL_MS, 15000)
 // 上游多久没有数据就判定流已死。推理模型的思考阶段可能几分钟不发任何内容，
 // 默认放宽到 10 分钟，避免长思考被误杀。
-const STREAM_IDLE_TIMEOUT_MS = toMs(process.env.STREAM_IDLE_TIMEOUT_MS, 600000)
+const STREAM_IDLE_TIMEOUT_MS = toMs(process.env.STREAM_IDLE_TIMEOUT_MS, 900000)
 // 背压等待上限：客户端长期不消费时不能无限等待，
 // 否则上游的发送缓冲一直堵着，最终会被上游主动断开
 const BACKPRESSURE_MAX_WAIT_MS = toMs(process.env.BACKPRESSURE_MAX_WAIT_MS, 60000)
