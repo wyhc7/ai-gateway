@@ -244,7 +244,13 @@ export function applyWorkbuddyContextLength(obj, modelMeta) {
   const result = { requested: null, applied: null, reason: null }
   if (!obj || typeof obj !== 'object') return result
 
-  const raw = obj.context_length ?? obj.contextLength
+  // 三种输入来源，优先级从高到低：
+  //  1. 请求体里的 context_length / contextLength（能改请求体的客户端）；
+  //  2. 模型元数据里的 context_length —— 来自上下文档位别名（glm-5.3-1m），
+  //     给只能挑模型 id 的客户端用；
+  //  3. 都没有 → 不发这个字段，上游按自己的默认档跑。
+  const explicit = obj.context_length ?? obj.contextLength
+  const raw = explicit ?? modelMeta?.context_length
   delete obj.context_length
   delete obj.contextLength
   if (raw === undefined || raw === null || raw === '') return result

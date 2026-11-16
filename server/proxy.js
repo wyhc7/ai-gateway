@@ -8,6 +8,7 @@ import { toCodexRequest, fromCodexResponse, createCodexStreamTransformer, codexA
 import { TEMPLATES } from './templates.js'
 import { isWorkbuddyProtocol, workbuddyHeaders, workbuddyChatBaseFor, shapeWorkbuddyBody, workbuddyRealmFor, neutralizeWorkbuddySystem, collectWorkbuddySystemText, applyWorkbuddy11128Fallback } from './workbuddy-lane.js'
 import { fetchWorkbuddyCatalog, mergeWorkbuddyCatalogs } from './workbuddy-catalog.js'
+import { expandContextTierModels } from './workbuddy-core.js'
 import { detectRiskControl, riskFlagOf } from './risk-control.js'
 import { writeFileSync } from 'node:fs'
 import { SUBSCRIPTION_PLANS } from './subscription-plans.js'
@@ -578,7 +579,15 @@ function serializeUpstreamBody(provider, body) {
     const upstream = workbuddyUpstreamBody(provider, body)
     // 元数据要按**上游 id** 找：别名（glm-5.3-intl）在目录里是一条独立记录，
     // 但它的 max_output 与原始 id 一致，用上游 id 查更稳
-    const meta = workbuddyModelMeta(provider, upstream?.model) || workbuddyModelMeta(provider, body?.model)
+    const baseMeta = workbuddyModelMeta(provider, upstream?.model) || workbuddyModelMeta(provider, body?.model)
+    // 上下文档位别名（glm-5.3-1m）是另一条记录：它的 max_output 等元数据与主 id
+    // 相同，唯一独有的是 context_length。所以以上游 id 的元数据为底，只把档位
+    // 盖上去 —— 客户端点了 1M 档，即使请求体里没写 context_length，也要真按 1M 发。
+    const aliasMeta = workbuddyModelMeta(provider, body?.model)
+    const tier = Number(aliasMeta?.context_length)
+    const meta = Number.isFinite(tier) && tier > 0
+      ? { ...baseMeta, context_length: tier }
+      : baseMeta
     // realm 决定要不要做零宽打散（CN 版整段 prompt 匹配闸门专属），按
     // 平台 base_url 判定；账号级 domain 与平台不同属的错配是配置错误，不在此兜
     return JSON.stringify(shapeWorkbuddyBody(upstream, meta, workbuddyRealmFor(provider.base_url)))
@@ -893,9 +902,15 @@ export async function refreshWorkbuddyCatalog(provider) {
   if (entries.length === 0) return null
 
   const { models, rates, upstream, realmById } = mergeWorkbuddyCatalogs(entries)
-  provider.models = models
+  // 多档上下文展开成独立模型 id（glm-5.3-600k / glm-5.3-1m）。
+  // 只在「能改请求体」的客户端上，context_length 才有入口；展开成 id 之后
+  // 任何只能挑模型名的客户端也能换档。默认档仍用主 id。
+  const tiers = expandContextTierModels(models)
+  provider.models = tiers.models
   provider.model_rates = rates
   provider.model_rates_at = Date.now()
+  Object.assign(upstream, tiers.upstream)
+  Object.assign(realmById, tiers.realmById)
   provider.model_upstream_id = upstream
   provider.model_realm = realmById
   provider.models_updated_at = Date.now()

@@ -10,7 +10,9 @@ import { describe, test } from 'node:test'
 import {
   normalizeModel,
   supportedContextLengths,
-  pickWorkbuddyContextLength
+  pickWorkbuddyContextLength,
+  contextTierLabel,
+  expandContextTierModels
 } from '../workbuddy-core.js'
 import { applyWorkbuddyContextLength, shapeWorkbuddyBody } from '../workbuddy-lane.js'
 import {
@@ -193,8 +195,111 @@ describe('shapeWorkbuddyBody：contextLength 与 max_tokens 一起落到上游�
   })
 })
 
-describe('estimateInputTokens：只用于放大预算，宁可高估', () => {
-  test('空请求为 0', () => {
+// ---------------------------------------------------------------------------
+// 换档的三条路径：请求体字段 / 模型别名 / 不点（用默认档）
+// ---------------------------------------------------------------------------
+
+describe('contextTierLabel：id 后缀要好认', () => {
+  test('整数档位用 k / m', () => {
+    assert.equal(contextTierLabel(300000), '300k')
+    assert.equal(contextTierLabel(600000), '600k')
+    assert.equal(contextTierLabel(1000000), '1m')
+    assert.equal(contextTierLabel(128000), '128k')
+  })
+
+  test('不能整除就原样', () => {
+    assert.equal(contextTierLabel(65536), '65536')
+  })
+
+  test('非法输入不抛错', () => {
+    assert.equal(contextTierLabel('abc'), 'abc')
+    assert.equal(contextTierLabel(0), '0')
+  })
+})
+
+describe('expandContextTierModels：多档展开成独立模型 id', () => {
+  const base = [
+    { id: 'glm-5.3', name: 'GLM-5.3', context: 300000, context_options: [300000, 600000, 1000000], max_output: 64000, realm: 'cn' },
+    { id: 'glm-4.6', name: 'GLM-4.6', context: 168000, max_output: 32000, realm: 'cn' }
+  ]
+
+  test('默认档不造别名，其余档各一条', () => {
+    const { models } = expandContextTierModels(base)
+    const ids = models.map((m) => m.id)
+    assert.deepEqual(ids, ['glm-5.3', 'glm-5.3-600k', 'glm-5.3-1m', 'glm-4.6'])
+  })
+
+  test('单档模型不展开（避免下拉里出现同义 id）', () => {
+    const { models } = expandContextTierModels([base[1]])
+    assert.deepEqual(models.map((m) => m.id), ['glm-4.6'])
+  })
+
+  test('别名带回上游 id，并继承元数据', () => {
+    const { models, upstream, realmById } = expandContextTierModels(base)
+    const alias = models.find((m) => m.id === 'glm-5.3-1m')
+    assert.equal(alias.context_length, 1000000)
+    assert.equal(alias.context, 1000000)
+    assert.equal(alias.context_tier_of, 'glm-5.3')
+    assert.equal(alias.max_output, 64000, 'max_tokens 上限跟主 id 一致')
+    assert.equal(upstream['glm-5.3-1m'], 'glm-5.3')
+    assert.equal(realmById['glm-5.3-1m'], 'cn')
+    assert.match(alias.name, /1M 上下文/)
+  })
+
+  test('与既有 id 撞名时跳过，不覆盖别人的条目', () => {
+    const models = [
+      { id: 'm', context: 1000, context_options: [1000, 2000] },
+      { id: 'm-2k', context: 2000 }
+    ]
+    const out = expandContextTierModels(models)
+    assert.equal(out.models.filter((m) => m.id === 'm-2k').length, 1, '不应产生重复 id')
+    assert.equal(out.upstream['m-2k'], undefined, '原有条目不该被改写成别名')
+  })
+
+  test('空输入安全', () => {
+    assert.deepEqual(expandContextTierModels([]).models, [])
+    assert.deepEqual(expandContextTierModels(null).models, [])
+  })
+})
+
+describe('换档：三条路径的实际效果', () => {
+  // 模拟目录里的主 id 与 1m 别名
+  const baseMeta = { max_output: 64000, context: 300000, context_options: [300000, 600000, 1000000] }
+
+  test('路径一：请求体里传 context_length', () => {
+    const out = shapeWorkbuddyBody(
+      { model: 'glm-5.3', context_length: 600000, messages: [{ role: 'user', content: 'x' }] },
+      baseMeta, 'cn'
+    )
+    assert.equal(out.contextLength, 600000)
+  })
+
+  // 只能挑模型名的客户端（DSH / IDE）就走这条
+  test('路径二：点模型别名，请求体什么都不用写', () => {
+    const merged = { ...baseMeta, context_length: 1000000 }
+    const out = shapeWorkbuddyBody(
+      { model: 'glm-5.3', messages: [{ role: 'user', content: 'x' }] },
+      merged, 'cn'
+    )
+    assert.equal(out.contextLength, 1000000, '别名上的档位要真的发出去')
+  })
+
+  test('路径三：什么都不点 → 不发 contextLength，走上游默认档', () => {
+    const out = shapeWorkbuddyBody({ model: 'glm-5.3', messages: [{ role: 'user', content: 'x' }] }, baseMeta, 'cn')
+    assert.equal(out.contextLength, undefined)
+  })
+
+  test('请求体字段优先于别名档位', () => {
+    const merged = { ...baseMeta, context_length: 1000000 }
+    const out = shapeWorkbuddyBody(
+      { model: 'glm-5.3', context_length: 600000, messages: [{ role: 'user', content: 'x' }] },
+      merged, 'cn'
+    )
+    assert.equal(out.contextLength, 600000)
+  })
+})
+
+describe('estimateInputTokens：只用于放大预算，宁可高估', () => {  test('空请求为 0', () => {
     assert.equal(estimateInputTokens({}), 0)
     assert.equal(estimateInputTokens(null), 0)
   })

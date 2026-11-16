@@ -35,14 +35,60 @@
 - `context_options` **只在多于一个档位时**才写（只有一个值时「可选」没有意义）
 - 前端模型列表显示成 `300K · 可选 300K/600K/1M`
 
-调用时点档：
+## 怎么换上下文
+
+三条路，按你的客户端能做什么来选。
+
+### 路一：在模型下拉里选（推荐，任何客户端都能用）
+
+刷新一次模型列表后，每个非默认档会变成一条**独立模型**：
+
+| 模型 id | 上下文 | 说明 |
+|---|---|---|
+| `glm-5.3` | 300K | 默认档，主 id 不变 |
+| `glm-5.3-600k` | 600K | 别名 |
+| `glm-5.3-1m` | 1M | 别名 |
+
+显示名是 `GLM-5.3（1M 上下文）`。**直接在下拉里挑就行**，请求体什么都不用改——
+网关认 id 上的档位，转发前把模型名换回 `glm-5.3` 并带上 `contextLength`。
+
+> DSH、各类 IDE、手机端都属于这一类：它们只能挑模型名，改不了请求体。
+
+### 路二：请求体里传 `context_length`
+
+能自己拼请求的场景（脚本、curl、OpenAI SDK 的 `extra_body`）：
 
 ```json
 POST /v1/chat/completions
-{ "model": "glm-5.3", "context_length": 1000000, "messages": [...] }
+{
+  "model": "glm-5.3",
+  "context_length": 1000000,
+  "messages": [{ "role": "user", "content": "..." }]
+}
 ```
 
 网关把它换成上游认的 **camelCase** `contextLength` 再发。
+同时支持 `contextLength` 直传（会被同样校验）。
+
+优先级：**请求体里的值 > 模型别名上的档位 > 上游默认档**。
+
+### 路三：什么都不点
+
+不发这个字段，上游按 `defaultLength` 跑（glm-5.3 是 300K）。
+行为与本补丁之前完全一致。
+
+### 一句话对照
+
+```powershell
+# 1. 先刷新模型列表（否则别名还不存在）
+#    网页：平台详情 → 模型列表 → 刷新
+
+# 2. 然后正常调用，模型名带档位后缀即可
+curl http://127.0.0.1:3001/v1/chat/completions \
+  -H "Authorization: Bearer sk-你的网关密钥" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm-5.3-1m","messages":[{"role":"user","content":"你好"}]}'
+```
 
 ### ⚠️ 一条必须记住的边界
 

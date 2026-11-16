@@ -762,6 +762,80 @@ export function pickWorkbuddyContextLength(meta, requested) {
 }
 
 /**
+ * 档位数值 → 模型 id 后缀（300000 → `300k`，1000000 → `1m`）。
+ *
+ * 用 k/m 而不是原数字：模型 id 会出现在客户端的下拉列表里，
+ * `glm-5.3-1000000` 读起来像型号，`glm-5.3-1m` 一眼就是「1M 上下文」。
+ */
+export function contextTierLabel(n) {
+  const v = Number(n)
+  if (!Number.isFinite(v) || v <= 0) return String(n)
+  if (v % 1000000 === 0) return `${v / 1000000}m`
+  if (v % 1000 === 0) return `${v / 1000}k`
+  return String(v)
+}
+
+/**
+ * 把「多档上下文」展开成独立的模型 id。
+ *
+ * 背景：请求体里的 `context_length` 只有能改请求体的客户端才用得上。
+ * DSH、各类 IDE、手机端这些都只能从模型下拉里挑一个 id —— 它们在
+ * 「怎么换上下文」这件事上完全没有入口。所以给每个非默认档生成一个别名：
+ *
+ *   glm-5.3            → 默认档 300000
+ *   glm-5.3-600k       → 600000
+ *   glm-5.3-1m         → 1000000
+ *
+ * 别名与既有的 realm 别名（`glm-5.3-intl`）走同一套机制：目录里多一条记录，
+ * `model_upstream_id` 里映射回上游 id，转发前换回真名。
+ *
+ * 默认档不生成别名 —— 主 id 已经代表它，再造一个同义 id 只会让下拉列表里
+ * 出现两个完全一样的东西。
+ *
+ * @param {Array} models mergeWorkbuddyCatalogs 产出的模型列表
+ * @returns {{models: Array, upstream: object, realmById: object}}
+ */
+export function expandContextTierModels(models) {
+  const list = Array.isArray(models) ? models : []
+  const taken = new Set(list.filter((m) => m && m.id).map((m) => m.id))
+  const out = []
+  const upstream = {}
+  const realmById = {}
+
+  for (const m of list) {
+    if (!m || !m.id) continue
+    out.push(m)
+    const options = Array.isArray(m.context_options) ? m.context_options : []
+    if (options.length < 2) continue
+    const baseContext = Number(m.context)
+    const baseId = m.upstream_id || m.id
+    for (const tier of options) {
+      const value = Number(tier)
+      if (!Number.isFinite(value) || value <= 0) continue
+      // 默认档用主 id 表达，不再造别名
+      if (Number.isFinite(baseContext) && value === baseContext) continue
+      const alias = `${m.id}-${contextTierLabel(value)}`
+      // 上游自己可能就是叫这个名字：已经存在就跳过，别覆盖别人的 id
+      if (taken.has(alias)) continue
+      taken.add(alias)
+      out.push({
+        ...m,
+        id: alias,
+        name: `${m.name || m.id}（${contextTierLabel(value).toUpperCase()} 上下文）`,
+        context: value,
+        // 这个字段就是转发时要用的档位；见 workbuddy-lane 的 applyWorkbuddyContextLength
+        context_length: value,
+        context_tier_of: baseId,
+        upstream_id: baseId
+      })
+      upstream[alias] = baseId
+      if (m.realm) realmById[alias] = m.realm
+    }
+  }
+  return { models: out, upstream, realmById }
+}
+
+/**
  * 把上游一条模型记录压成网关内部使用的形状（snake_case，前端已按此渲染）。
  *
  * 上游这两个端点给的信息很全（实测每条 20+ 字段），全丢掉只留 id 是浪费：
