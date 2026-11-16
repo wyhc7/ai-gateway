@@ -990,13 +990,30 @@ function modelLabel(p, m) {
 // 实测上游普遍不直接下发 contextWindow（国内 0/33 条有），后端会回落
 // 到 maxInputTokens 等写法；全都取不到时这里写「未知」——
 // 比留空白好，留白会让人以为是刷新失败了。
+//
+// 多档上下文（2026-11 新发现）：部分模型上游下发 supportedLengths，
+// 例如 glm-5.3 有 300K / 600K / 1M 三档。只显示一个数会让人以为
+// 「网关只支持 300K」，所以这里标出「可选」并列出全部档位。
+// 后端把该数组放在 context_options，调用方按 context_length 点档。
+function contextOptions(m) {
+  const list = Array.isArray(m?.context_options) ? m.context_options : []
+  return list.map((v) => Number(v)).filter((v) => Number.isFinite(v) && v > 0)
+}
+
 function contextText(m) {
   const n = Number(m?.context)
-  return Number.isFinite(n) && n > 0 ? fmtTokens(m.context) : '未知'
+  const opts = contextOptions(m)
+  const base = Number.isFinite(n) && n > 0 ? fmtTokens(m.context) : '未知'
+  if (opts.length > 1) return `${base} · 可选 ${opts.map((v) => fmtTokens(v)).join('/')}`
+  return base
 }
 
 function contextTitle(m) {
   const n = Number(m?.context)
+  const opts = contextOptions(m)
+  if (opts.length > 1) {
+    return `上下文窗口默认 ${m.context} tokens；可选 ${opts.join(' / ')} tokens（调用时传 context_length 选档）`
+  }
   if (Number.isFinite(n) && n > 0) return `上下文窗口 ${m.context} tokens`
   return '上游未提供该模型的上下文窗口长度'
 }

@@ -718,6 +718,50 @@ export function modelIdOf(raw) {
 }
 
 /**
+ * 取上游声明的**全部**上下文档位（contextWindow.supportedLengths）。
+ *
+ * 实证（2026-11-16，www.codebuddy.cn 企业模型端点）：
+ *   glm-5.3     contextWindow = {defaultLength:300000, supportedLengths:[300000,600000,1000000]}
+ *   glm-4.6     （无 supportedLengths，只有 maxInputTokens:168000）
+ *
+ * 去重 + 升序 + 只留正整数。上游偶尔给字符串，一律 Number 归一 ——
+ * 留一个 "600000" 字符串进目录，前端比较大小与后端校验都会出错。
+ */
+export function supportedContextLengths(raw) {
+  const ctx = raw?.contextWindow || {}
+  const list = Array.isArray(ctx.supportedLengths) ? ctx.supportedLengths : []
+  const nums = new Set()
+  for (const v of list) {
+    const n = Number(v)
+    if (Number.isFinite(n) && n > 0) nums.add(Math.floor(n))
+  }
+  return [...nums].sort((a, b) => a - b)
+}
+
+/**
+ * 从模型的上下文档位里挑一个**合法**的值。
+ *
+ * ⚠️ 为什么必须在这里校验，而不是把用户给的值直接转给上游：
+ * 实测（2026-11-16）对 `contextLength` 传一个不在 supportedLengths 里的值
+ * （如 deepseek-v4-flash 传 600000，它的档位是 [300000,1000000]）会被上游
+ * 判成 403 / 11140「request illegal」，而且这条错误与账号级风控文案同形。
+ * 换句话说：**发错一个数字就可能被当成异常客户端**。
+ * 所以规则是「只发上游明确声明过的值」，其余一律退回默认档、不发送该字段。
+ *
+ * @param {object} meta 目录里的模型记录（可能带 context_options）
+ * @param {number|string} requested 用户想要的档位
+ * @returns {number|null} 合法档位；无档位信息或不合法时返回 null（=不发）
+ */
+export function pickWorkbuddyContextLength(meta, requested) {
+  const n = Number(requested)
+  if (!Number.isFinite(n) || n <= 0) return null
+  const options = Array.isArray(meta?.context_options) ? meta.context_options : []
+  if (options.length === 0) return null
+  const want = Math.floor(n)
+  return options.includes(want) ? want : null
+}
+
+/**
  * 把上游一条模型记录压成网关内部使用的形状（snake_case，前端已按此渲染）。
  *
  * 上游这两个端点给的信息很全（实测每条 20+ 字段），全丢掉只留 id 是浪费：
@@ -756,6 +800,15 @@ export function normalizeModel(raw, providerName) {
   const maxIn = Number(raw.maxInputTokens)
   if (Number.isFinite(ctxLen) && ctxLen > 0) out.context = Math.floor(ctxLen)
   else if (Number.isFinite(maxIn) && maxIn > 0) out.context = Math.floor(maxIn)
+  // 多档上下文：上游对部分模型下发 contextWindow.supportedLengths，
+  // 例如 glm-5.3 = [300000, 600000, 1000000]。这是上游明确给的事实，
+  // 以前只取 defaultLength 就把它整个丢掉了 —— 用户在官方客户端里能选
+  // 128K/300K/1M，到了网关只剩一个数，看起来像是「网关不支持」。
+  //
+  // 只有**多于一个**档位时才写：只有一个值的时候「可选」没有意义，
+  // 写进目录只会让前端多渲染一个假的选项。
+  const options = supportedContextLengths(raw)
+  if (options.length > 1) out.context_options = options
   if (raw.supportsImages !== undefined) out.images = Boolean(raw.supportsImages)
   if (raw.supportsReasoning !== undefined) out.reasoning = Boolean(raw.supportsReasoning)
   if (raw.supportsToolCall !== undefined) out.tools = Boolean(raw.supportsToolCall)

@@ -13,7 +13,9 @@ import {
   WORKBUDDY_UA,
   normalizeWorkbuddyDomain,
   workbuddyRealm,
-  workbuddyRealmFor
+  workbuddyRealmFor,
+  workbuddyProductFor,
+  pickWorkbuddyContextLength
 } from './workbuddy-core.js'
 import { rewriteWorkbuddySystemFingerprints } from './workbuddy-fingerprint.js'
 import {
@@ -78,14 +80,22 @@ export function isWorkbuddyProtocol(protocol) {
 // Request-ID 与 Message-ID 同值，Conversation-ID 独立。
 export function workbuddyHeaders(key = {}) {
   const messageId = randomUUID()
-  // 插件身份头必须在最后并进来：它们是「让请求贴近本机 CodeBuddy 插件」的
-  // 那组伪装，见 workbuddy-compat.js。放在这里而不是 proxy 里，是因为它们
-  // 与 UA / Referer 属于同一件事——客户端自称是谁。
+  const product = workbuddyProductFor(key.domain)
+  // 产品身份头：`X-Product-Code` 与 UA / Referer 是同一件事（客户端自称是谁），
+  // 而这两个常量在 workbuddy-core.js 里一直只定义、从未真正发出去。
+  // 实测（2026-11-16，www.codebuddy.cn /v2/chat/completions）：只带 UA 与
+  // X-Domain 时基线请求回 403 / 11140「request illegal」；补上
+  // `X-Product-Code: codebuddy` 后同一账号同一请求回 200。
+  // 值按账号 realm 取（国际版是 workbuddy），见 WORKBUDDY_PRODUCTS。
+  //
+  // 插件身份头由 withPluginIdentity 在最外层并进来，见 workbuddy-compat.js。
   return withPluginIdentity({
     'X-User-Id': String(key.uid || ''),
     'X-Domain': normalizeWorkbuddyDomain(key.domain),
     'User-Agent': WORKBUDDY_UA,
     Referer: `${workbuddyRealm(key.domain).referer}/`,
+    'X-Product-Code': product.productCode,
+    'X-Product': product.deploymentType,
     'X-Conversation-ID': randomUUID(),
     'X-Conversation-Request-ID': messageId,
     'X-Conversation-Message-ID': messageId
@@ -202,6 +212,64 @@ export function applyWorkbuddyMaxOutput(obj, modelMeta) {
 }
 
 // ---------------------------------------------------------------------------
+// 上下文档位：只有上游声明过的值才准发
+// ---------------------------------------------------------------------------
+
+/**
+ * 按调用方点名的档位设置上游的 `contextLength`。
+ *
+ * 背景（2026-11-16 实测）：部分模型在上游目录里带多档上下文
+ * （glm-5.3 = 300000 / 600000 / 1000000），请求体里用 **camelCase 的
+ * `contextLength`** 选择；snake_case 的 `context_length` 会被当成未知字段
+ * 静默忽略（实测 HTTP 200 但档位没变）。所以对外用 snake_case 保持
+ * OpenAI 风格的输入习惯，转发前换成上游认的那个名字。
+ *
+ * ⚠️ 校验必须在本地做，理由见 pickWorkbuddyContextLength 的注释：
+ * 传一个不在档位表里的值，上游回的是 403/11140，和账号级风控同形，
+ * 排查时会被误判成「号被限制了」。
+ *
+ * 三种情形的处理：
+ *  - 模型没有档位信息（上游没声明）→ 一个字段都不发，维持上游默认；
+ *  - 用户点名的值不在档位表里 → 不发送，并返回 reason 让调用方能提示；
+ *  - 合法 → 发送 contextLength。
+ *
+ * 无论哪种情形，输入里的 `context_length` / `contextLength` 都会被摘掉：
+ * 前者上游不认（留着只是噪声），后者不该由客户端绕过校验直接透传。
+ *
+ * @param {object} obj 请求体（就地改写）
+ * @param {object} modelMeta 目录记录
+ * @returns {{requested: number|null, applied: number|null, reason: string|null}}
+ */
+export function applyWorkbuddyContextLength(obj, modelMeta) {
+  const result = { requested: null, applied: null, reason: null }
+  if (!obj || typeof obj !== 'object') return result
+
+  const raw = obj.context_length ?? obj.contextLength
+  delete obj.context_length
+  delete obj.contextLength
+  if (raw === undefined || raw === null || raw === '') return result
+
+  const requested = Number(raw)
+  if (!Number.isFinite(requested) || requested <= 0) {
+    result.reason = 'context_length 不是正整数，已忽略'
+    return result
+  }
+  result.requested = Math.floor(requested)
+
+  const applied = pickWorkbuddyContextLength(modelMeta, result.requested)
+  if (applied === null) {
+    const options = Array.isArray(modelMeta?.context_options) ? modelMeta.context_options : []
+    result.reason = options.length === 0
+      ? '该模型没有可选上下文档位，已忽略 context_length'
+      : `context_length=${result.requested} 不在可选档位（${options.join(' / ')}）内，已回退默认档`
+    return result
+  }
+  obj.contextLength = applied
+  result.applied = applied
+  return result
+}
+
+// ---------------------------------------------------------------------------
 // 内容级闸门：交给 workbuddy-prompt-relocate.js 的「搬家」
 //
 // 这里曾经有两版补丁，都被上游的归一化吃掉了：
@@ -232,6 +300,10 @@ export function shapeWorkbuddyBody(body = {}, modelMeta = null, realm = null) {
   ensureWorkbuddySystemFirst(obj)
   forceWorkbuddyMaxThinking(obj)
   applyWorkbuddyMaxOutput(obj, modelMeta)
+  // 上下文档位：放在 max_tokens 之后、搬家之前。它只改请求体顶层的
+  // contextLength，与消息内容无关，位置不影响其它步骤；写在这里是为了
+  // 让「按模型元数据整形」的几件事挨在一起。
+  applyWorkbuddyContextLength(obj, modelMeta)
   // 腾讯的内容级风控：system 里的已知模板句会被 400/11128 拦下。
   // 放在搬家之前，改的是「还是 system 身份」的那些消息。
   rewriteWorkbuddySystemFingerprints(obj)

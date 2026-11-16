@@ -299,6 +299,72 @@ export function jsonTotalTimeout(maxTokens, stream) {
   const byTokens = Number.isFinite(maxTokens) && maxTokens > 0 ? maxTokens * JSON_LONG_MS_PER_TOKEN : 0
   return Math.min(STREAM_TOTAL_TIMEOUT_MS, Math.max(JSON_TOTAL_TIMEOUT_MS, byTokens))
 }
+
+// ---------------------------------------------------------------------------
+// 长上下文的「预填充」不是免费的：等响应头的时间必须随输入规模放大
+//
+// 现象：上下文一长，客户端就收到「上游请求超时」。
+//
+// 根因不在总时长，而在**单次等响应头**那 80 秒（CONNECT_TIMEOUT_MS）：
+// 大上下文请求发出后，上游要先把整个输入 prefill 完才会吐第一个字节，
+// 这期间一个包都没有。30 万 token 的输入在腾讯侧要几十秒到几分钟，
+// 80 秒一到网关就把连接掐掉，记成一次「超时」，然后换 Key 重来 ——
+// 同一个账号重试同一段大输入，依旧超时，用户只看到一串超时。
+//
+// 所以这里按输入规模线性放大等响应头的预算：
+//   基础 80s + 每 1 万输入 token 再加 PRE_HEADER_MS_PER_10K_TOKENS（默认 3s）
+// 上限 CONNECT_TIMEOUT_MAX_MS（默认 10 分钟，可用环境变量调）。
+// 30 万 token → 80 + 90 = 170 秒；96 万 token → 80 + 288 = 368 秒。
+// 取值偏保守地「大方」：等待的代价只是慢，掐断的代价是彻底失败。
+//
+// ⚠️ 只放大「等响应头」，不放宽空闲超时与总时长：等到了头之后，
+// 仍然由 STREAM_IDLE_TIMEOUT_MS 与 totalTimeout 管，避免把挂死的连接一起放宽。
+const PRE_HEADER_MS_PER_10K_TOKENS = Number(process.env.PRE_HEADER_MS_PER_10K_TOKENS || 3000)
+export const CONNECT_TIMEOUT_MAX_MS = toMs(process.env.CONNECT_TIMEOUT_MAX_MS, 600000)
+
+/**
+ * 估算一次请求的**输入** token 数（消息正文 + 工具 schema）。
+ *
+ * 只用于放大超时预算，不需要精确：宁可高估（多等一会儿），
+ * 也不要低估（把正在 prefill 的长上下文掐断）。
+ */
+export function estimateInputTokens(body) {
+  if (!body || typeof body !== 'object') return 0
+  let text = ''
+  const msgs = Array.isArray(body.messages) ? body.messages : Array.isArray(body.input) ? body.input : []
+  for (const m of msgs) {
+    if (typeof m === 'string') { text += m; continue }
+    if (!m || typeof m !== 'object') continue
+    const c = m.content
+    if (typeof c === 'string') text += c
+    else if (Array.isArray(c)) {
+      for (const part of c) if (part && typeof part.text === 'string') text += part.text
+    } else if (typeof m.text === 'string') text += m.text
+  }
+  // 工具 schema 也进上下文，量大时不可忽略（DSH 的 77 个工具约 2.7 万 token）
+  if (Array.isArray(body.tools) && body.tools.length) {
+    try { text += JSON.stringify(body.tools) } catch { /* 忽略循环引用等异常 */ }
+  }
+  return estimateTokens(text)
+}
+
+/**
+ * 单次「等响应头」的预算：随输入规模放大，并被总预算与硬上限夹住。
+ *
+ * @param {number} inputTokens 输入 token 估算
+ * @param {number} [totalBudgetMs] 本次请求的总预算（流式是 30 分钟）
+ */
+export function connectTimeoutFor(inputTokens, totalBudgetMs) {
+  const tokens = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0
+  const extra = (tokens / 10000) * PRE_HEADER_MS_PER_10K_TOKENS
+  const scaled = CONNECT_TIMEOUT_MS + extra
+  const bounded = Math.min(scaled, CONNECT_TIMEOUT_MAX_MS)
+  // 总预算比基础值还小时（例如运营把 JSON_TOTAL_TIMEOUT_MS 调到很小），
+  // 仍然给基础值：否则每次尝试只剩几十毫秒，任何上游都必然失败。
+  if (!Number.isFinite(totalBudgetMs) || totalBudgetMs <= 0) return Math.round(bounded)
+  return Math.round(Math.min(bounded, Math.max(totalBudgetMs, CONNECT_TIMEOUT_MS)))
+}
+
 // 心跳间隔必须小于链路上最短空闲超时的一半，否则中间设备会先于网关切断连接。
 // Nginx 默认 proxy_read_timeout 为 60 秒，这里取 15 秒留足余量。
 const SSE_HEARTBEAT_INTERVAL_MS = toMs(process.env.SSE_HEARTBEAT_INTERVAL_MS, 15000)
@@ -469,6 +535,39 @@ export function workbuddyUpstreamBody(provider, body) {
 function workbuddyModelMeta(provider, model) {
   const list = Array.isArray(provider?.models) ? provider.models : []
   return list.find((m) => m && m.id === model) || null
+}
+
+/**
+ * 毫秒 → 报错文案里的人读秒数。
+ *
+ * 小于 10 秒时留一位小数：测试与运维把预算调到几百毫秒时，
+ * Math.round 会把 400ms 说成「0 秒」—— 那种文案比没有还糟。
+ */
+function fmtSeconds(ms) {
+  const s = Number(ms) / 1000
+  if (!Number.isFinite(s) || s <= 0) return '0'
+  return s >= 10 ? String(Math.round(s)) : String(Math.round(s * 10) / 10)
+}
+
+/**
+ * 这次请求实际会用到多大的 max_tokens —— 决定非流式该给多久的总预算。
+ *
+ * 为什么不能只看 `body.max_tokens`：整形会按模型元数据补上限
+ * （workbuddy-lane 的 applyWorkbuddyMaxOutput），补在**副本**上，原始 body
+ * 不会变。于是「客户端没传 max_tokens」的请求会被算成 2 分钟兜底值，
+ * 而实际要生成 6.4 万 token —— 长回答必然被掐断。
+ *
+ * 取值顺序：客户端原值 → 目录里的 max_output（整形正是用同一个值）。
+ * 不去解析序列化后的 body：那要 JSON.parse 一个可能几 MB 的字符串，
+ * 而结论完全一样。别名模型的元数据要按**上游 id** 查。
+ */
+function effectiveMaxTokens(provider, body) {
+  if (Number.isFinite(body?.max_tokens) && body.max_tokens > 0) return body.max_tokens
+  if (!isWorkbuddyProtocol(provider?.protocol)) return undefined
+  const upstream = workbuddyUpstreamBody(provider, body)
+  const meta = workbuddyModelMeta(provider, upstream?.model) || workbuddyModelMeta(provider, body?.model)
+  const max = Number(meta?.max_output)
+  return Number.isFinite(max) && max > 0 ? max : undefined
 }
 
 function serializeUpstreamBody(provider, body) {
@@ -1180,25 +1279,48 @@ async function forwardWithFailover(provider, kind, body, res) {
     return true
   }
 
-  // 生图不走对话的时间预算：图片生成动辄几十秒甚至数分钟，
-  // 用 token 数推算时长对它毫无意义，直接给独立的固定预算。
-  const totalTimeoutMs = kind === 'images' ? IMAGES_TOTAL_TIMEOUT_MS : jsonTotalTimeout(body?.max_tokens, body?.stream)
-  // 等响应头的全程截止：单次尝试的 30 秒只是每次的上限，累计不得超过这个预算。
-  const preHeaderDeadline = Date.now() + Math.min(totalTimeoutMs, PRE_HEADER_TIMEOUT_MS)
-  // 客户端已断开（关页面、中止请求）就停止切换 Key。否则每个 Key 还要白等
-  // CONNECT_TIMEOUT_MS，几十个 Key 空转几十分钟，上游也跟着白挨打。
-  let clientGone = false
-  if (typeof res.on === 'function') res.on('close', () => { clientGone = true })
   // 生图的请求体就是客户端原样发来的 OpenAI 生图参数（prompt / size / n 等），
   // 不需要像对话那样做协议转换（Responses ↔ chat/completions），原样透传即可。
   let upstreamBody = kind === 'chat' ? serializeUpstreamBody(provider, body) : kind === 'images' ? JSON.stringify(body) : undefined
+
+  // 生图不走对话的时间预算：图片生成动辄几十秒甚至数分钟，
+  // 用 token 数推算时长对它毫无意义，直接给独立的固定预算。
+  //
+  // 对话侧的总预算必须在**序列化之后**算：整形会按模型元数据补上 max_tokens
+  // （见 workbuddy-lane 的 applyWorkbuddyMaxOutput），而这个上限决定生成要多久。
+  // 以前在整形之前就按客户端传的 max_tokens 算，workbuddy 这类「客户端不传
+  // max_tokens」的渠道拿到的永远是 2 分钟兜底值，长回答会被拦腰截断。
+  const totalTimeoutMs = kind === 'images'
+    ? IMAGES_TOTAL_TIMEOUT_MS
+    : jsonTotalTimeout(effectiveMaxTokens(provider, body), body?.stream)
+
+  // 输入规模决定「等响应头」能给多久：长上下文的 prefill 期间上游一个包都不发。
+  const inputTokens = kind === 'chat' ? estimateInputTokens(body) : 0
+  const connectBudgetMs = connectTimeoutFor(inputTokens, totalTimeoutMs)
+  // 等响应头的**全程**截止：单次尝试只是每次上限，累计不得超过这个预算。
+  // 下限沿用 PRE_HEADER_TIMEOUT_MS（要容得下至少两次完整尝试），长上下文时
+  // 按「两次单次预算」抬高 —— 只按一次抬高的话，第一次尝试刚超时、
+  // 第二次立刻被「累计预算已用完」拦下，等于白白浪费了一次换 Key 的机会。
+  const preHeaderBudgetMs = Math.max(PRE_HEADER_TIMEOUT_MS, connectBudgetMs * 2)
+  const preHeaderDeadline = Date.now() + Math.min(totalTimeoutMs, preHeaderBudgetMs)
+  // 客户端已断开（关页面、中止请求）就停止切换 Key。否则每个 Key 还要白等
+  // 一次等响应头的预算，几十个 Key 空转几十分钟，上游也跟着白挨打。
+  let clientGone = false
+  if (typeof res.on === 'function') res.on('close', () => { clientGone = true })
   for (let i = 0; i < keys.length; i += 1) {
     if (clientGone) {
       attempts.push('客户端已断开，停止切换 Key')
       break
     }
     if (Date.now() > preHeaderDeadline) {
-      attempts.push(`等待响应头超过 ${Math.round(Math.min(totalTimeoutMs, PRE_HEADER_TIMEOUT_MS) / 1000)} 秒（已尝试 ${i} 个 Key）`)
+      // 带上输入规模：长上下文超时时，光看「超时」两个字根本分不清是
+      // 上游挂了、还是 prefill 本来就要这么久。数字摆出来才能判断。
+      // 前缀保留「等待响应头超时」的说法：线上日志与客户端提示都在按
+      // 「超时」这类词定位问题，改措辞会让既有排查经验突然失效。
+      attempts.push(
+        `等待响应头超过 ${fmtSeconds(Math.min(totalTimeoutMs, preHeaderBudgetMs))} 秒` +
+        `（输入约 ${inputTokens} tokens，已尝试 ${i} 个 Key）`
+      )
       break
     }
     const key = keys[(startIdx + i) % keys.length]
@@ -1217,16 +1339,20 @@ async function forwardWithFailover(provider, kind, body, res) {
     const upstream = joinUrl(effectiveBaseUrl(provider, key), path, queryAuth(plan, token))
     const controller = new AbortController()
     let timer = null
+    // 这次尝试是否已经拿到响应头。超时排查时，「等头超时」与「转发中途断」
+    // 是完全不同的两件事：前者是 prefill 太久或上游不接，后者是链路抖动。
+    let sawHeaders = false
     try {
-      // 连接与等待响应头阶段用短超时：上游半开连接时快速失败并切换 Key，
-      // 而不是让客户端挂到总时长超时（此前为 30 分钟）
-      timer = setTimeout(() => controller.abort(), CONNECT_TIMEOUT_MS)
+      // 连接与等待响应头阶段的超时：按输入规模放大（见 connectTimeoutFor），
+      // 上游半开连接时快速失败并切换 Key，而不是让客户端挂到总时长超时。
+      timer = setTimeout(() => controller.abort(), connectBudgetMs)
       const resp = await fetch(upstream, {
         method: kind === 'chat' || kind === 'images' ? 'POST' : plan.modelsMethod,
         headers: buildHeaders(provider, plan, token, key),
         body: upstreamBody,
         signal: controller.signal,
       })
+      sawHeaders = true
       // 11128 时落盘完整请求体 —— 这是唯一能精确复现的素材。
       // 不挂在 WORKBUDDY_DEBUG_DUMP 开关下：那个开关是给人看日志用的，
       // 而这份文件是「等下一次 11128 自己掉下来」的证据，必须每次都存。
@@ -1713,7 +1839,16 @@ async function forwardWithFailover(provider, kind, body, res) {
       markResult(provider.id, true)
       return { ok: true, keyName: usedKeyName, usage: usageOut, tokensEstimated }
     } catch (err) {
-      const msg = err.name === 'AbortError' ? '上游请求超时' : `网络错误: ${err.message}`
+      // 区分两个阶段，否则长上下文永远只看到一句「超时」，无法判断到底是
+      // 「上游没接」还是「prefill 太久」：
+      //  - 还没拿到响应头就 abort → 等响应头超时，把输入规模与预算写出来；
+      //  - 已拿到头、转发中途 abort → 链路中断。
+      const msg = err.name === 'AbortError'
+        ? (sawHeaders
+            ? `上游请求超时（已收到响应头，转发中途中断，总预算 ${fmtSeconds(totalTimeoutMs)} 秒）`
+            : `上游请求超时：${fmtSeconds(connectBudgetMs)} 秒内没有开始响应（输入约 ${inputTokens} tokens，` +
+              `长上下文预填充可能超过预算；可用 CONNECT_TIMEOUT_MAX_MS / PRE_HEADER_MS_PER_10K_TOKENS 调大）`)
+        : `网络错误: ${err.message}`
       if (started) {
         applyCooldown(provider, key, 'network')
         if (!res.writableEnded) res.end()
